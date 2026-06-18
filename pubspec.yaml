@@ -1,0 +1,23 @@
+name: licznik_treningu
+version: 0.1.0+1
+publish_to: 'none'
+description: Rozbudowana aplikacja treningowa kompatybilna z backendem Licznika Kalorii.
+
+environment:
+  sdk: '>=3.4.0 <4.0.0'
+
+dependencies:
+  flutter:
+    sdk: flutter
+  http: ^1.2.2
+  shared_preferences: ^2.3.2
+
+flutter:
+  uses-material-design: true
+dev_dependencies:
+  flutter_launcher_icons: ^0.14.4
+
+flutter_launcher_icons:
+  android: true
+  ios: false
+  image_path: "assets/icon/icon.png"
