@@ -22,6 +22,11 @@ void main() {
         trainingGoals: ['Siła', 'Masa mięśniowa'],
         avoidWhen: ['Ostry ból kolana'],
         alternatives: ['Przysiad do ławki'],
+        executionSteps: ['Ustaw stopy.', 'Wykonaj przysiad.'],
+        breathing: 'Wdech w dół, wydech w górę.',
+        tempo: '3–1–1',
+        easierVersion: 'Przysiad do ławki.',
+        harderVersion: 'Przysiad z obciążeniem.',
       );
 
       final restored = Exercise.fromJson(exercise.toJson());
@@ -36,6 +41,11 @@ void main() {
       expect(restored.typedTrainingGoals, contains(TrainingGoal.strength));
       expect(restored.avoidWhen, contains('Ostry ból kolana'));
       expect(restored.alternatives, contains('Przysiad do ławki'));
+      expect(restored.executionSteps, hasLength(2));
+      expect(restored.breathing, contains('wydech'));
+      expect(restored.tempo, '3–1–1');
+      expect(restored.easierVersion, 'Przysiad do ławki.');
+      expect(restored.harderVersion, 'Przysiad z obciążeniem.');
     });
 
     test('WorkoutSession calculates volume from explicit sets', () {

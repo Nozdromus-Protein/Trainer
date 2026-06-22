@@ -19,6 +19,11 @@ class Exercise {
     this.trainingGoals = const [],
     this.avoidWhen = const [],
     this.alternatives = const [],
+    this.executionSteps = const [],
+    this.breathing = '',
+    this.tempo = '',
+    this.easierVersion = '',
+    this.harderVersion = '',
     this.imageUrl,
     this.source = 'local',
   });
@@ -40,6 +45,11 @@ class Exercise {
   final List<String> trainingGoals;
   final List<String> avoidWhen;
   final List<String> alternatives;
+  final List<String> executionSteps;
+  final String breathing;
+  final String tempo;
+  final String easierVersion;
+  final String harderVersion;
   final String? imageUrl;
   final String source;
 
@@ -78,6 +88,11 @@ class Exercise {
     List<String>? trainingGoals,
     List<String>? avoidWhen,
     List<String>? alternatives,
+    List<String>? executionSteps,
+    String? breathing,
+    String? tempo,
+    String? easierVersion,
+    String? harderVersion,
     String? imageUrl,
     String? source,
   }) {
@@ -99,6 +114,11 @@ class Exercise {
       trainingGoals: trainingGoals ?? this.trainingGoals,
       avoidWhen: avoidWhen ?? this.avoidWhen,
       alternatives: alternatives ?? this.alternatives,
+      executionSteps: executionSteps ?? this.executionSteps,
+      breathing: breathing ?? this.breathing,
+      tempo: tempo ?? this.tempo,
+      easierVersion: easierVersion ?? this.easierVersion,
+      harderVersion: harderVersion ?? this.harderVersion,
       imageUrl: imageUrl ?? this.imageUrl,
       source: source ?? this.source,
     );
@@ -122,6 +142,11 @@ class Exercise {
         'trainingGoals': trainingGoals,
         'avoidWhen': avoidWhen,
         'alternatives': alternatives,
+        'executionSteps': executionSteps,
+        'breathing': breathing,
+        'tempo': tempo,
+        'easierVersion': easierVersion,
+        'harderVersion': harderVersion,
         'imageUrl': imageUrl,
         'source': source,
       };
@@ -152,6 +177,11 @@ class Exercise {
         trainingGoals: _stringList(json['trainingGoals']),
         avoidWhen: _stringList(json['avoidWhen']),
         alternatives: _stringList(json['alternatives']),
+        executionSteps: _stringList(json['executionSteps']),
+        breathing: json['breathing']?.toString() ?? '',
+        tempo: json['tempo']?.toString() ?? '',
+        easierVersion: json['easierVersion']?.toString() ?? '',
+        harderVersion: json['harderVersion']?.toString() ?? '',
         imageUrl: _nullableText(json['imageUrl']),
         source: json['source']?.toString() ?? 'custom',
       );

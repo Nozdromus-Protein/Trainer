@@ -262,6 +262,42 @@ class AppStore extends ChangeNotifier {
     notifyListeners();
   }
 
+  Future<bool> addExerciseToPlan({
+    required String exerciseId,
+    required String planId,
+    required int weekday,
+  }) async {
+    final planIndex = plans.indexWhere((plan) => plan.id == planId);
+    if (planIndex < 0) return false;
+    final plan = plans[planIndex];
+    final dayIndex = plan.days.indexWhere((day) => day.weekday == weekday);
+    if (dayIndex < 0) return false;
+    final day = plan.days[dayIndex];
+    if (day.items.any((item) => item.exerciseId == exerciseId)) {
+      return false;
+    }
+
+    final exercise = ExerciseRepo.byId(exerciseId, customExercises);
+    final updatedDay = day.copyWith(
+      items: [
+        ...day.items,
+        PlanItem(
+          exerciseId: exercise.id,
+          sets: exercise.defaultSets,
+          reps: exercise.defaultReps,
+          durationSec: exercise.defaultDurationSec,
+          note: 'Dodano z bazy ćwiczeń',
+        ),
+      ],
+    );
+    final updatedDays = [...plan.days];
+    updatedDays[dayIndex] = updatedDay;
+    plans[planIndex] = plan.copyWith(days: updatedDays);
+    await savePlans();
+    notifyListeners();
+    return true;
+  }
+
   void setSelectedDate(DateTime date) {
     selectedDate = DateTime(date.year, date.month, date.day);
     notifyListeners();
@@ -1159,6 +1195,11 @@ class ExerciseRepo {
       trainingGoals: exercise.trainingGoals.isEmpty ? _goalsFor(exercise) : exercise.trainingGoals,
       avoidWhen: exercise.avoidWhen.isEmpty ? _avoidWhenFor(exercise) : exercise.avoidWhen,
       alternatives: exercise.alternatives.isEmpty ? _alternativesFor(exercise) : exercise.alternatives,
+      executionSteps: exercise.executionSteps.isEmpty ? _executionStepsFor(exercise) : exercise.executionSteps,
+      breathing: exercise.breathing.isEmpty ? _breathingFor(exercise) : exercise.breathing,
+      tempo: exercise.tempo.isEmpty ? _tempoFor(exercise) : exercise.tempo,
+      easierVersion: exercise.easierVersion.isEmpty ? _easierVersionFor(exercise) : exercise.easierVersion,
+      harderVersion: exercise.harderVersion.isEmpty ? _harderVersionFor(exercise) : exercise.harderVersion,
     );
   }
 
@@ -1236,6 +1277,105 @@ class ExerciseRepo {
       'Wariant z gumą oporową',
       'Wariant bez dodatkowego ciężaru',
     ];
+  }
+
+  static List<String> _executionStepsFor(Exercise exercise) {
+    final type = exercise.illustrationType.toLowerCase();
+    if (exercise.defaultDurationSec > 0 && (type.contains('run') || type.contains('bike') || exercise.category.toLowerCase().contains('kardio'))) {
+      return [
+        'Ustaw bezpieczną pozycję i rozpocznij od spokojnego tempa.',
+        'Utrzymuj stabilny tułów, swobodną pracę ramion i miękkie lądowanie lub płynny nacisk.',
+        'Stopniowo wejdź na zaplanowaną intensywność bez gwałtownego przyspieszania.',
+        'Zakończ spokojnym zwolnieniem tempa i wyrównaniem oddechu.',
+      ];
+    }
+    if (exercise.defaultDurationSec > 0) {
+      return [
+        'Ustaw stawy w stabilnej pozycji i napnij mięśnie brzucha.',
+        'Przyjmij pozycję opisaną dla ćwiczenia bez bólu i przeprostu.',
+        'Utrzymuj równomierne napięcie przez zaplanowany czas.',
+        'Zakończ pozycję spokojnie, bez nagłego rozluźnienia.',
+      ];
+    }
+    if (type.contains('squat') || type.contains('lunge')) {
+      return [
+        'Ustaw stopy stabilnie i napnij brzuch przed rozpoczęciem ruchu.',
+        'Rozpocznij zejście, prowadząc biodra i kolana zgodnie z kierunkiem palców stóp.',
+        'Zejdź tylko do zakresu, w którym utrzymujesz neutralny tułów i pełną kontrolę.',
+        'Odepchnij podłoże całą stopą i wróć do pozycji startowej bez blokowania kolan.',
+      ];
+    }
+    if (type.contains('deadlift') || type.contains('row') || type.contains('hipthrust')) {
+      return [
+        'Ustaw ciężar blisko ciała, napnij brzuch i ustabilizuj łopatki.',
+        'Rozpocznij ruch z bioder, utrzymując neutralną pozycję kręgosłupa.',
+        'Wykonaj fazę główną bez szarpania i bez utraty napięcia tułowia.',
+        'Wróć kontrolowanie, prowadząc ciężar tą samą drogą.',
+      ];
+    }
+    if (type.contains('push') || type.contains('press') || type.contains('dips')) {
+      return [
+        'Ustaw dłonie i barki stabilnie, a łopatki utrzymuj pod kontrolą.',
+        'Napnij brzuch i ustaw całe ciało w pewnej pozycji startowej.',
+        'Wykonaj wypchnięcie bez unoszenia barków do uszu i bez przeprostu lędźwi.',
+        'Wróć powoli do pozycji startowej, zachowując napięcie.',
+      ];
+    }
+    if (type.contains('pull') || type.contains('curl')) {
+      return [
+        'Przyjmij stabilną pozycję i ustaw barki z dala od uszu.',
+        'Rozpocznij ruch pracą docelowych mięśni, bez zamachu tułowiem.',
+        'Doprowadź ruch do pełnego, bezbolesnego zakresu i krótko zatrzymaj napięcie.',
+        'Opuść ciężar lub ciało wolniej, zachowując kontrolę.',
+      ];
+    }
+    return [
+      'Przyjmij stabilną pozycję startową i przygotuj potrzebny sprzęt.',
+      'Napnij brzuch oraz ustaw stawy w naturalnej, bezbolesnej pozycji.',
+      'Wykonaj ruch płynnie w pełnym kontrolowanym zakresie.',
+      'Wróć spokojnie do pozycji startowej i powtórz bez utraty techniki.',
+    ];
+  }
+
+  static String _breathingFor(Exercise exercise) {
+    final text = '${exercise.category} ${exercise.illustrationType}'.toLowerCase();
+    if (text.contains('kardio') || text.contains('run') || text.contains('bike')) {
+      return 'Oddychaj rytmicznie i swobodnie. Nie wstrzymuj oddechu; przy większej intensywności dopasuj wydech do rytmu ruchu.';
+    }
+    if (exercise.defaultDurationSec > 0) {
+      return 'Oddychaj spokojnie przez cały czas utrzymania pozycji. Krótki wydech pomaga ponownie napiąć brzuch bez rozluźniania sylwetki.';
+    }
+    return 'Weź wdech i ustabilizuj tułów przed fazą opuszczania. Wykonaj wydech podczas najtrudniejszej fazy ruchu.';
+  }
+
+  static String _tempoFor(Exercise exercise) {
+    if (exercise.defaultDurationSec > 0) {
+      return 'Stałe napięcie przez ${exercise.defaultDurationSec} s. Wejście i wyjście z pozycji wykonuj przez 2–3 sekundy.';
+    }
+    if (exercise.category.toLowerCase().contains('kardio')) {
+      return 'Równe, kontrolowane tempo. Przyspieszaj dopiero po rozgrzewce i zwalniaj, gdy technika zaczyna się pogarszać.';
+    }
+    return '3–1–1: około 3 s fazy opuszczania, 1 s kontroli w najtrudniejszej pozycji i 1 s fazy podnoszenia.';
+  }
+
+  static String _easierVersionFor(Exercise exercise) {
+    final type = exercise.illustrationType.toLowerCase();
+    if (type.contains('push')) return 'Pompka na podwyższeniu lub z podparciem kolan.';
+    if (type.contains('pull')) return 'Wariant z gumą oporową albo ściąganie drążka wyciągu.';
+    if (type.contains('squat') || type.contains('lunge')) return 'Wariant do ławki lub z podparciem dłoni.';
+    if (type.contains('deadlift')) return 'Ruch zawiasowy bez ciężaru albo z lekkimi hantlami.';
+    if (exercise.defaultDurationSec > 0) return 'Skróć czas pracy i wybierz pozycję z większą liczbą punktów podparcia.';
+    return 'Zmniejsz ciężar, zakres ruchu lub wykonaj wariant z podparciem.';
+  }
+
+  static String _harderVersionFor(Exercise exercise) {
+    final type = exercise.illustrationType.toLowerCase();
+    if (type.contains('push')) return 'Wariant z obciążeniem, wolniejszym opuszczaniem lub stopami na podwyższeniu.';
+    if (type.contains('pull')) return 'Wariant bez pomocy, z pauzą w górze lub z dodatkowym obciążeniem.';
+    if (type.contains('squat') || type.contains('lunge')) return 'Wariant jednostronny, z pauzą na dole albo dodatkowym obciążeniem.';
+    if (type.contains('deadlift')) return 'Dodaj obciążenie lub wydłuż fazę opuszczania przy zachowaniu neutralnych pleców.';
+    if (exercise.defaultDurationSec > 0) return 'Wydłuż czas pracy, ogranicz punkty podparcia lub dodaj lekkie obciążenie.';
+    return 'Dodaj niewielkie obciążenie, pauzę albo wolniejszą fazę ekscentryczną.';
   }
 }
 
@@ -3279,20 +3419,8 @@ class ExerciseDetailsPage extends StatelessWidget {
     final isHidden = store.isExerciseHidden(exercise.id);
     return Scaffold(
       appBar: AppBar(
-        title: Text(
-          exercise.name,
-          maxLines: 1,
-          overflow: TextOverflow.ellipsis,
-        ),
+        title: const Text('Szczegóły ćwiczenia'),
         actions: [
-          IconButton(
-            tooltip: isFavorite ? 'Usuń z ulubionych' : 'Dodaj do ulubionych',
-            onPressed: () => store.toggleExerciseFavorite(exercise.id),
-            icon: Icon(
-              isFavorite ? Icons.star_rounded : Icons.star_border_rounded,
-              color: isFavorite ? const Color(0xFFFFC857) : null,
-            ),
-          ),
           IconButton(
             tooltip: 'Edytuj ćwiczenie',
             onPressed: () => showCreateExerciseSheet(context, exercise: exercise),
@@ -3302,9 +3430,6 @@ class ExerciseDetailsPage extends StatelessWidget {
             onSelected: (value) {
               if (value == 'visibility') {
                 store.setExerciseHidden(exercise.id, !isHidden);
-              }
-              if (value == 'workout') {
-                showAddWorkoutSheet(context, exercise: exercise);
               }
             },
             itemBuilder: (context) => [
@@ -3318,23 +3443,34 @@ class ExerciseDetailsPage extends StatelessWidget {
                   title: Text(isHidden ? 'Przywróć' : 'Ukryj'),
                 ),
               ),
-              const PopupMenuItem(
-                value: 'workout',
-                child: ListTile(
-                  contentPadding: EdgeInsets.zero,
-                  leading: Icon(Icons.playlist_add_rounded),
-                  title: Text('Dodaj do dziennika'),
-                ),
-              ),
             ],
           ),
         ],
       ),
       body: ListView(
-        padding: const EdgeInsets.all(16),
+        padding: const EdgeInsets.fromLTRB(16, 8, 16, 24),
         children: [
-          ExerciseHeroVisual(exercise: exercise),
+          Text(
+            exercise.name,
+            style: theme.textTheme.headlineMedium?.copyWith(
+              fontWeight: FontWeight.w900,
+              height: 1.05,
+            ),
+          ),
+          const SizedBox(height: 8),
+          Wrap(
+            spacing: 8,
+            runSpacing: 8,
+            children: [
+              MiniTag(text: exercise.primaryMuscle),
+              MiniTag(text: normalizeLevel(exercise.level)),
+              MiniTag(text: exercise.equipment),
+              if (isHidden) const MiniTag(text: 'Ukryte'),
+            ],
+          ),
           const SizedBox(height: 16),
+          _ExerciseMuscleMapPlaceholder(exercise: exercise),
+          const SizedBox(height: 12),
           Card(
             child: Padding(
               padding: const EdgeInsets.all(18),
@@ -3342,7 +3478,7 @@ class ExerciseDetailsPage extends StatelessWidget {
                 crossAxisAlignment: CrossAxisAlignment.start,
                 children: [
                   Text(
-                    'Profil ćwiczenia',
+                    'Najważniejsze informacje',
                     style: theme.textTheme.titleLarge?.copyWith(fontWeight: FontWeight.w900),
                   ),
                   const SizedBox(height: 14),
@@ -3363,25 +3499,8 @@ class ExerciseDetailsPage extends StatelessWidget {
                   ),
                   _ExerciseAttributeRow(
                     icon: Icons.signal_cellular_alt_rounded,
-                    label: 'Poziom',
+                    label: 'Poziom trudności',
                     value: normalizeLevel(exercise.level),
-                  ),
-                  const SizedBox(height: 10),
-                  Text(
-                    'Cele treningowe',
-                    style: theme.textTheme.labelLarge?.copyWith(fontWeight: FontWeight.w900),
-                  ),
-                  const SizedBox(height: 8),
-                  Wrap(
-                    spacing: 8,
-                    runSpacing: 8,
-                    children: [
-                      ...exercise.trainingGoals.map(
-                        (goal) => MiniTag(text: goal),
-                      ),
-                      if (isHidden) const MiniTag(text: 'Ukryte'),
-                      if (exercise.source != 'local') MiniTag(text: exercise.source),
-                    ],
                   ),
                 ],
               ),
@@ -3419,7 +3538,12 @@ class ExerciseDetailsPage extends StatelessWidget {
             ),
           ),
           const SizedBox(height: 12),
-          InfoListCard(title: 'Wskazówki techniczne', icon: Icons.check_circle_outline, items: exercise.tips),
+          _ExerciseExecutionStepsCard(steps: exercise.executionSteps),
+          const SizedBox(height: 12),
+          _ExerciseBreathingTempoCard(
+            breathing: exercise.breathing,
+            tempo: exercise.tempo,
+          ),
           const SizedBox(height: 12),
           InfoListCard(title: 'Najczęstsze błędy', icon: Icons.warning_amber_rounded, items: exercise.commonMistakes),
           const SizedBox(height: 12),
@@ -3429,23 +3553,552 @@ class ExerciseDetailsPage extends StatelessWidget {
             items: exercise.avoidWhen,
           ),
           const SizedBox(height: 12),
-          TechniqueChecklistForExercise(exercise: exercise),
+          _ExerciseVariantsCard(exercise: exercise),
           const SizedBox(height: 12),
           ExerciseSubstitutionsCard(exercise: exercise),
-          const SizedBox(height: 12),
-          ExerciseProgressionCard(exercise: exercise),
-          const SizedBox(height: 12),
-          FilledButton.icon(onPressed: () => showAddWorkoutSheet(context, exercise: exercise), icon: const Icon(Icons.add), label: const Text('Dodaj do dziennika')),
-          const SizedBox(height: 8),
-          OutlinedButton.icon(
-            onPressed: () => analyzeFormDialog(context, exercise),
-            icon: const Icon(Icons.auto_awesome),
-            label: const Text('Analiza techniki przez backend'),
-          ),
         ],
+      ),
+      bottomNavigationBar: _ExerciseDetailsActions(
+        isFavorite: isFavorite,
+        onFavorite: () => store.toggleExerciseFavorite(exercise.id),
+        onAddToPlan: () => showAddExerciseToPlanSheet(context, exercise),
       ),
     );
   }
+}
+
+class _ExerciseMuscleMapPlaceholder extends StatelessWidget {
+  const _ExerciseMuscleMapPlaceholder({required this.exercise});
+
+  final Exercise exercise;
+
+  @override
+  Widget build(BuildContext context) {
+    final theme = Theme.of(context);
+    return Container(
+      constraints: const BoxConstraints(minHeight: 220),
+      decoration: BoxDecoration(
+        gradient: LinearGradient(
+          begin: Alignment.topLeft,
+          end: Alignment.bottomRight,
+          colors: [
+            theme.colorScheme.primaryContainer,
+            theme.colorScheme.surfaceContainerHighest,
+          ],
+        ),
+        borderRadius: BorderRadius.circular(28),
+        border: Border.all(
+          color: theme.colorScheme.primary.withValues(alpha: 0.22),
+        ),
+      ),
+      child: Padding(
+        padding: const EdgeInsets.all(20),
+        child: LayoutBuilder(
+          builder: (context, constraints) {
+            final compact = constraints.maxWidth < 380;
+            final visual = Container(
+              width: compact ? 96 : 126,
+              height: compact ? 130 : 164,
+              decoration: BoxDecoration(
+                color: theme.colorScheme.surface.withValues(alpha: 0.58),
+                borderRadius: BorderRadius.circular(32),
+              ),
+              child: Stack(
+                alignment: Alignment.center,
+                children: [
+                  Icon(
+                    Icons.accessibility_new_rounded,
+                    size: compact ? 82 : 108,
+                    color: theme.colorScheme.onSurfaceVariant.withValues(
+                      alpha: 0.42,
+                    ),
+                  ),
+                  Positioned(
+                    top: compact ? 48 : 58,
+                    child: Container(
+                      width: compact ? 38 : 48,
+                      height: compact ? 46 : 58,
+                      decoration: BoxDecoration(
+                        color: theme.colorScheme.primary.withValues(
+                          alpha: 0.38,
+                        ),
+                        borderRadius: BorderRadius.circular(22),
+                      ),
+                    ),
+                  ),
+                ],
+              ),
+            );
+            final description = Column(
+              crossAxisAlignment: compact ? CrossAxisAlignment.center : CrossAxisAlignment.start,
+              mainAxisAlignment: MainAxisAlignment.center,
+              children: [
+                Text(
+                  'Mapa zaangażowanych mięśni',
+                  textAlign: compact ? TextAlign.center : TextAlign.start,
+                  style: theme.textTheme.titleMedium?.copyWith(
+                    fontWeight: FontWeight.w900,
+                  ),
+                ),
+                const SizedBox(height: 6),
+                Text(
+                  'Miejsce przygotowane pod przyszłą grafikę sylwetki. Na tym etapie pokazujemy czytelny podgląd partii.',
+                  textAlign: compact ? TextAlign.center : TextAlign.start,
+                  style: theme.textTheme.bodySmall?.copyWith(
+                    color: theme.colorScheme.onSurfaceVariant,
+                    height: 1.35,
+                  ),
+                ),
+                const SizedBox(height: 12),
+                Wrap(
+                  alignment: compact ? WrapAlignment.center : WrapAlignment.start,
+                  spacing: 6,
+                  runSpacing: 6,
+                  children: [
+                    MiniTag(text: 'Główna: ${exercise.primaryMuscle}'),
+                    ...exercise.supportingMuscles.take(3).map((muscle) => MiniTag(text: muscle)),
+                  ],
+                ),
+              ],
+            );
+            if (compact) {
+              return Column(
+                mainAxisAlignment: MainAxisAlignment.center,
+                children: [
+                  visual,
+                  const SizedBox(height: 16),
+                  description,
+                ],
+              );
+            }
+            return Row(
+              children: [
+                visual,
+                const SizedBox(width: 20),
+                Expanded(child: description),
+              ],
+            );
+          },
+        ),
+      ),
+    );
+  }
+}
+
+class _ExerciseExecutionStepsCard extends StatelessWidget {
+  const _ExerciseExecutionStepsCard({required this.steps});
+
+  final List<String> steps;
+
+  @override
+  Widget build(BuildContext context) {
+    final theme = Theme.of(context);
+    return Card(
+      child: Padding(
+        padding: const EdgeInsets.all(18),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Row(
+              children: [
+                Icon(Icons.format_list_numbered_rounded, color: theme.colorScheme.primary),
+                const SizedBox(width: 8),
+                Expanded(
+                  child: Text(
+                    'Wykonanie krok po kroku',
+                    style: theme.textTheme.titleMedium?.copyWith(fontWeight: FontWeight.w900),
+                  ),
+                ),
+              ],
+            ),
+            const SizedBox(height: 14),
+            ...steps.asMap().entries.map(
+                  (entry) => Padding(
+                    padding: const EdgeInsets.only(bottom: 12),
+                    child: Row(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        CircleAvatar(
+                          radius: 15,
+                          backgroundColor: theme.colorScheme.primaryContainer,
+                          foregroundColor: theme.colorScheme.onPrimaryContainer,
+                          child: Text(
+                            '${entry.key + 1}',
+                            style: theme.textTheme.labelMedium?.copyWith(
+                              fontWeight: FontWeight.w900,
+                            ),
+                          ),
+                        ),
+                        const SizedBox(width: 12),
+                        Expanded(
+                          child: Padding(
+                            padding: const EdgeInsets.only(top: 4),
+                            child: Text(
+                              entry.value,
+                              style: theme.textTheme.bodyMedium?.copyWith(height: 1.4),
+                            ),
+                          ),
+                        ),
+                      ],
+                    ),
+                  ),
+                ),
+          ],
+        ),
+      ),
+    );
+  }
+}
+
+class _ExerciseBreathingTempoCard extends StatelessWidget {
+  const _ExerciseBreathingTempoCard({
+    required this.breathing,
+    required this.tempo,
+  });
+
+  final String breathing;
+  final String tempo;
+
+  @override
+  Widget build(BuildContext context) {
+    return LayoutBuilder(
+      builder: (context, constraints) {
+        final cards = [
+          _ExerciseGuidanceCard(
+            icon: Icons.air_rounded,
+            title: 'Oddychanie',
+            text: breathing,
+          ),
+          _ExerciseGuidanceCard(
+            icon: Icons.speed_rounded,
+            title: 'Tempo ruchu',
+            text: tempo,
+          ),
+        ];
+        if (constraints.maxWidth < 560) {
+          return Column(
+            children: [
+              cards.first,
+              const SizedBox(height: 12),
+              cards.last,
+            ],
+          );
+        }
+        return Row(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Expanded(child: cards.first),
+            const SizedBox(width: 12),
+            Expanded(child: cards.last),
+          ],
+        );
+      },
+    );
+  }
+}
+
+class _ExerciseGuidanceCard extends StatelessWidget {
+  const _ExerciseGuidanceCard({
+    required this.icon,
+    required this.title,
+    required this.text,
+  });
+
+  final IconData icon;
+  final String title;
+  final String text;
+
+  @override
+  Widget build(BuildContext context) {
+    final theme = Theme.of(context);
+    return Card(
+      margin: EdgeInsets.zero,
+      child: Padding(
+        padding: const EdgeInsets.all(18),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Icon(icon, color: theme.colorScheme.primary),
+            const SizedBox(height: 10),
+            Text(
+              title,
+              style: theme.textTheme.titleMedium?.copyWith(fontWeight: FontWeight.w900),
+            ),
+            const SizedBox(height: 6),
+            Text(
+              text,
+              style: theme.textTheme.bodyMedium?.copyWith(height: 1.4),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+}
+
+class _ExerciseVariantsCard extends StatelessWidget {
+  const _ExerciseVariantsCard({required this.exercise});
+
+  final Exercise exercise;
+
+  @override
+  Widget build(BuildContext context) {
+    final theme = Theme.of(context);
+    return Card(
+      child: Padding(
+        padding: const EdgeInsets.all(18),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Text(
+              'Warianty trudności',
+              style: theme.textTheme.titleMedium?.copyWith(fontWeight: FontWeight.w900),
+            ),
+            const SizedBox(height: 14),
+            _ExerciseVariantRow(
+              icon: Icons.south_east_rounded,
+              title: 'Łatwiejsza wersja',
+              text: exercise.easierVersion,
+              color: theme.colorScheme.tertiary,
+            ),
+            const Divider(height: 24),
+            _ExerciseVariantRow(
+              icon: Icons.north_east_rounded,
+              title: 'Trudniejsza wersja',
+              text: exercise.harderVersion,
+              color: theme.colorScheme.primary,
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+}
+
+class _ExerciseVariantRow extends StatelessWidget {
+  const _ExerciseVariantRow({
+    required this.icon,
+    required this.title,
+    required this.text,
+    required this.color,
+  });
+
+  final IconData icon;
+  final String title;
+  final String text;
+  final Color color;
+
+  @override
+  Widget build(BuildContext context) {
+    final theme = Theme.of(context);
+    return Row(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        Container(
+          width: 42,
+          height: 42,
+          decoration: BoxDecoration(
+            color: color.withValues(alpha: 0.14),
+            borderRadius: BorderRadius.circular(14),
+          ),
+          child: Icon(icon, color: color),
+        ),
+        const SizedBox(width: 12),
+        Expanded(
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Text(
+                title,
+                style: theme.textTheme.titleSmall?.copyWith(fontWeight: FontWeight.w900),
+              ),
+              const SizedBox(height: 4),
+              Text(
+                text,
+                style: theme.textTheme.bodyMedium?.copyWith(height: 1.4),
+              ),
+            ],
+          ),
+        ),
+      ],
+    );
+  }
+}
+
+class _ExerciseDetailsActions extends StatelessWidget {
+  const _ExerciseDetailsActions({
+    required this.isFavorite,
+    required this.onFavorite,
+    required this.onAddToPlan,
+  });
+
+  final bool isFavorite;
+  final VoidCallback onFavorite;
+  final VoidCallback onAddToPlan;
+
+  @override
+  Widget build(BuildContext context) {
+    final theme = Theme.of(context);
+    return SafeArea(
+      top: false,
+      child: Container(
+        padding: const EdgeInsets.fromLTRB(16, 12, 16, 12),
+        decoration: BoxDecoration(
+          color: theme.colorScheme.surface,
+          border: Border(
+            top: BorderSide(
+              color: theme.colorScheme.outlineVariant.withValues(alpha: 0.5),
+            ),
+          ),
+        ),
+        child: LayoutBuilder(
+          builder: (context, constraints) {
+            final favoriteButton = OutlinedButton.icon(
+              onPressed: onFavorite,
+              icon: Icon(
+                isFavorite ? Icons.star_rounded : Icons.star_border_rounded,
+                color: isFavorite ? const Color(0xFFFFC857) : null,
+              ),
+              label: Text(
+                isFavorite ? 'Usuń z ulubionych' : 'Dodaj do ulubionych',
+              ),
+            );
+            final planButton = FilledButton.icon(
+              onPressed: onAddToPlan,
+              icon: const Icon(Icons.playlist_add_rounded),
+              label: const Text('Dodaj do planu'),
+            );
+            if (constraints.maxWidth < 430) {
+              return Column(
+                mainAxisSize: MainAxisSize.min,
+                crossAxisAlignment: CrossAxisAlignment.stretch,
+                children: [
+                  planButton,
+                  const SizedBox(height: 8),
+                  favoriteButton,
+                ],
+              );
+            }
+            return Row(
+              children: [
+                Expanded(child: favoriteButton),
+                const SizedBox(width: 10),
+                Expanded(child: planButton),
+              ],
+            );
+          },
+        ),
+      ),
+    );
+  }
+}
+
+Future<void> showAddExerciseToPlanSheet(
+  BuildContext context,
+  Exercise exercise,
+) async {
+  final hostContext = context;
+  final store = AppScope.read(context);
+  if (store.plans.isEmpty || store.plans.every((plan) => plan.days.isEmpty)) {
+    showError(context, 'Najpierw utwórz plan z przynajmniej jednym dniem.');
+    return;
+  }
+
+  await showModalBottomSheet<void>(
+    context: context,
+    isScrollControlled: true,
+    useSafeArea: true,
+    showDragHandle: true,
+    builder: (sheetContext) => FractionallySizedBox(
+      heightFactor: 0.78,
+      child: Column(
+        children: [
+          Padding(
+            padding: const EdgeInsets.fromLTRB(16, 0, 16, 12),
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.stretch,
+              children: [
+                Text(
+                  'Dodaj do planu',
+                  style: Theme.of(sheetContext).textTheme.titleLarge?.copyWith(fontWeight: FontWeight.w900),
+                ),
+                const SizedBox(height: 4),
+                Text(
+                  'Wybierz dzień dla: ${exercise.name}',
+                  style: Theme.of(sheetContext).textTheme.bodyMedium?.copyWith(
+                        color: Theme.of(sheetContext).colorScheme.onSurfaceVariant,
+                      ),
+                ),
+              ],
+            ),
+          ),
+          Expanded(
+            child: ListView(
+              padding: const EdgeInsets.fromLTRB(16, 0, 16, 20),
+              children: [
+                for (final plan in store.plans) ...[
+                  Padding(
+                    padding: const EdgeInsets.fromLTRB(4, 12, 4, 6),
+                    child: Text(
+                      plan.name,
+                      style: Theme.of(sheetContext).textTheme.titleMedium?.copyWith(fontWeight: FontWeight.w900),
+                    ),
+                  ),
+                  for (final day in plan.days)
+                    Card(
+                      margin: const EdgeInsets.only(bottom: 8),
+                      child: Builder(
+                        builder: (context) {
+                          final alreadyAdded = day.items.any(
+                            (item) => item.exerciseId == exercise.id,
+                          );
+                          return ListTile(
+                            leading: CircleAvatar(
+                              child: Text('${day.weekday}'),
+                            ),
+                            title: Text(
+                              weekdayName(day.weekday),
+                              maxLines: 1,
+                              overflow: TextOverflow.ellipsis,
+                            ),
+                            subtitle: Text(
+                              '${day.title} · ${day.items.length} ćwiczeń',
+                              maxLines: 2,
+                              overflow: TextOverflow.ellipsis,
+                            ),
+                            trailing: Icon(
+                              alreadyAdded ? Icons.check_circle_rounded : Icons.add_circle_outline_rounded,
+                              color: alreadyAdded ? Theme.of(context).colorScheme.primary : null,
+                            ),
+                            onTap: alreadyAdded
+                                ? null
+                                : () async {
+                                    final added = await store.addExerciseToPlan(
+                                      exerciseId: exercise.id,
+                                      planId: plan.id,
+                                      weekday: day.weekday,
+                                    );
+                                    if (!sheetContext.mounted) return;
+                                    Navigator.of(sheetContext).pop();
+                                    if (hostContext.mounted) {
+                                      showError(
+                                        hostContext,
+                                        added ? 'Dodano ${exercise.name} do planu.' : 'Ćwiczenie jest już w tym dniu.',
+                                      );
+                                    }
+                                  },
+                          );
+                        },
+                      ),
+                    ),
+                ],
+              ],
+            ),
+          ),
+        ],
+      ),
+    ),
+  );
 }
 
 class _ExerciseAttributeRow extends StatelessWidget {
@@ -5657,6 +6310,11 @@ class _CreateExerciseSheetContentState extends State<CreateExerciseSheetContent>
       trainingGoals: selectedGoals.map((goal) => goal.label).toList(),
       avoidWhen: parsedAvoidWhen,
       alternatives: parsedAlternatives,
+      executionSteps: original?.executionSteps ?? const [],
+      breathing: original?.breathing ?? '',
+      tempo: original?.tempo ?? '',
+      easierVersion: original?.easierVersion ?? '',
+      harderVersion: original?.harderVersion ?? '',
       imageUrl: original?.imageUrl,
       source: original == null
           ? 'custom'

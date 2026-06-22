@@ -11,6 +11,20 @@ class WorkoutPlan {
   final List<WorkoutDay> days;
   final String note;
 
+  WorkoutPlan copyWith({
+    String? id,
+    String? name,
+    List<WorkoutDay>? days,
+    String? note,
+  }) {
+    return WorkoutPlan(
+      id: id ?? this.id,
+      name: name ?? this.name,
+      days: days ?? this.days,
+      note: note ?? this.note,
+    );
+  }
+
   Map<String, dynamic> toJson() => {
         'id': id,
         'name': name,
@@ -42,6 +56,18 @@ class WorkoutDay {
   final int weekday;
   final String title;
   final List<PlanItem> items;
+
+  WorkoutDay copyWith({
+    int? weekday,
+    String? title,
+    List<PlanItem>? items,
+  }) {
+    return WorkoutDay(
+      weekday: weekday ?? this.weekday,
+      title: title ?? this.title,
+      items: items ?? this.items,
+    );
+  }
 
   Map<String, dynamic> toJson() => {
         'weekday': weekday,

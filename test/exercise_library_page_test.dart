@@ -16,6 +16,11 @@ void main() {
       expect(exercise.avoidWhen, isNotEmpty, reason: exercise.id);
       expect(exercise.alternatives, isNotEmpty, reason: exercise.id);
       expect(exercise.trainingGoals, isNotEmpty, reason: exercise.id);
+      expect(exercise.executionSteps, isNotEmpty, reason: exercise.id);
+      expect(exercise.breathing, isNotEmpty, reason: exercise.id);
+      expect(exercise.tempo, isNotEmpty, reason: exercise.id);
+      expect(exercise.easierVersion, isNotEmpty, reason: exercise.id);
+      expect(exercise.harderVersion, isNotEmpty, reason: exercise.id);
     }
   });
 
