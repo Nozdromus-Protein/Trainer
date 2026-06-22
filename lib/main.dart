@@ -6,10 +6,22 @@ import 'package:flutter/material.dart';
 import 'package:http/http.dart' as http;
 import 'package:shared_preferences/shared_preferences.dart';
 
+import 'features/trainer/application/exercise_library_filter.dart';
+import 'features/trainer/application/workout_plan_factory.dart';
+import 'features/trainer/data/trainer_local_repository.dart';
+import 'features/trainer/domain/trainer_models.dart';
 
 const String kAppName = 'Trainer';
-const String kDefaultBackendUrl = 'https://licznik-kalorii.onrender.com';
+const String kDefaultBackendUrl = 'https://trainer-rnnc.onrender.com/';
 const List<String> kTrainingLevels = ['Początkujący', 'Średniozaawansowany', 'Zaawansowany'];
+const List<String> kTrainingModes = ['Redukcja', 'Rekompozycja', 'Masa', 'Kondycja'];
+const Map<String, int> kAccentPalette = {
+  'Mięta': 0xFF24D6A3,
+  'Lato': 0xFFFFB86B,
+  'Premium Blue': 0xFF58A6FF,
+  'Fiolet': 0xFFB388FF,
+  'Czerwień': 0xFFFF6B6B,
+};
 
 String normalizeLevel(String value) {
   final v = value.trim().toLowerCase();
@@ -18,15 +30,16 @@ String normalizeLevel(String value) {
   return 'Początkujący';
 }
 
+String normalizeTrainingMode(String value) {
+  final v = value.trim().toLowerCase();
+  if (v.contains('redu')) return 'Redukcja';
+  if (v.contains('masa') || v.contains('bulk')) return 'Masa';
+  if (v.contains('kond') || v.contains('wydol')) return 'Kondycja';
+  return 'Rekompozycja';
+}
+
 String stripHtml(String input) {
-  return input
-      .replaceAll(RegExp(r'<[^>]*>'), ' ')
-      .replaceAll('&nbsp;', ' ')
-      .replaceAll('&amp;', '&')
-      .replaceAll('&quot;', '"')
-      .replaceAll('&#39;', "'")
-      .replaceAll(RegExp(r'\s+'), ' ')
-      .trim();
+  return input.replaceAll(RegExp(r'<[^>]*>'), ' ').replaceAll('&nbsp;', ' ').replaceAll('&amp;', '&').replaceAll('&quot;', '"').replaceAll('&#39;', "'").replaceAll(RegExp(r'\s+'), ' ').trim();
 }
 
 void main() {
@@ -121,42 +134,44 @@ class AppScope extends InheritedNotifier<AppStore> {
     assert(scope != null, 'AppScope not found');
     return scope!.notifier!;
   }
+
+  static AppStore read(BuildContext context) {
+    final element = context.getElementForInheritedWidgetOfExactType<AppScope>();
+    final scope = element?.widget as AppScope?;
+    assert(scope != null, 'AppScope not found');
+    return scope!.notifier!;
+  }
 }
 
 class AppStore extends ChangeNotifier {
+  AppStore({TrainerLocalRepository? trainerRepository}) : _trainerRepository = trainerRepository ?? TrainerLocalRepository();
+
+  final TrainerLocalRepository _trainerRepository;
   final List<WorkoutLog> logs = [];
   final List<WorkoutPlan> plans = [];
   final List<Exercise> customExercises = [];
+  ExerciseLibraryPreferences exerciseLibraryPreferences = const ExerciseLibraryPreferences();
   AppSettings settings = AppSettings.defaults();
   DateTime selectedDate = DateTime.now();
   String? lastAiMessage;
   bool aiBusy = false;
 
-  static const _logsKey = 'workout_logs_v1';
-  static const _plansKey = 'workout_plans_v1';
   static const _settingsKey = 'workout_settings_v1';
-  static const _customExercisesKey = 'workout_custom_exercises_v1';
 
   Future<void> load() async {
+    final trainerData = await _trainerRepository.load();
+    logs
+      ..clear()
+      ..addAll(trainerData.sessions);
+    plans
+      ..clear()
+      ..addAll(trainerData.plans);
+    customExercises
+      ..clear()
+      ..addAll(trainerData.customExercises);
+    exerciseLibraryPreferences = trainerData.exerciseLibraryPreferences;
+
     final prefs = await SharedPreferences.getInstance();
-    final rawLogs = prefs.getString(_logsKey);
-    if (rawLogs != null && rawLogs.isNotEmpty) {
-      try {
-        logs
-          ..clear()
-          ..addAll((jsonDecode(rawLogs) as List).map((e) => WorkoutLog.fromJson(Map<String, dynamic>.from(e))));
-      } catch (_) {}
-    }
-
-    final rawPlans = prefs.getString(_plansKey);
-    if (rawPlans != null && rawPlans.isNotEmpty) {
-      try {
-        plans
-          ..clear()
-          ..addAll((jsonDecode(rawPlans) as List).map((e) => WorkoutPlan.fromJson(Map<String, dynamic>.from(e))));
-      } catch (_) {}
-    }
-
     final rawSettings = prefs.getString(_settingsKey);
     if (rawSettings != null && rawSettings.isNotEmpty) {
       try {
@@ -164,19 +179,8 @@ class AppStore extends ChangeNotifier {
       } catch (_) {}
     }
 
-
-
-    final rawCustomExercises = prefs.getString(_customExercisesKey);
-    if (rawCustomExercises != null && rawCustomExercises.isNotEmpty) {
-      try {
-        customExercises
-          ..clear()
-          ..addAll((jsonDecode(rawCustomExercises) as List).map((e) => Exercise.fromJson(Map<String, dynamic>.from(e))));
-      } catch (_) {}
-    }
-
     if (plans.isEmpty) {
-      plans.add(WorkoutPlan.localDefault(settings));
+      plans.add(createLocalWorkoutPlan(settings));
       await savePlans();
     }
   }
@@ -186,16 +190,15 @@ class AppStore extends ChangeNotifier {
     await savePlans();
     await saveSettings();
     await saveCustomExercises();
+    await saveExerciseLibraryPreferences();
   }
 
   Future<void> saveLogs() async {
-    final prefs = await SharedPreferences.getInstance();
-    await prefs.setString(_logsKey, jsonEncode(logs.map((e) => e.toJson()).toList()));
+    await _trainerRepository.saveSessions(logs);
   }
 
   Future<void> savePlans() async {
-    final prefs = await SharedPreferences.getInstance();
-    await prefs.setString(_plansKey, jsonEncode(plans.map((e) => e.toJson()).toList()));
+    await _trainerRepository.savePlans(plans);
   }
 
   Future<void> saveSettings() async {
@@ -204,8 +207,13 @@ class AppStore extends ChangeNotifier {
   }
 
   Future<void> saveCustomExercises() async {
-    final prefs = await SharedPreferences.getInstance();
-    await prefs.setString(_customExercisesKey, jsonEncode(customExercises.map((e) => e.toJson()).toList()));
+    await _trainerRepository.saveCustomExercises(customExercises);
+  }
+
+  Future<void> saveExerciseLibraryPreferences() async {
+    await _trainerRepository.saveExerciseLibraryPreferences(
+      exerciseLibraryPreferences,
+    );
   }
 
   Future<void> addCustomExercise(Exercise exercise) async {
@@ -223,6 +231,34 @@ class AppStore extends ChangeNotifier {
   Future<void> deleteCustomExercise(String id) async {
     customExercises.removeWhere((e) => e.id == id);
     await saveCustomExercises();
+    notifyListeners();
+  }
+
+  bool isExerciseFavorite(String id) => exerciseLibraryPreferences.isFavorite(id);
+
+  bool isExerciseHidden(String id) => exerciseLibraryPreferences.isHidden(id);
+
+  Future<void> toggleExerciseFavorite(String id) async {
+    final favorites = Set<String>.from(exerciseLibraryPreferences.favoriteExerciseIds);
+    if (!favorites.add(id)) favorites.remove(id);
+    exerciseLibraryPreferences = exerciseLibraryPreferences.copyWith(
+      favoriteExerciseIds: favorites,
+    );
+    await saveExerciseLibraryPreferences();
+    notifyListeners();
+  }
+
+  Future<void> setExerciseHidden(String id, bool hidden) async {
+    final hiddenIds = Set<String>.from(exerciseLibraryPreferences.hiddenExerciseIds);
+    if (hidden) {
+      hiddenIds.add(id);
+    } else {
+      hiddenIds.remove(id);
+    }
+    exerciseLibraryPreferences = exerciseLibraryPreferences.copyWith(
+      hiddenExerciseIds: hiddenIds,
+    );
+    await saveExerciseLibraryPreferences();
     notifyListeners();
   }
 
@@ -305,10 +341,16 @@ class AppStore extends ChangeNotifier {
         'equipment': equipment,
         'limitations': limitations,
         'level': settings.level,
+        'training_mode': settings.trainingMode,
         'user': settings.toAiProfile(),
       });
       lastAiMessage = prettyJson(result);
-      final plan = WorkoutPlan.fromAi(result, goal);
+      final plan = WorkoutPlanFactory.fromAi(
+        json: result,
+        goal: goal,
+        exercises: ExerciseRepo.combined(customExercises),
+        fallback: () => createLocalWorkoutPlan(settings),
+      );
       plans
         ..clear()
         ..add(plan);
@@ -326,7 +368,7 @@ class AppStore extends ChangeNotifier {
   Future<void> generateLocalPlan() async {
     plans
       ..clear()
-      ..add(WorkoutPlan.localDefault(settings));
+      ..add(createLocalWorkoutPlan(settings));
     await savePlans();
     notifyListeners();
   }
@@ -339,6 +381,34 @@ String idNow() => DateTime.now().microsecondsSinceEpoch.toString();
 String prettyJson(Object? value) {
   const encoder = JsonEncoder.withIndent('  ');
   return encoder.convert(value);
+}
+
+Map<String, dynamic>? asJsonMap(Object? value) {
+  try {
+    if (value is Map<String, dynamic>) return value;
+    if (value is Map) return Map<String, dynamic>.from(value);
+    if (value is String && value.trim().isNotEmpty) {
+      final decoded = jsonDecode(value);
+      if (decoded is Map) return Map<String, dynamic>.from(decoded);
+    }
+  } catch (_) {}
+  return null;
+}
+
+String smartValue(dynamic value, {String fallback = '-'}) {
+  if (value == null) return fallback;
+  if (value is num) {
+    final d = value.toDouble();
+    return d == d.roundToDouble() ? d.round().toString() : d.toStringAsFixed(1);
+  }
+  final text = value.toString().trim();
+  return text.isEmpty ? fallback : text;
+}
+
+List<String> smartStringList(dynamic value) {
+  if (value is List) return value.map((e) => e.toString()).where((e) => e.trim().isNotEmpty).toList();
+  if (value is String && value.trim().isNotEmpty) return [value.trim()];
+  return const [];
 }
 
 String weekdayName(int weekday) {
@@ -362,6 +432,9 @@ class AppSettings {
   final int age;
   final String goal;
   final String level;
+  final String trainingMode;
+  final String equipment;
+  final String limitations;
   final String backendUrl;
   final bool darkMode;
   final int accentColorValue;
@@ -373,6 +446,9 @@ class AppSettings {
     required this.age,
     required this.goal,
     required this.level,
+    required this.trainingMode,
+    required this.equipment,
+    required this.limitations,
     required this.backendUrl,
     required this.darkMode,
     required this.accentColorValue,
@@ -380,16 +456,19 @@ class AppSettings {
   });
 
   factory AppSettings.defaults() => const AppSettings(
-    bodyWeightKg: 100,
-    heightCm: 185,
-    age: 28,
-    goal: 'Rekompozycja / brzuch + masa mięśniowa',
-    level: 'Średniozaawansowany',
-    backendUrl: kDefaultBackendUrl,
-    darkMode: true,
-    accentColorValue: 0xFF24D6A3,
-    trainingWeekdays: [1, 2, 3, 4, 5, 6],
-  );
+        bodyWeightKg: 100,
+        heightCm: 185,
+        age: 28,
+        goal: 'Rekompozycja / brzuch + masa mięśniowa',
+        level: 'Średniozaawansowany',
+        trainingMode: 'Rekompozycja',
+        equipment: 'masa ciała, hantle, drążek, mata',
+        limitations: '',
+        backendUrl: kDefaultBackendUrl,
+        darkMode: true,
+        accentColorValue: 0xFF24D6A3,
+        trainingWeekdays: [1, 2, 3, 4, 5, 6],
+      );
 
   AppSettings copyWith({
     double? bodyWeightKg,
@@ -397,6 +476,9 @@ class AppSettings {
     int? age,
     String? goal,
     String? level,
+    String? trainingMode,
+    String? equipment,
+    String? limitations,
     String? backendUrl,
     bool? darkMode,
     int? accentColorValue,
@@ -408,6 +490,9 @@ class AppSettings {
       age: age ?? this.age,
       goal: goal ?? this.goal,
       level: level ?? this.level,
+      trainingMode: trainingMode ?? this.trainingMode,
+      equipment: equipment ?? this.equipment,
+      limitations: limitations ?? this.limitations,
       backendUrl: backendUrl ?? this.backendUrl,
       darkMode: darkMode ?? this.darkMode,
       accentColorValue: accentColorValue ?? this.accentColorValue,
@@ -416,151 +501,46 @@ class AppSettings {
   }
 
   Map<String, dynamic> toJson() => {
-    'bodyWeightKg': bodyWeightKg,
-    'heightCm': heightCm,
-    'age': age,
-    'goal': goal,
-    'level': level,
-    'backendUrl': backendUrl,
-    'darkMode': darkMode,
-    'accentColorValue': accentColorValue,
-    'trainingWeekdays': trainingWeekdays,
-  };
+        'bodyWeightKg': bodyWeightKg,
+        'heightCm': heightCm,
+        'age': age,
+        'goal': goal,
+        'level': level,
+        'trainingMode': trainingMode,
+        'equipment': equipment,
+        'limitations': limitations,
+        'backendUrl': backendUrl,
+        'darkMode': darkMode,
+        'accentColorValue': accentColorValue,
+        'trainingWeekdays': trainingWeekdays,
+      };
 
   factory AppSettings.fromJson(Map<String, dynamic> json) => AppSettings(
-    bodyWeightKg: (json['bodyWeightKg'] as num?)?.toDouble() ?? 100,
-    heightCm: (json['heightCm'] as num?)?.toDouble() ?? 185,
-    age: (json['age'] as num?)?.toInt() ?? 28,
-    goal: json['goal']?.toString() ?? 'Rekompozycja / brzuch + masa mięśniowa',
-    level: normalizeLevel(json['level']?.toString() ?? 'Średniozaawansowany'),
-    backendUrl: ((json['backendUrl']?.toString() ?? '').trim().isEmpty) ? kDefaultBackendUrl : json['backendUrl'].toString(),
-    darkMode: json['darkMode'] as bool? ?? true,
-    accentColorValue: (json['accentColorValue'] as num?)?.toInt() ?? 0xFF24D6A3,
-    trainingWeekdays: ((json['trainingWeekdays'] as List?) ?? [1, 2, 3, 4, 5, 6]).map((e) => (e as num).toInt()).toList(),
-  );
+        bodyWeightKg: (json['bodyWeightKg'] as num?)?.toDouble() ?? 100,
+        heightCm: (json['heightCm'] as num?)?.toDouble() ?? 185,
+        age: (json['age'] as num?)?.toInt() ?? 28,
+        goal: json['goal']?.toString() ?? 'Rekompozycja / brzuch + masa mięśniowa',
+        level: normalizeLevel(json['level']?.toString() ?? 'Średniozaawansowany'),
+        trainingMode: normalizeTrainingMode(json['trainingMode']?.toString() ?? json['mode']?.toString() ?? 'Rekompozycja'),
+        equipment: json['equipment']?.toString() ?? 'masa ciała, hantle, drążek, mata',
+        limitations: json['limitations']?.toString() ?? '',
+        backendUrl: ((json['backendUrl']?.toString() ?? '').trim().isEmpty) ? kDefaultBackendUrl : json['backendUrl'].toString(),
+        darkMode: json['darkMode'] as bool? ?? true,
+        accentColorValue: (json['accentColorValue'] as num?)?.toInt() ?? 0xFF24D6A3,
+        trainingWeekdays: ((json['trainingWeekdays'] as List?) ?? [1, 2, 3, 4, 5, 6]).map((e) => (e as num).toInt()).toList(),
+      );
 
   Map<String, dynamic> toAiProfile() => {
-    'body_weight_kg': bodyWeightKg,
-    'height_cm': heightCm,
-    'age': age,
-    'goal': goal,
-    'level': level,
-    'training_weekdays': trainingWeekdays,
-  };
-}
-
-class Exercise {
-  final String id;
-  final String name;
-  final String category;
-  final List<String> muscles;
-  final String equipment;
-  final String level;
-  final String illustrationType;
-  final String description;
-  final List<String> tips;
-  final List<String> commonMistakes;
-  final int defaultSets;
-  final int defaultReps;
-  final int defaultDurationSec;
-  final double met;
-  final String? imageUrl;
-  final String source;
-
-  const Exercise({
-    required this.id,
-    required this.name,
-    required this.category,
-    required this.muscles,
-    required this.equipment,
-    required this.level,
-    required this.illustrationType,
-    required this.description,
-    required this.tips,
-    required this.commonMistakes,
-    required this.defaultSets,
-    required this.defaultReps,
-    required this.defaultDurationSec,
-    required this.met,
-    this.imageUrl,
-    this.source = 'local',
-  });
-
-  Exercise copyWith({
-    String? id,
-    String? name,
-    String? category,
-    List<String>? muscles,
-    String? equipment,
-    String? level,
-    String? illustrationType,
-    String? description,
-    List<String>? tips,
-    List<String>? commonMistakes,
-    int? defaultSets,
-    int? defaultReps,
-    int? defaultDurationSec,
-    double? met,
-    String? imageUrl,
-    String? source,
-  }) {
-    return Exercise(
-      id: id ?? this.id,
-      name: name ?? this.name,
-      category: category ?? this.category,
-      muscles: muscles ?? this.muscles,
-      equipment: equipment ?? this.equipment,
-      level: normalizeLevel(level ?? this.level),
-      illustrationType: illustrationType ?? this.illustrationType,
-      description: description ?? this.description,
-      tips: tips ?? this.tips,
-      commonMistakes: commonMistakes ?? this.commonMistakes,
-      defaultSets: defaultSets ?? this.defaultSets,
-      defaultReps: defaultReps ?? this.defaultReps,
-      defaultDurationSec: defaultDurationSec ?? this.defaultDurationSec,
-      met: met ?? this.met,
-      imageUrl: imageUrl ?? this.imageUrl,
-      source: source ?? this.source,
-    );
-  }
-
-  Map<String, dynamic> toJson() => {
-    'id': id,
-    'name': name,
-    'category': category,
-    'muscles': muscles,
-    'equipment': equipment,
-    'level': level,
-    'illustrationType': illustrationType,
-    'description': description,
-    'tips': tips,
-    'commonMistakes': commonMistakes,
-    'defaultSets': defaultSets,
-    'defaultReps': defaultReps,
-    'defaultDurationSec': defaultDurationSec,
-    'met': met,
-    'imageUrl': imageUrl,
-    'source': source,
-  };
-
-  factory Exercise.fromJson(Map<String, dynamic> json) => Exercise(
-    id: json['id']?.toString() ?? 'custom_${idNow()}',
-    name: json['name']?.toString() ?? 'Ćwiczenie',
-    category: json['category']?.toString() ?? 'Inne',
-    muscles: ((json['muscles'] as List?) ?? const ['całe ciało']).map((e) => e.toString()).toList(),
-    equipment: json['equipment']?.toString() ?? 'brak danych',
-    level: normalizeLevel(json['level']?.toString() ?? 'Początkujący'),
-    illustrationType: json['illustrationType']?.toString() ?? 'generic',
-    description: json['description']?.toString() ?? '',
-    tips: ((json['tips'] as List?) ?? const <String>[]).map((e) => e.toString()).toList(),
-    commonMistakes: ((json['commonMistakes'] as List?) ?? const <String>[]).map((e) => e.toString()).toList(),
-    defaultSets: (json['defaultSets'] as num?)?.toInt() ?? 3,
-    defaultReps: (json['defaultReps'] as num?)?.toInt() ?? 10,
-    defaultDurationSec: (json['defaultDurationSec'] as num?)?.toInt() ?? 0,
-    met: (json['met'] as num?)?.toDouble() ?? 4.5,
-    imageUrl: (json['imageUrl']?.toString().trim().isEmpty ?? true) ? null : json['imageUrl'].toString(),
-    source: json['source']?.toString() ?? 'custom',
-  );
+        'body_weight_kg': bodyWeightKg,
+        'height_cm': heightCm,
+        'age': age,
+        'goal': goal,
+        'level': level,
+        'trainingMode': trainingMode,
+        'equipment': equipment,
+        'limitations': limitations,
+        'training_weekdays': trainingWeekdays,
+      };
 }
 
 class ExerciseRepo {
@@ -1141,9 +1121,17 @@ class ExerciseRepo {
       defaultDurationSec: 0,
       met: 6.8,
     ),
-  ];
+  ].map(_withLibraryMetadata).toList(growable: false);
 
-  static List<Exercise> combined([List<Exercise> custom = const []]) => [...all, ...custom];
+  static List<Exercise> combined([List<Exercise> custom = const []]) {
+    final byId = <String, Exercise>{
+      for (final exercise in all) exercise.id: exercise,
+    };
+    for (final exercise in custom) {
+      byId[exercise.id] = _withLibraryMetadata(exercise);
+    }
+    return byId.values.toList();
+  }
 
   static Exercise byId(String id, [List<Exercise> custom = const []]) {
     final list = combined(custom);
@@ -1165,96 +1153,111 @@ class ExerciseRepo {
       return matchesCategory && matchesLevel && matchesQuery;
     }).toList();
   }
-}
 
-class WorkoutLog {
-  final String id;
-  final String exerciseId;
-  final DateTime date;
-  final int sets;
-  final int reps;
-  final double weightKg;
-  final int durationSec;
-  final int rpe;
-  final double calories;
-  final String note;
-  final double aiConfidence;
-
-  const WorkoutLog({
-    required this.id,
-    required this.exerciseId,
-    required this.date,
-    required this.sets,
-    required this.reps,
-    required this.weightKg,
-    required this.durationSec,
-    required this.rpe,
-    required this.calories,
-    required this.note,
-    required this.aiConfidence,
-  });
-
-  Exercise get exercise => ExerciseRepo.byId(exerciseId);
-
-  Exercise exerciseFrom(List<Exercise> custom) => ExerciseRepo.byId(exerciseId, custom);
-
-  double get volume => sets * reps * weightKg;
-
-  WorkoutLog copyWith({
-    String? id,
-    String? exerciseId,
-    DateTime? date,
-    int? sets,
-    int? reps,
-    double? weightKg,
-    int? durationSec,
-    int? rpe,
-    double? calories,
-    String? note,
-    double? aiConfidence,
-  }) {
-    return WorkoutLog(
-      id: id ?? this.id,
-      exerciseId: exerciseId ?? this.exerciseId,
-      date: date ?? this.date,
-      sets: sets ?? this.sets,
-      reps: reps ?? this.reps,
-      weightKg: weightKg ?? this.weightKg,
-      durationSec: durationSec ?? this.durationSec,
-      rpe: rpe ?? this.rpe,
-      calories: calories ?? this.calories,
-      note: note ?? this.note,
-      aiConfidence: aiConfidence ?? this.aiConfidence,
+  static Exercise _withLibraryMetadata(Exercise exercise) {
+    return exercise.copyWith(
+      trainingGoals: exercise.trainingGoals.isEmpty ? _goalsFor(exercise) : exercise.trainingGoals,
+      avoidWhen: exercise.avoidWhen.isEmpty ? _avoidWhenFor(exercise) : exercise.avoidWhen,
+      alternatives: exercise.alternatives.isEmpty ? _alternativesFor(exercise) : exercise.alternatives,
     );
   }
 
-  Map<String, dynamic> toJson() => {
-    'id': id,
-    'exerciseId': exerciseId,
-    'date': date.toIso8601String(),
-    'sets': sets,
-    'reps': reps,
-    'weightKg': weightKg,
-    'durationSec': durationSec,
-    'rpe': rpe,
-    'calories': calories,
-    'note': note,
-    'aiConfidence': aiConfidence,
-  };
+  static List<String> _goalsFor(Exercise exercise) {
+    final text = '${exercise.category} ${exercise.muscles.join(' ')}'.toLowerCase();
+    if (text.contains('kardio') || text.contains('wydol') || text.contains('całe ciało')) {
+      return const ['Kondycja', 'Redukcja'];
+    }
+    if (text.contains('brzuch') || text.contains('core')) {
+      return const ['Stabilizacja', 'Siła'];
+    }
+    if (text.contains('bark') || text.contains('rotator')) {
+      return const ['Masa mięśniowa', 'Stabilizacja'];
+    }
+    return const ['Siła', 'Masa mięśniowa'];
+  }
 
-  factory WorkoutLog.fromJson(Map<String, dynamic> json) => WorkoutLog(
-    id: json['id']?.toString() ?? idNow(),
-    exerciseId: json['exerciseId']?.toString() ?? ExerciseRepo.all.first.id,
-    date: DateTime.tryParse(json['date']?.toString() ?? '') ?? DateTime.now(),
-    sets: (json['sets'] as num?)?.toInt() ?? 0,
-    reps: (json['reps'] as num?)?.toInt() ?? 0,
-    weightKg: (json['weightKg'] as num?)?.toDouble() ?? 0,
-    durationSec: (json['durationSec'] as num?)?.toInt() ?? 0,
-    rpe: (json['rpe'] as num?)?.toInt() ?? 7,
-    calories: (json['calories'] as num?)?.toDouble() ?? 0,
-    note: json['note']?.toString() ?? '',
-    aiConfidence: (json['aiConfidence'] as num?)?.toDouble() ?? 0,
+  static List<String> _avoidWhenFor(Exercise exercise) {
+    final text = '${exercise.category} ${exercise.muscles.join(' ')}'.toLowerCase();
+    if (text.contains('kardio') || exercise.illustrationType == 'run') {
+      return const [
+        'Unikaj przy ostrym bólu stawów albo świeżym urazie kończyn dolnych.',
+        'Przerwij przy zawrotach głowy, duszności lub bólu w klatce.',
+      ];
+    }
+    if (text.contains('bark') || text.contains('klatka') || text.contains('triceps')) {
+      return const [
+        'Unikaj przy ostrym bólu barku, łokcia lub nadgarstka.',
+        'Nie wykonuj zakresu, w którym tracisz kontrolę łopatki.',
+      ];
+    }
+    if (text.contains('plec') || text.contains('grzbiet') || exercise.illustrationType == 'deadlift') {
+      return const [
+        'Unikaj przy ostrym bólu kręgosłupa lub promieniowaniu do kończyn.',
+        'Nie zwiększaj ciężaru, jeśli nie utrzymujesz neutralnej pozycji pleców.',
+      ];
+    }
+    return const [
+      'Unikaj przy ostrym bólu trenowanej okolicy lub świeżym urazie.',
+      'Przerwij ćwiczenie, gdy nie możesz utrzymać stabilnej techniki.',
+    ];
+  }
+
+  static List<String> _alternativesFor(Exercise exercise) {
+    final category = exercise.category.toLowerCase();
+    if (category.contains('nogi') || category.contains('tył ciała')) {
+      return const [
+        'Przysiad do ławki',
+        'Zakroki z podparciem',
+        'Glute bridge',
+      ];
+    }
+    if (category.contains('klatka') || category.contains('ręce')) {
+      return const [
+        'Pompka na podwyższeniu',
+        'Wyciskanie hantli',
+        'Wariant z gumą oporową',
+      ];
+    }
+    if (category.contains('plecy')) {
+      return const [
+        'Wiosłowanie z gumą',
+        'Ściąganie drążka wyciągu',
+        'Wiosłowanie z podparciem',
+      ];
+    }
+    if (category.contains('brzuch')) {
+      return const ['Dead bug', 'Bird dog', 'Deska w łatwiejszym wariancie'];
+    }
+    if (category.contains('kardio')) {
+      return const ['Szybki marsz', 'Rower stacjonarny', 'Orbitrek'];
+    }
+    return const [
+      'Łatwiejszy wariant tego samego ruchu',
+      'Wariant z gumą oporową',
+      'Wariant bez dodatkowego ciężaru',
+    ];
+  }
+}
+
+WorkoutPlan createLocalWorkoutPlan(AppSettings settings) {
+  return WorkoutPlanFactory.local(
+    level: settings.level,
+    goal: settings.goal,
+    trainingWeekdays: settings.trainingWeekdays,
+    exerciseById: ExerciseRepo.byId,
   );
+}
+
+extension WorkoutSessionExerciseResolver on WorkoutSession {
+  Exercise exerciseFrom(List<Exercise> customExercises) {
+    return ExerciseRepo.byId(exerciseId, customExercises);
+  }
+}
+
+extension PlanItemExerciseResolver on PlanItem {
+  Exercise exerciseFrom(List<Exercise> customExercises) {
+    return ExerciseRepo.byId(exerciseId, customExercises);
+  }
 }
 
 class DayTotals {
@@ -1286,177 +1289,6 @@ class DayTotals {
   }
 }
 
-class WorkoutPlan {
-  final String id;
-  final String name;
-  final List<PlanDay> days;
-  final String note;
-
-  const WorkoutPlan({required this.id, required this.name, required this.days, required this.note});
-
-  Map<String, dynamic> toJson() => {
-    'id': id,
-    'name': name,
-    'days': days.map((e) => e.toJson()).toList(),
-    'note': note,
-  };
-
-  factory WorkoutPlan.fromJson(Map<String, dynamic> json) => WorkoutPlan(
-    id: json['id']?.toString() ?? idNow(),
-    name: json['name']?.toString() ?? 'Plan',
-    days: ((json['days'] as List?) ?? []).map((e) => PlanDay.fromJson(Map<String, dynamic>.from(e))).toList(),
-    note: json['note']?.toString() ?? '',
-  );
-
-  factory WorkoutPlan.localDefault(AppSettings settings) {
-    final days = <PlanDay>[];
-    final level = normalizeLevel(settings.level);
-    final cycle = level == 'Początkujący'
-        ? [
-      ['incline_pushup', 'goblet_squat', 'assisted_pullup', 'plank'],
-      ['lat_pulldown', 'reverse_lunge', 'face_pull', 'crunch'],
-      ['pushup', 'squat', 'bicep_curl', 'side_plank'],
-      ['bike', 'mountain_climber', 'calf_raise', 'triceps_extension'],
-    ]
-        : level == 'Zaawansowany'
-        ? [
-      ['front_squat', 'pullup', 'bench_press', 'hollow_hold'],
-      ['deadlift', 'dips', 'row', 'leg_raise'],
-      ['bulgarian_split_squat', 'shoulder_press', 'jump_rope', 'russian_twist'],
-      ['pistol_squat', 'burpee', 'pullup', 'plank'],
-      ['run', 'hip_thrust', 'lateral_raise', 'face_pull'],
-    ]
-        : [
-      ['squat', 'lunge', 'crunch', 'plank'],
-      ['pushup', 'pullup', 'shoulder_press', 'bicep_curl'],
-      ['deadlift', 'hip_thrust', 'mountain_climber', 'side_plank'],
-      ['bench_press', 'row', 'lateral_raise', 'triceps_extension'],
-      ['jumping_jack', 'burpee', 'leg_raise', 'russian_twist'],
-    ];
-    for (var i = 0; i < settings.trainingWeekdays.length; i++) {
-      final weekday = settings.trainingWeekdays[i];
-      final exerciseIds = cycle[i % cycle.length];
-      days.add(PlanDay(
-        weekday: weekday,
-        title: level == 'Początkujący'
-            ? (i.isEven ? 'Fundament techniki' : 'Lekka siła + core')
-            : level == 'Zaawansowany'
-            ? (i.isEven ? 'Siła / hipertrofia' : 'Moc + kondycja')
-            : (i.isEven ? 'Siła + brzuch' : 'Góra ciała + kondycja'),
-        items: exerciseIds.map((id) {
-          final e = ExerciseRepo.byId(id);
-          final setModifier = level == 'Początkujący' ? -1 : level == 'Zaawansowany' ? 1 : 0;
-          return PlanItem(
-            exerciseId: id,
-            sets: math.max(2, e.defaultSets + setModifier).toInt(),
-            reps: e.defaultReps,
-            durationSec: e.defaultDurationSec,
-            note: e.defaultDurationSec > 0 ? 'czas pracy · poziom $level' : 'kontrolowane tempo · poziom $level',
-          );
-        }).toList(),
-      ));
-    }
-    return WorkoutPlan(
-      id: idNow(),
-      name: 'Plan lokalny $level: ${settings.goal}',
-      days: days,
-      note: 'Plan lokalny dopasowany do poziomu: $level. Możesz go nadpisać planem AI przez Twój backend.',
-    );
-  }
-
-  factory WorkoutPlan.fromAi(Map<String, dynamic> json, String goal) {
-    final rawDays = (json['days'] as List?) ?? (json['week_plan'] as List?) ?? [];
-    final days = <PlanDay>[];
-    for (final raw in rawDays) {
-      final map = Map<String, dynamic>.from(raw as Map);
-      final weekdayRaw = map['weekday'] ?? map['day'] ?? 1;
-      final weekday = weekdayRaw is num ? weekdayRaw.toInt() : _weekdayFromText(weekdayRaw.toString());
-      final rawItems = (map['items'] as List?) ?? (map['exercises'] as List?) ?? [];
-      final items = <PlanItem>[];
-      for (final x in rawItems) {
-        final m = Map<String, dynamic>.from(x as Map);
-        final name = (m['exercise'] ?? m['name'] ?? '').toString().toLowerCase();
-        final found = ExerciseRepo.all.firstWhere(
-              (e) => name.contains(e.name.toLowerCase()) || e.name.toLowerCase().contains(name),
-          orElse: () => ExerciseRepo.all.first,
-        );
-        items.add(PlanItem(
-          exerciseId: found.id,
-          sets: (m['sets'] as num?)?.toInt() ?? found.defaultSets,
-          reps: (m['reps'] as num?)?.toInt() ?? found.defaultReps,
-          durationSec: (m['duration_sec'] as num?)?.toInt() ?? found.defaultDurationSec,
-          note: (m['note'] ?? m['reason'] ?? '').toString(),
-        ));
-      }
-      days.add(PlanDay(weekday: weekday, title: map['title']?.toString() ?? 'Trening', items: items));
-    }
-    if (days.isEmpty) return WorkoutPlan.localDefault(AppSettings.defaults());
-    return WorkoutPlan(
-      id: idNow(),
-      name: json['name']?.toString() ?? 'Plan AI: $goal',
-      days: days,
-      note: json['note']?.toString() ?? 'Plan utworzony przez backend AI.',
-    );
-  }
-
-  static int _weekdayFromText(String text) {
-    final t = text.toLowerCase();
-    if (t.contains('wt')) return 2;
-    if (t.contains('ś') || t.contains('sr')) return 3;
-    if (t.contains('czw')) return 4;
-    if (t.contains('pt')) return 5;
-    if (t.contains('sob')) return 6;
-    if (t.contains('niedz')) return 7;
-    return 1;
-  }
-}
-
-class PlanDay {
-  final int weekday;
-  final String title;
-  final List<PlanItem> items;
-
-  const PlanDay({required this.weekday, required this.title, required this.items});
-
-  Map<String, dynamic> toJson() => {'weekday': weekday, 'title': title, 'items': items.map((e) => e.toJson()).toList()};
-
-  factory PlanDay.fromJson(Map<String, dynamic> json) => PlanDay(
-    weekday: (json['weekday'] as num?)?.toInt() ?? 1,
-    title: json['title']?.toString() ?? 'Trening',
-    items: ((json['items'] as List?) ?? []).map((e) => PlanItem.fromJson(Map<String, dynamic>.from(e))).toList(),
-  );
-}
-
-class PlanItem {
-  final String exerciseId;
-  final int sets;
-  final int reps;
-  final int durationSec;
-  final String note;
-
-  const PlanItem({required this.exerciseId, required this.sets, required this.reps, required this.durationSec, required this.note});
-
-  Exercise get exercise => ExerciseRepo.byId(exerciseId);
-
-  Exercise exerciseFrom(List<Exercise> custom) => ExerciseRepo.byId(exerciseId, custom);
-
-  Map<String, dynamic> toJson() => {
-    'exerciseId': exerciseId,
-    'sets': sets,
-    'reps': reps,
-    'durationSec': durationSec,
-    'note': note,
-  };
-
-  factory PlanItem.fromJson(Map<String, dynamic> json) => PlanItem(
-    exerciseId: json['exerciseId']?.toString() ?? ExerciseRepo.all.first.id,
-    sets: (json['sets'] as num?)?.toInt() ?? 3,
-    reps: (json['reps'] as num?)?.toInt() ?? 10,
-    durationSec: (json['durationSec'] as num?)?.toInt() ?? 0,
-    note: json['note']?.toString() ?? '',
-  );
-}
-
 class AiBackendService {
   final String baseUrl;
 
@@ -1476,11 +1308,13 @@ class AiBackendService {
     for (final path in paths) {
       try {
         final uri = Uri.parse('$base$path');
-        final response = await http.post(
-          uri,
-          headers: {'Content-Type': 'application/json'},
-          body: jsonEncode(body),
-        ).timeout(const Duration(seconds: 35));
+        final response = await http
+            .post(
+              uri,
+              headers: {'Content-Type': 'application/json'},
+              body: jsonEncode(body),
+            )
+            .timeout(const Duration(seconds: 35));
         if (response.statusCode >= 200 && response.statusCode < 300) {
           final data = jsonDecode(utf8.decode(response.bodyBytes));
           if (data is Map<String, dynamic>) return data;
@@ -1494,7 +1328,6 @@ class AiBackendService {
     throw Exception(lastError ?? 'Nieznany błąd backendu');
   }
 }
-
 
 class WgerService {
   static const _base = 'https://wger.de/api/v2';
@@ -1620,10 +1453,31 @@ class HomeShell extends StatefulWidget {
 class _HomeShellState extends State<HomeShell> {
   int index = 0;
 
+  void openStandalonePage(Widget page) {
+    Navigator.of(context).push(
+      MaterialPageRoute<void>(
+        builder: (_) => Scaffold(
+          appBar: AppBar(
+            toolbarHeight: 48,
+            title: const Text(kAppName),
+          ),
+          body: SafeArea(child: page),
+        ),
+      ),
+    );
+  }
+
   @override
   Widget build(BuildContext context) {
     final pages = [
-      const TodayPage(),
+      TrainerHomePage(
+        onToday: () => openStandalonePage(const TodayPage()),
+        onExercises: () => setState(() => index = 1),
+        onHistory: () => openStandalonePage(const HistoryPage()),
+        onPlans: () => setState(() => index = 2),
+        onProgress: () => setState(() => index = 3),
+        onSettings: () => setState(() => index = 4),
+      ),
       const ExercisesPage(),
       const PlanPage(),
       const ProgressPage(),
@@ -1638,12 +1492,237 @@ class _HomeShellState extends State<HomeShell> {
           selectedIndex: index,
           onDestinationSelected: (v) => setState(() => index = v),
           destinations: const [
-            NavigationDestination(icon: Icon(Icons.today_outlined), selectedIcon: Icon(Icons.today), label: 'Dzisiaj'),
+            NavigationDestination(icon: Icon(Icons.grid_view_outlined), selectedIcon: Icon(Icons.grid_view_rounded), label: 'Start'),
             NavigationDestination(icon: Icon(Icons.fitness_center_outlined), selectedIcon: Icon(Icons.fitness_center), label: 'Ćwiczenia'),
             NavigationDestination(icon: Icon(Icons.calendar_month_outlined), selectedIcon: Icon(Icons.calendar_month), label: 'Plan'),
             NavigationDestination(icon: Icon(Icons.show_chart_outlined), selectedIcon: Icon(Icons.show_chart), label: 'Postęp'),
             NavigationDestination(icon: Icon(Icons.more_horiz), selectedIcon: Icon(Icons.more), label: 'Więcej'),
           ],
+        ),
+      ),
+    );
+  }
+}
+
+class TrainerHomePage extends StatelessWidget {
+  const TrainerHomePage({
+    super.key,
+    required this.onToday,
+    required this.onExercises,
+    required this.onHistory,
+    required this.onPlans,
+    required this.onProgress,
+    required this.onSettings,
+  });
+
+  final VoidCallback onToday;
+  final VoidCallback onExercises;
+  final VoidCallback onHistory;
+  final VoidCallback onPlans;
+  final VoidCallback onProgress;
+  final VoidCallback onSettings;
+
+  @override
+  Widget build(BuildContext context) {
+    final store = AppScope.of(context);
+    final todayLogs = store.logsForDay(DateTime.now());
+    final plan = store.plans.isEmpty ? null : store.plans.first;
+    WorkoutDay? todayPlan;
+    if (plan != null) {
+      for (final day in plan.days) {
+        if (day.weekday == DateTime.now().weekday) {
+          todayPlan = day;
+          break;
+        }
+      }
+    }
+    final tiles = [
+      TrainerHomeTileData(
+        title: 'Dzisiejszy trening',
+        subtitle: todayPlan == null ? 'Brak treningu w planie na dziś' : '${todayPlan.title} · ${todayPlan.items.length} ćwiczeń',
+        icon: Icons.today_rounded,
+        onTap: onToday,
+      ),
+      TrainerHomeTileData(
+        title: 'Baza ćwiczeń',
+        subtitle: '${ExerciseRepo.combined(store.customExercises).length} ćwiczeń dostępnych lokalnie',
+        icon: Icons.fitness_center_rounded,
+        onTap: onExercises,
+      ),
+      TrainerHomeTileData(
+        title: 'Historia',
+        subtitle: '${store.logs.length} zapisanych wpisów treningowych',
+        icon: Icons.history_rounded,
+        onTap: onHistory,
+      ),
+      TrainerHomeTileData(
+        title: 'Plany treningowe',
+        subtitle: '${store.plans.length} ${store.plans.length == 1 ? 'aktywny plan' : 'zapisanych planów'}',
+        icon: Icons.calendar_month_rounded,
+        onTap: onPlans,
+      ),
+      TrainerHomeTileData(
+        title: 'Progres',
+        subtitle: 'Podsumowanie zapisanych treningów',
+        icon: Icons.trending_up_rounded,
+        onTap: onProgress,
+      ),
+      TrainerHomeTileData(
+        title: 'Ustawienia Trainera',
+        subtitle: 'Profil, wygląd i dane lokalne',
+        icon: Icons.tune_rounded,
+        onTap: onSettings,
+      ),
+    ];
+
+    return PageFrame(
+      title: 'Trainer',
+      subtitle: 'Twój trening w jednym miejscu',
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.stretch,
+        children: [
+          Card(
+            color: Theme.of(context).colorScheme.primaryContainer,
+            child: Padding(
+              padding: const EdgeInsets.all(18),
+              child: Row(
+                children: [
+                  CircleAvatar(
+                    radius: 28,
+                    backgroundColor: Theme.of(context).colorScheme.onPrimaryContainer,
+                    foregroundColor: Theme.of(context).colorScheme.primaryContainer,
+                    child: const Icon(Icons.directions_run_rounded, size: 30),
+                  ),
+                  const SizedBox(width: 14),
+                  Expanded(
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        Text(
+                          todayLogs.isEmpty ? 'Gotowy na dzisiejszy trening?' : 'Dzisiejszy trening zapisany',
+                          style: Theme.of(context).textTheme.titleLarge?.copyWith(
+                                fontWeight: FontWeight.w900,
+                                color: Theme.of(context).colorScheme.onPrimaryContainer,
+                              ),
+                        ),
+                        const SizedBox(height: 4),
+                        Text(
+                          todayLogs.isEmpty ? 'Otwórz plan lub dodaj pierwszy wpis.' : '${todayLogs.length} ${todayLogs.length == 1 ? 'wpis' : 'wpisy'} w historii dnia.',
+                          style: Theme.of(context).textTheme.bodyMedium?.copyWith(
+                                color: Theme.of(context).colorScheme.onPrimaryContainer,
+                              ),
+                        ),
+                      ],
+                    ),
+                  ),
+                ],
+              ),
+            ),
+          ),
+          const SizedBox(height: 16),
+          LayoutBuilder(
+            builder: (context, constraints) {
+              final columns = constraints.maxWidth >= 760
+                  ? 3
+                  : constraints.maxWidth >= 430
+                      ? 2
+                      : 1;
+              final tileWidth = (constraints.maxWidth - (columns - 1) * 12) / columns;
+              final tileHeight = columns == 1 ? 156.0 : 180.0;
+              return GridView.builder(
+                shrinkWrap: true,
+                physics: const NeverScrollableScrollPhysics(),
+                itemCount: tiles.length,
+                gridDelegate: SliverGridDelegateWithFixedCrossAxisCount(
+                  crossAxisCount: columns,
+                  crossAxisSpacing: 12,
+                  mainAxisSpacing: 12,
+                  childAspectRatio: tileWidth / tileHeight,
+                ),
+                itemBuilder: (context, index) => TrainerHomeTile(data: tiles[index]),
+              );
+            },
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+class TrainerHomeTileData {
+  const TrainerHomeTileData({
+    required this.title,
+    required this.subtitle,
+    required this.icon,
+    required this.onTap,
+  });
+
+  final String title;
+  final String subtitle;
+  final IconData icon;
+  final VoidCallback onTap;
+}
+
+class TrainerHomeTile extends StatelessWidget {
+  const TrainerHomeTile({super.key, required this.data});
+
+  final TrainerHomeTileData data;
+
+  @override
+  Widget build(BuildContext context) {
+    final theme = Theme.of(context);
+    return Card(
+      clipBehavior: Clip.antiAlias,
+      child: InkWell(
+        onTap: data.onTap,
+        child: Padding(
+          padding: const EdgeInsets.all(16),
+          child: Row(
+            crossAxisAlignment: CrossAxisAlignment.center,
+            children: [
+              Container(
+                width: 48,
+                height: 48,
+                decoration: BoxDecoration(
+                  color: theme.colorScheme.primaryContainer,
+                  borderRadius: BorderRadius.circular(16),
+                ),
+                child: Icon(
+                  data.icon,
+                  color: theme.colorScheme.onPrimaryContainer,
+                ),
+              ),
+              const SizedBox(width: 14),
+              Expanded(
+                child: Column(
+                  mainAxisAlignment: MainAxisAlignment.center,
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Text(
+                      data.title,
+                      maxLines: 2,
+                      overflow: TextOverflow.ellipsis,
+                      style: theme.textTheme.titleMedium?.copyWith(fontWeight: FontWeight.w900),
+                    ),
+                    const SizedBox(height: 5),
+                    Text(
+                      data.subtitle,
+                      maxLines: 3,
+                      overflow: TextOverflow.ellipsis,
+                      style: theme.textTheme.bodySmall?.copyWith(
+                        color: theme.colorScheme.onSurfaceVariant,
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+              const SizedBox(width: 8),
+              Icon(
+                Icons.chevron_right_rounded,
+                color: theme.colorScheme.onSurfaceVariant,
+              ),
+            ],
+          ),
         ),
       ),
     );
@@ -1692,6 +1771,81 @@ class PageFrame extends StatelessWidget {
   }
 }
 
+class HistoryPage extends StatelessWidget {
+  const HistoryPage({super.key});
+
+  @override
+  Widget build(BuildContext context) {
+    final store = AppScope.of(context);
+    final logs = [...store.logs]..sort((a, b) => b.date.compareTo(a.date));
+    return PageFrame(
+      title: 'Historia',
+      subtitle: 'Wszystkie treningi zapisane lokalnie na urządzeniu',
+      actions: [
+        IconButton.filledTonal(
+          tooltip: 'Dodaj trening',
+          onPressed: () => showAddWorkoutSheet(context),
+          icon: const Icon(Icons.add_rounded),
+        ),
+      ],
+      child: logs.isEmpty
+          ? Card(
+              child: Padding(
+                padding: const EdgeInsets.all(24),
+                child: Column(
+                  children: [
+                    Icon(
+                      Icons.history_toggle_off_rounded,
+                      size: 48,
+                      color: Theme.of(context).colorScheme.primary,
+                    ),
+                    const SizedBox(height: 12),
+                    Text(
+                      'Historia jest jeszcze pusta',
+                      textAlign: TextAlign.center,
+                      style: Theme.of(context).textTheme.titleMedium?.copyWith(fontWeight: FontWeight.w900),
+                    ),
+                    const SizedBox(height: 6),
+                    Text(
+                      'Dodaj pierwszy trening, a zapis pojawi się tutaj również po ponownym uruchomieniu aplikacji.',
+                      textAlign: TextAlign.center,
+                      style: Theme.of(context).textTheme.bodyMedium?.copyWith(
+                            color: Theme.of(context).colorScheme.onSurfaceVariant,
+                          ),
+                    ),
+                    const SizedBox(height: 16),
+                    FilledButton.icon(
+                      onPressed: () => showAddWorkoutSheet(context),
+                      icon: const Icon(Icons.add_rounded),
+                      label: const Text('Dodaj trening'),
+                    ),
+                  ],
+                ),
+              ),
+            )
+          : Column(
+              crossAxisAlignment: CrossAxisAlignment.stretch,
+              children: [
+                for (var index = 0; index < logs.length; index++) ...[
+                  if (index == 0 || !sameDay(logs[index - 1].date, logs[index].date)) ...[
+                    if (index > 0) const SizedBox(height: 8),
+                    Padding(
+                      padding: const EdgeInsets.fromLTRB(4, 8, 4, 8),
+                      child: Text(
+                        '${weekdayName(logs[index].date.weekday)} · ${shortDate(logs[index].date)}',
+                        style: Theme.of(context).textTheme.titleSmall?.copyWith(fontWeight: FontWeight.w900),
+                      ),
+                    ),
+                  ],
+                  WorkoutLogCard(log: logs[index]),
+                  const SizedBox(height: 10),
+                ],
+              ],
+            ),
+    );
+  }
+}
+
 class TodayPage extends StatelessWidget {
   const TodayPage({super.key});
 
@@ -1716,6 +1870,10 @@ class TodayPage extends StatelessWidget {
           DateSwitcher(date: day, onChanged: store.setSelectedDate),
           const SizedBox(height: 14),
           DailyHero(totals: totals),
+          const SizedBox(height: 14),
+          TrainingInsightCard(logs: store.logs, selectedDay: day),
+          const SizedBox(height: 14),
+          WorkoutTimerCard(),
           const SizedBox(height: 14),
           Row(
             children: [
@@ -1750,6 +1908,8 @@ class TodayPage extends StatelessWidget {
           else
             ...logs.map((log) => WorkoutLogCard(log: log)),
           const SizedBox(height: 16),
+          QuickWorkoutActionsCard(),
+          const SizedBox(height: 12),
           AiQuickCard(),
         ],
       ),
@@ -1824,9 +1984,202 @@ class DailyHero extends StatelessWidget {
           SizedBox(
             width: 104,
             height: 104,
-            child: AnimatedExerciseIllustration(type: 'burpee', lineColor: theme.colorScheme.onPrimary, backgroundColor: theme.colorScheme.onPrimary.withOpacity(0.12)),
+            child: HumanExerciseImage(type: 'burpee', lineColor: theme.colorScheme.onPrimary, backgroundColor: theme.colorScheme.onPrimary.withOpacity(0.12)),
           ),
         ],
+      ),
+    );
+  }
+}
+
+class TrainingInsightCard extends StatelessWidget {
+  final List<WorkoutLog> logs;
+  final DateTime selectedDay;
+
+  const TrainingInsightCard({super.key, required this.logs, required this.selectedDay});
+
+  @override
+  Widget build(BuildContext context) {
+    final theme = Theme.of(context);
+    final start = DateTime(selectedDay.year, selectedDay.month, selectedDay.day).subtract(const Duration(days: 6));
+    final recent = logs.where((e) => !e.date.isBefore(start)).toList();
+    final total = DayTotals.from(recent);
+    final streak = _streak(logs);
+    final avgRpe = recent.isEmpty ? 0 : recent.fold<int>(0, (a, e) => a + e.rpe) / recent.length;
+    final top = _topExercise(recent);
+    return Card(
+      child: Padding(
+        padding: const EdgeInsets.all(16),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Row(
+              children: [
+                Icon(Icons.insights, color: theme.colorScheme.primary),
+                const SizedBox(width: 8),
+                Expanded(child: Text('Trenerski podgląd tygodnia', style: theme.textTheme.titleMedium?.copyWith(fontWeight: FontWeight.w900))),
+              ],
+            ),
+            const SizedBox(height: 12),
+            Row(children: [
+              Expanded(child: _MiniMetric(label: 'Seria dni', value: '$streak', icon: Icons.local_fire_department_outlined)),
+              const SizedBox(width: 8),
+              Expanded(child: _MiniMetric(label: '7 dni kcal', value: '${total.calories.round()}', icon: Icons.bolt)),
+              const SizedBox(width: 8),
+              Expanded(child: _MiniMetric(label: 'Śr. RPE', value: avgRpe == 0 ? '-' : avgRpe.toStringAsFixed(1), icon: Icons.speed)),
+            ]),
+            const SizedBox(height: 10),
+            Text(top.isEmpty ? 'Dodaj kilka treningów, a pokażę najczęstsze ćwiczenie i kierunek progresu.' : 'Najczęściej ostatnio: $top',
+                style: theme.textTheme.bodySmall?.copyWith(color: theme.colorScheme.onSurfaceVariant)),
+          ],
+        ),
+      ),
+    );
+  }
+
+  int _streak(List<WorkoutLog> logs) {
+    var day = DateTime.now();
+    var count = 0;
+    while (count < 365) {
+      final has = logs.any((e) => sameDay(e.date, day));
+      if (!has) break;
+      count++;
+      day = day.subtract(const Duration(days: 1));
+    }
+    return count;
+  }
+
+  String _topExercise(List<WorkoutLog> logs) {
+    final counts = <String, int>{};
+    for (final log in logs) {
+      counts[log.exerciseId] = (counts[log.exerciseId] ?? 0) + 1;
+    }
+    if (counts.isEmpty) return '';
+    final id = counts.entries.reduce((a, b) => a.value >= b.value ? a : b).key;
+    return ExerciseRepo.byId(id).name;
+  }
+}
+
+class _MiniMetric extends StatelessWidget {
+  final String label;
+  final String value;
+  final IconData icon;
+
+  const _MiniMetric({required this.label, required this.value, required this.icon});
+
+  @override
+  Widget build(BuildContext context) {
+    final theme = Theme.of(context);
+    return Container(
+      padding: const EdgeInsets.all(10),
+      decoration: BoxDecoration(
+        color: theme.colorScheme.surfaceContainerHighest.withOpacity(0.55),
+        borderRadius: BorderRadius.circular(18),
+      ),
+      child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+        Icon(icon, size: 18, color: theme.colorScheme.primary),
+        const SizedBox(height: 6),
+        Text(value, maxLines: 1, overflow: TextOverflow.ellipsis, style: theme.textTheme.titleMedium?.copyWith(fontWeight: FontWeight.w900)),
+        Text(label, maxLines: 1, overflow: TextOverflow.ellipsis, style: theme.textTheme.labelSmall),
+      ]),
+    );
+  }
+}
+
+class WorkoutTimerCard extends StatefulWidget {
+  @override
+  State<WorkoutTimerCard> createState() => _WorkoutTimerCardState();
+}
+
+class _WorkoutTimerCardState extends State<WorkoutTimerCard> {
+  Timer? timer;
+  int seconds = 90;
+  int initial = 90;
+  bool running = false;
+
+  @override
+  void dispose() {
+    timer?.cancel();
+    super.dispose();
+  }
+
+  void start() {
+    timer?.cancel();
+    setState(() => running = true);
+    timer = Timer.periodic(const Duration(seconds: 1), (_) {
+      if (seconds <= 1) {
+        timer?.cancel();
+        setState(() {
+          seconds = 0;
+          running = false;
+        });
+      } else {
+        setState(() => seconds--);
+      }
+    });
+  }
+
+  void reset(int value) {
+    timer?.cancel();
+    setState(() {
+      initial = value;
+      seconds = value;
+      running = false;
+    });
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final theme = Theme.of(context);
+    final progress = initial == 0 ? 0.0 : seconds / initial;
+    final min = (seconds ~/ 60).toString().padLeft(2, '0');
+    final sec = (seconds % 60).toString().padLeft(2, '0');
+    return Card(
+      child: Padding(
+        padding: const EdgeInsets.all(16),
+        child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+          Row(children: [
+            Icon(Icons.timer_outlined, color: theme.colorScheme.primary),
+            const SizedBox(width: 8),
+            Expanded(child: Text('Timer odpoczynku', style: theme.textTheme.titleMedium?.copyWith(fontWeight: FontWeight.w900))),
+            Text('$min:$sec', style: theme.textTheme.titleLarge?.copyWith(fontWeight: FontWeight.w900)),
+          ]),
+          const SizedBox(height: 10),
+          LinearProgressIndicator(value: progress.clamp(0, 1)),
+          const SizedBox(height: 12),
+          Wrap(spacing: 8, runSpacing: 8, children: [
+            OutlinedButton(onPressed: () => reset(60), child: const Text('60 s')),
+            OutlinedButton(onPressed: () => reset(90), child: const Text('90 s')),
+            OutlinedButton(onPressed: () => reset(120), child: const Text('120 s')),
+            FilledButton.icon(onPressed: running ? null : start, icon: const Icon(Icons.play_arrow), label: const Text('Start')),
+          ]),
+        ]),
+      ),
+    );
+  }
+}
+
+class QuickWorkoutActionsCard extends StatelessWidget {
+  @override
+  Widget build(BuildContext context) {
+    final theme = Theme.of(context);
+    return Card(
+      child: Padding(
+        padding: const EdgeInsets.all(16),
+        child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+          Row(children: [
+            Icon(Icons.flash_on, color: theme.colorScheme.primary),
+            const SizedBox(width: 8),
+            Expanded(child: Text('Szybkie akcje', style: theme.textTheme.titleMedium?.copyWith(fontWeight: FontWeight.w900))),
+          ]),
+          const SizedBox(height: 10),
+          Wrap(spacing: 8, runSpacing: 8, children: [
+            FilledButton.tonalIcon(onPressed: () => showAddWorkoutSheet(context, exercise: ExerciseRepo.byId('plank')), icon: const Icon(Icons.accessibility_new), label: const Text('Core')),
+            FilledButton.tonalIcon(onPressed: () => showAddWorkoutSheet(context, exercise: ExerciseRepo.byId('run')), icon: const Icon(Icons.directions_run), label: const Text('Bieg')),
+            FilledButton.tonalIcon(onPressed: () => showAddWorkoutSheet(context, exercise: ExerciseRepo.byId('squat')), icon: const Icon(Icons.fitness_center), label: const Text('Siła')),
+            OutlinedButton.icon(onPressed: () => showPlanGenerator(context), icon: const Icon(Icons.auto_awesome), label: const Text('Plan AI')),
+          ]),
+        ]),
       ),
     );
   }
@@ -1946,9 +2299,11 @@ class WorkoutLogCard extends StatelessWidget {
                   children: [
                     Text(e.name, style: theme.textTheme.titleMedium?.copyWith(fontWeight: FontWeight.w900)),
                     const SizedBox(height: 4),
-                    Text('${log.sets} serie × ${log.reps == 0 ? '-' : log.reps} powt. · ${log.weightKg.toStringAsFixed(1)} kg', style: theme.textTheme.bodySmall?.copyWith(color: theme.colorScheme.onSurfaceVariant)),
+                    Text('${log.sets} serie × ${log.reps == 0 ? '-' : log.reps} powt. · ${log.weightKg.toStringAsFixed(1)} kg',
+                        style: theme.textTheme.bodySmall?.copyWith(color: theme.colorScheme.onSurfaceVariant)),
                     const SizedBox(height: 4),
-                    Text('${log.calories.round()} kcal · RPE ${log.rpe} · ${(log.durationSec / 60).round()} min', style: theme.textTheme.bodySmall?.copyWith(color: theme.colorScheme.onSurfaceVariant)),
+                    Text('${log.calories.round()} kcal · RPE ${log.rpe} · ${(log.durationSec / 60).round()} min',
+                        style: theme.textTheme.bodySmall?.copyWith(color: theme.colorScheme.onSurfaceVariant)),
                     if (log.aiConfidence > 0)
                       Padding(
                         padding: const EdgeInsets.only(top: 6),
@@ -2039,16 +2394,16 @@ class _AiQuickCardState extends State<AiQuickCard> {
                     onPressed: store.aiBusy
                         ? null
                         : () async {
-                      if (controller.text.trim().isEmpty) return;
-                      try {
-                        final result = await store.analyzeWorkoutText(controller.text);
-                        if (!context.mounted) return;
-                        showAiResultDialog(context, result);
-                      } catch (e) {
-                        if (!context.mounted) return;
-                        showError(context, e.toString());
-                      }
-                    },
+                            if (controller.text.trim().isEmpty) return;
+                            try {
+                              final result = await store.analyzeWorkoutText(controller.text);
+                              if (!context.mounted) return;
+                              showAiResultDialog(context, result);
+                            } catch (e) {
+                              if (!context.mounted) return;
+                              showError(context, e.toString());
+                            }
+                          },
                     icon: store.aiBusy ? const SizedBox(width: 16, height: 16, child: CircularProgressIndicator(strokeWidth: 2)) : const Icon(Icons.bolt),
                     label: const Text('Analiza'),
                   ),
@@ -2056,8 +2411,8 @@ class _AiQuickCardState extends State<AiQuickCard> {
               ],
             ),
             if (store.lastAiMessage != null) ...[
-              const SizedBox(height: 10),
-              SelectableText(store.lastAiMessage!, style: theme.textTheme.bodySmall),
+              const SizedBox(height: 12),
+              AiResultPreviewCard(result: asJsonMap(store.lastAiMessage) ?? {'summary': store.lastAiMessage}),
             ],
           ],
         ),
@@ -2069,12 +2424,152 @@ class _AiQuickCardState extends State<AiQuickCard> {
 void showAiResultDialog(BuildContext context, Map<String, dynamic> result) {
   showDialog(
     context: context,
-    builder: (_) => AlertDialog(
-      title: const Text('Wynik AI'),
-      content: SingleChildScrollView(child: SelectableText(prettyJson(result))),
-      actions: [TextButton(onPressed: () => Navigator.pop(context), child: const Text('OK'))],
+    builder: (_) => Dialog(
+      insetPadding: const EdgeInsets.all(18),
+      child: ConstrainedBox(
+        constraints: const BoxConstraints(maxWidth: 560),
+        child: Padding(
+          padding: const EdgeInsets.all(16),
+          child: SingleChildScrollView(
+            child: AiResultPreviewCard(result: result, expanded: true),
+          ),
+        ),
+      ),
     ),
   );
+}
+
+class AiResultPreviewCard extends StatelessWidget {
+  final Map<String, dynamic> result;
+  final bool expanded;
+
+  const AiResultPreviewCard({super.key, required this.result, this.expanded = false});
+
+  @override
+  Widget build(BuildContext context) {
+    final theme = Theme.of(context);
+    final summary = smartValue(result['summary'] ?? result['note'] ?? result['result'], fallback: 'Analiza gotowa.');
+    final intensity = smartValue(result['intensity'] ?? result['training_type'], fallback: 'brak danych');
+    final calories = smartValue(result['estimated_calories'] ?? result['calories'], fallback: '0');
+    final minutes = smartValue(result['duration_min'] ?? result['duration_minutes'] ?? result['total_duration_min'], fallback: '-');
+    final sets = smartValue(result['total_sets'], fallback: '-');
+    final volume = smartValue(result['estimated_volume_kg'] ?? result['volume_kg'], fallback: '-');
+    final muscles = smartStringList(result['worked_muscles'] ?? result['muscles']);
+    final suggestions = smartStringList(result['suggestions'] ?? result['tips']);
+    final exercisesRaw = result['detected_exercises'] ?? result['exercises'];
+    final detected = exercisesRaw is List ? exercisesRaw.whereType<Map>().map((e) => Map<String, dynamic>.from(e)).toList() : <Map<String, dynamic>>[];
+
+    Widget metric(String label, String value, IconData icon) {
+      return Expanded(
+        child: Container(
+          padding: const EdgeInsets.all(12),
+          decoration: BoxDecoration(
+            color: theme.colorScheme.surfaceContainerHighest.withOpacity(0.55),
+            borderRadius: BorderRadius.circular(18),
+          ),
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Icon(icon, size: 20, color: theme.colorScheme.primary),
+              const SizedBox(height: 8),
+              Text(value, maxLines: 1, overflow: TextOverflow.ellipsis, style: theme.textTheme.titleMedium?.copyWith(fontWeight: FontWeight.w900)),
+              Text(label, maxLines: 1, overflow: TextOverflow.ellipsis, style: theme.textTheme.labelSmall?.copyWith(color: theme.colorScheme.onSurfaceVariant)),
+            ],
+          ),
+        ),
+      );
+    }
+
+    return Card(
+      margin: EdgeInsets.zero,
+      child: Padding(
+        padding: const EdgeInsets.all(16),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.stretch,
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            Row(
+              children: [
+                CircleAvatar(
+                  backgroundColor: theme.colorScheme.primaryContainer,
+                  foregroundColor: theme.colorScheme.onPrimaryContainer,
+                  child: const Icon(Icons.auto_awesome),
+                ),
+                const SizedBox(width: 10),
+                Expanded(child: Text('Wynik analizy AI', style: theme.textTheme.titleLarge?.copyWith(fontWeight: FontWeight.w900))),
+                if (expanded) IconButton(onPressed: () => Navigator.of(context).maybePop(), icon: const Icon(Icons.close)),
+              ],
+            ),
+            const SizedBox(height: 12),
+            Text(summary, style: theme.textTheme.bodyMedium?.copyWith(height: 1.35)),
+            const SizedBox(height: 14),
+            Row(children: [
+              metric('Kalorie', '$calories kcal', Icons.local_fire_department_outlined),
+              const SizedBox(width: 8),
+              metric('Czas', '$minutes min', Icons.timer_outlined),
+            ]),
+            const SizedBox(height: 8),
+            Row(children: [
+              metric('Serie', sets, Icons.repeat),
+              const SizedBox(width: 8),
+              metric('Objętość', '$volume kg', Icons.monitor_weight_outlined),
+            ]),
+            const SizedBox(height: 12),
+            Wrap(
+              spacing: 8,
+              runSpacing: 8,
+              children: [
+                MiniTag(text: 'Intensywność: $intensity'),
+                ...muscles.take(8).map((m) => MiniTag(text: m)),
+              ],
+            ),
+            if (detected.isNotEmpty) ...[
+              const SizedBox(height: 14),
+              Text('Wykryte ćwiczenia', style: theme.textTheme.titleSmall?.copyWith(fontWeight: FontWeight.w900)),
+              const SizedBox(height: 8),
+              ...detected.take(expanded ? 10 : 3).map((e) => Container(
+                    margin: const EdgeInsets.only(bottom: 8),
+                    padding: const EdgeInsets.all(12),
+                    decoration: BoxDecoration(
+                      color: theme.colorScheme.surfaceContainerHighest.withOpacity(0.40),
+                      borderRadius: BorderRadius.circular(18),
+                    ),
+                    child: Row(
+                      children: [
+                        const Icon(Icons.fitness_center, size: 18),
+                        const SizedBox(width: 8),
+                        Expanded(child: Text(smartValue(e['name']), maxLines: 1, overflow: TextOverflow.ellipsis, style: const TextStyle(fontWeight: FontWeight.w800))),
+                        Text('${smartValue(e['sets'])}×${smartValue(e['reps'])}', style: theme.textTheme.labelLarge),
+                      ],
+                    ),
+                  )),
+            ],
+            if (suggestions.isNotEmpty) ...[
+              const SizedBox(height: 10),
+              Text('Sugestie', style: theme.textTheme.titleSmall?.copyWith(fontWeight: FontWeight.w900)),
+              const SizedBox(height: 6),
+              ...suggestions.take(expanded ? 8 : 3).map((e) => Padding(
+                    padding: const EdgeInsets.only(bottom: 6),
+                    child: Row(crossAxisAlignment: CrossAxisAlignment.start, children: [
+                      Icon(Icons.check_circle_outline, size: 18, color: theme.colorScheme.primary),
+                      const SizedBox(width: 8),
+                      Expanded(child: Text(e)),
+                    ]),
+                  )),
+            ],
+            if (expanded) ...[
+              const SizedBox(height: 12),
+              ExpansionTile(
+                tilePadding: EdgeInsets.zero,
+                title: const Text('Surowy JSON / debug'),
+                children: [SelectableText(prettyJson(result), style: theme.textTheme.bodySmall)],
+              ),
+            ],
+          ],
+        ),
+      ),
+    );
+  }
 }
 
 void showError(BuildContext context, String message) {
@@ -2090,8 +2585,14 @@ class ExercisesPage extends StatefulWidget {
 
 class _ExercisesPageState extends State<ExercisesPage> {
   final search = TextEditingController();
-  String category = 'Wszystkie';
+  String muscleGroup = 'Wszystkie';
+  String equipmentType = 'Wszystkie';
   String level = 'Wszystkie';
+  String trainingGoal = 'Wszystkie';
+  bool onlyFavorites = false;
+  bool showHidden = false;
+  bool onlyAvailableEquipment = false;
+  bool avoidLimitations = false;
 
   @override
   void dispose() {
@@ -2102,185 +2603,629 @@ class _ExercisesPageState extends State<ExercisesPage> {
   @override
   Widget build(BuildContext context) {
     final store = AppScope.of(context);
-    final categories = ExerciseRepo.categories(store.customExercises);
-    if (!categories.contains(category)) category = 'Wszystkie';
-    final items = ExerciseRepo.search(search.text, category, level, store.customExercises);
+    final filter = ExerciseLibraryFilter(
+      query: search.text,
+      muscleGroup: muscleGroup == 'Wszystkie' ? null : MuscleGroup.values.firstWhere((value) => value.name == muscleGroup),
+      equipmentType: equipmentType == 'Wszystkie' ? null : EquipmentType.values.firstWhere((value) => value.name == equipmentType),
+      level: level == 'Wszystkie' ? null : level,
+      trainingGoal: trainingGoal == 'Wszystkie' ? null : TrainingGoal.values.firstWhere((value) => value.name == trainingGoal),
+      onlyFavorites: onlyFavorites,
+      showHidden: showHidden,
+    );
+    final filteredItems = filter.apply(
+      exercises: ExerciseRepo.combined(store.customExercises),
+      preferences: store.exerciseLibraryPreferences,
+    );
+    final items = filteredItems.where((exercise) {
+      final equipmentOk = !onlyAvailableEquipment || equipmentMatchesSettings(exercise, store.settings.equipment);
+      final painOk = !avoidLimitations || limitationSafe(exercise, store.settings.limitations);
+      return equipmentOk && painOk;
+    }).toList();
     return PageFrame(
       title: 'Baza ćwiczeń',
-      subtitle: '${items.length} ćwiczeń · poziomy, lokalna baza i import z wger',
+      subtitle: '${items.length} ćwiczeń · technika, bezpieczeństwo i lokalne preferencje',
       actions: [
-        IconButton.filledTonal(onPressed: () => showWgerSearchSheet(context), icon: const Icon(Icons.cloud_download_outlined)),
+        IconButton.filledTonal(
+          tooltip: 'Dodaj własne ćwiczenie',
+          onPressed: () => showCreateExerciseSheet(context),
+          icon: const Icon(Icons.add_rounded),
+        ),
         const SizedBox(width: 8),
-        IconButton.filledTonal(onPressed: () => showAddWorkoutSheet(context), icon: const Icon(Icons.add)),
+        IconButton.filledTonal(
+          tooltip: 'Importuj ćwiczenie',
+          onPressed: () => showWgerSearchSheet(context),
+          icon: const Icon(Icons.cloud_download_outlined),
+        ),
+        const SizedBox(width: 8),
+        IconButton.filledTonal(
+          tooltip: 'Dodaj trening',
+          onPressed: () => showAddWorkoutSheet(context),
+          icon: const Icon(Icons.playlist_add_rounded),
+        ),
       ],
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.stretch,
         children: [
-          TextField(
-            controller: search,
-            onChanged: (_) => setState(() {}),
-            decoration: const InputDecoration(prefixIcon: Icon(Icons.search), hintText: 'Szukaj po nazwie, mięśniu, sprzęcie albo poziomie'),
-          ),
-          const SizedBox(height: 10),
-          SizedBox(
-            height: 44,
-            child: ListView.separated(
-              scrollDirection: Axis.horizontal,
-              itemCount: categories.length,
-              separatorBuilder: (_, __) => const SizedBox(width: 8),
-              itemBuilder: (_, i) {
-                final c = categories[i];
-                return ChoiceChip(label: Text(c), selected: category == c, onSelected: (_) => setState(() => category = c));
-              },
-            ),
-          ),
-          const SizedBox(height: 10),
-          SizedBox(
-            height: 44,
-            child: ListView.separated(
-              scrollDirection: Axis.horizontal,
-              itemCount: const ['Wszystkie', ...kTrainingLevels].length,
-              separatorBuilder: (_, __) => const SizedBox(width: 8),
-              itemBuilder: (_, i) {
-                final levels = const ['Wszystkie', ...kTrainingLevels];
-                final l = levels[i];
-                return FilterChip(label: Text(l), selected: level == l, onSelected: (_) => setState(() => level = l));
-              },
-            ),
-          ),
-          const SizedBox(height: 14),
           Card(
-            child: ListTile(
-              leading: const Icon(Icons.public),
-              title: const Text('Darmowa baza online'),
-              subtitle: const Text('Szukaj ćwiczeń w wger i dodawaj je do lokalnej bazy Trainer.'),
-              trailing: const Icon(Icons.chevron_right),
-              onTap: () => showWgerSearchSheet(context),
+            child: Padding(
+              padding: const EdgeInsets.all(16),
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.stretch,
+                children: [
+                  TextField(
+                    controller: search,
+                    onChanged: (_) => setState(() {}),
+                    textInputAction: TextInputAction.search,
+                    decoration: InputDecoration(
+                      prefixIcon: const Icon(Icons.search_rounded),
+                      hintText: 'Szukaj po nazwie ćwiczenia',
+                      suffixIcon: search.text.isEmpty
+                          ? null
+                          : IconButton(
+                              tooltip: 'Wyczyść',
+                              onPressed: () {
+                                search.clear();
+                                setState(() {});
+                              },
+                              icon: const Icon(Icons.close_rounded),
+                            ),
+                    ),
+                  ),
+                  const SizedBox(height: 12),
+                  Wrap(
+                    spacing: 8,
+                    runSpacing: 8,
+                    children: [
+                      FilterChip(
+                        avatar: Icon(
+                          onlyFavorites ? Icons.star_rounded : Icons.star_border_rounded,
+                          size: 18,
+                        ),
+                        label: const Text('Ulubione'),
+                        selected: onlyFavorites,
+                        onSelected: (value) => setState(() => onlyFavorites = value),
+                      ),
+                      FilterChip(
+                        avatar: const Icon(Icons.visibility_off_outlined, size: 18),
+                        label: Text(
+                          'Ukryte (${store.exerciseLibraryPreferences.hiddenExerciseIds.length})',
+                        ),
+                        selected: showHidden,
+                        onSelected: (value) => setState(() => showHidden = value),
+                      ),
+                      FilterChip(
+                        label: const Text('Tylko mój sprzęt'),
+                        selected: onlyAvailableEquipment,
+                        onSelected: (value) => setState(() => onlyAvailableEquipment = value),
+                      ),
+                      FilterChip(
+                        label: const Text('Omijaj ograniczenia'),
+                        selected: avoidLimitations,
+                        onSelected: (value) => setState(() => avoidLimitations = value),
+                      ),
+                    ],
+                  ),
+                ],
+              ),
+            ),
+          ),
+          const SizedBox(height: 12),
+          Card(
+            child: Padding(
+              padding: const EdgeInsets.all(16),
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.stretch,
+                children: [
+                  Row(
+                    children: [
+                      Icon(
+                        Icons.tune_rounded,
+                        color: Theme.of(context).colorScheme.primary,
+                      ),
+                      const SizedBox(width: 8),
+                      Expanded(
+                        child: Text(
+                          'Filtry bazy',
+                          style: Theme.of(context).textTheme.titleMedium?.copyWith(fontWeight: FontWeight.w900),
+                        ),
+                      ),
+                      TextButton(
+                        onPressed: _hasActiveFilters
+                            ? () {
+                                setState(() {
+                                  muscleGroup = 'Wszystkie';
+                                  equipmentType = 'Wszystkie';
+                                  level = 'Wszystkie';
+                                  trainingGoal = 'Wszystkie';
+                                  onlyFavorites = false;
+                                  showHidden = false;
+                                  onlyAvailableEquipment = false;
+                                  avoidLimitations = false;
+                                });
+                              }
+                            : null,
+                        child: const Text('Wyczyść'),
+                      ),
+                    ],
+                  ),
+                  const SizedBox(height: 10),
+                  LayoutBuilder(
+                    builder: (context, constraints) {
+                      final columns = constraints.maxWidth >= 620 ? 2 : 1;
+                      final width = columns == 2 ? (constraints.maxWidth - 10) / 2 : constraints.maxWidth;
+                      return Wrap(
+                        spacing: 10,
+                        runSpacing: 10,
+                        children: [
+                          SizedBox(
+                            width: width,
+                            child: _ExerciseFilterDropdown(
+                              label: 'Partia mięśniowa',
+                              value: muscleGroup,
+                              options: [
+                                const MapEntry('Wszystkie', 'Wszystkie'),
+                                ...MuscleGroup.values.map(
+                                  (value) => MapEntry(value.name, value.label),
+                                ),
+                              ],
+                              onChanged: (value) => setState(() => muscleGroup = value),
+                            ),
+                          ),
+                          SizedBox(
+                            width: width,
+                            child: _ExerciseFilterDropdown(
+                              label: 'Sprzęt',
+                              value: equipmentType,
+                              options: [
+                                const MapEntry('Wszystkie', 'Wszystkie'),
+                                ...EquipmentType.values.map(
+                                  (value) => MapEntry(value.name, value.label),
+                                ),
+                              ],
+                              onChanged: (value) => setState(() => equipmentType = value),
+                            ),
+                          ),
+                          SizedBox(
+                            width: width,
+                            child: _ExerciseFilterDropdown(
+                              label: 'Poziom trudności',
+                              value: level,
+                              options: [
+                                const MapEntry('Wszystkie', 'Wszystkie'),
+                                ...kTrainingLevels.map(
+                                  (value) => MapEntry(value, value),
+                                ),
+                              ],
+                              onChanged: (value) => setState(() => level = value),
+                            ),
+                          ),
+                          SizedBox(
+                            width: width,
+                            child: _ExerciseFilterDropdown(
+                              label: 'Cel treningowy',
+                              value: trainingGoal,
+                              options: [
+                                const MapEntry('Wszystkie', 'Wszystkie'),
+                                ...TrainingGoal.values.map(
+                                  (value) => MapEntry(value.name, value.label),
+                                ),
+                              ],
+                              onChanged: (value) => setState(() => trainingGoal = value),
+                            ),
+                          ),
+                        ],
+                      );
+                    },
+                  ),
+                ],
+              ),
             ),
           ),
           const SizedBox(height: 14),
-          ...items.map((e) => ExerciseCard(exercise: e)),
+          Row(
+            children: [
+              Expanded(
+                child: Text(
+                  showHidden ? 'Ukryte ćwiczenia' : 'Ćwiczenia',
+                  style: Theme.of(context).textTheme.titleLarge?.copyWith(fontWeight: FontWeight.w900),
+                ),
+              ),
+              Text(
+                '${items.length}',
+                style: Theme.of(context).textTheme.titleMedium?.copyWith(
+                      color: Theme.of(context).colorScheme.primary,
+                      fontWeight: FontWeight.w900,
+                    ),
+              ),
+            ],
+          ),
+          const SizedBox(height: 10),
+          if (items.isEmpty)
+            _ExerciseLibraryEmptyState(
+              showingHidden: showHidden,
+              onAdd: () => showCreateExerciseSheet(context),
+              onClearFilters: () {
+                search.clear();
+                setState(() {
+                  muscleGroup = 'Wszystkie';
+                  equipmentType = 'Wszystkie';
+                  level = 'Wszystkie';
+                  trainingGoal = 'Wszystkie';
+                  onlyFavorites = false;
+                  showHidden = false;
+                  onlyAvailableEquipment = false;
+                  avoidLimitations = false;
+                });
+              },
+            )
+          else
+            ...items.map(
+              (exercise) => ExerciseCard(
+                exercise: exercise,
+                isFavorite: store.isExerciseFavorite(exercise.id),
+                isHidden: store.isExerciseHidden(exercise.id),
+                onFavorite: () => store.toggleExerciseFavorite(exercise.id),
+                onHidden: () => store.setExerciseHidden(
+                  exercise.id,
+                  !store.isExerciseHidden(exercise.id),
+                ),
+                onEdit: () => showCreateExerciseSheet(
+                  context,
+                  exercise: exercise,
+                ),
+              ),
+            ),
         ],
+      ),
+    );
+  }
+
+  bool get _hasActiveFilters =>
+      muscleGroup != 'Wszystkie' || equipmentType != 'Wszystkie' || level != 'Wszystkie' || trainingGoal != 'Wszystkie' || onlyFavorites || showHidden || onlyAvailableEquipment || avoidLimitations;
+}
+
+class _ExerciseFilterDropdown extends StatelessWidget {
+  const _ExerciseFilterDropdown({
+    required this.label,
+    required this.value,
+    required this.options,
+    required this.onChanged,
+  });
+
+  final String label;
+  final String value;
+  final List<MapEntry<String, String>> options;
+  final ValueChanged<String> onChanged;
+
+  @override
+  Widget build(BuildContext context) {
+    return DropdownButtonFormField<String>(
+      key: ValueKey('$label-$value'),
+      initialValue: value,
+      isExpanded: true,
+      decoration: InputDecoration(labelText: label),
+      items: options
+          .map(
+            (option) => DropdownMenuItem<String>(
+              value: option.key,
+              child: Text(
+                option.value,
+                maxLines: 1,
+                overflow: TextOverflow.ellipsis,
+              ),
+            ),
+          )
+          .toList(),
+      onChanged: (next) {
+        if (next != null) onChanged(next);
+      },
+    );
+  }
+}
+
+class _ExerciseLibraryEmptyState extends StatelessWidget {
+  const _ExerciseLibraryEmptyState({
+    required this.showingHidden,
+    required this.onAdd,
+    required this.onClearFilters,
+  });
+
+  final bool showingHidden;
+  final VoidCallback onAdd;
+  final VoidCallback onClearFilters;
+
+  @override
+  Widget build(BuildContext context) {
+    final theme = Theme.of(context);
+    return Card(
+      child: Padding(
+        padding: const EdgeInsets.all(24),
+        child: Column(
+          children: [
+            Icon(
+              showingHidden ? Icons.visibility_outlined : Icons.search_off_rounded,
+              size: 46,
+              color: theme.colorScheme.primary,
+            ),
+            const SizedBox(height: 12),
+            Text(
+              showingHidden ? 'Brak ukrytych ćwiczeń' : 'Brak ćwiczeń dla wybranych filtrów',
+              textAlign: TextAlign.center,
+              style: theme.textTheme.titleMedium?.copyWith(fontWeight: FontWeight.w900),
+            ),
+            const SizedBox(height: 6),
+            Text(
+              showingHidden ? 'Ukryte pozycje pojawią się tutaj i będzie można je przywrócić.' : 'Wyczyść filtry albo dodaj własne ćwiczenie.',
+              textAlign: TextAlign.center,
+              style: theme.textTheme.bodyMedium?.copyWith(color: theme.colorScheme.onSurfaceVariant),
+            ),
+            const SizedBox(height: 16),
+            Wrap(
+              alignment: WrapAlignment.center,
+              spacing: 8,
+              runSpacing: 8,
+              children: [
+                OutlinedButton(
+                  onPressed: onClearFilters,
+                  child: const Text('Wyczyść filtry'),
+                ),
+                FilledButton.icon(
+                  onPressed: onAdd,
+                  icon: const Icon(Icons.add_rounded),
+                  label: const Text('Dodaj ćwiczenie'),
+                ),
+              ],
+            ),
+          ],
+        ),
       ),
     );
   }
 }
 
 void showWgerSearchSheet(BuildContext context) {
-  final store = AppScope.of(context);
-  final query = TextEditingController();
-  var busy = false;
-  var message = '';
-  var results = <Exercise>[];
+  final store = AppScope.read(context);
   showModalBottomSheet(
     context: context,
     isScrollControlled: true,
     useSafeArea: true,
     showDragHandle: true,
-    builder: (sheetContext) {
-      return StatefulBuilder(builder: (context, setSheet) {
-        Future<void> runSearch() async {
-          if (query.text.trim().isEmpty) return;
-          setSheet(() {
-            busy = true;
-            message = '';
-          });
-          try {
-            final found = await WgerService().searchExercises(query.text);
-            if (!context.mounted) return;
-            setSheet(() {
-              results = found;
-              message = found.isEmpty ? 'Brak wyników. Spróbuj angielskiej nazwy, np. squat, row, bench press.' : 'Znaleziono ${found.length} ćwiczeń.';
-            });
-          } catch (e) {
-            if (!context.mounted) return;
-            setSheet(() => message = 'Błąd API: $e');
-          } finally {
-            if (context.mounted) setSheet(() => busy = false);
-          }
-        }
+    builder: (sheetContext) => WgerSearchSheetContent(store: store, hostContext: context),
+  );
+}
 
-        return Padding(
-          padding: EdgeInsets.fromLTRB(16, 0, 16, 16 + MediaQuery.of(context).viewInsets.bottom + MediaQuery.of(context).viewPadding.bottom),
-          child: SingleChildScrollView(
-            child: Column(
-              crossAxisAlignment: CrossAxisAlignment.stretch,
-              mainAxisSize: MainAxisSize.min,
-              children: [
-                Text('Import ćwiczeń z wger', style: Theme.of(context).textTheme.titleLarge?.copyWith(fontWeight: FontWeight.w900)),
-                const SizedBox(height: 8),
-                Text('Najlepiej działa po angielsku: squat, push up, row, curl, deadlift.', style: Theme.of(context).textTheme.bodySmall?.copyWith(color: Theme.of(context).colorScheme.onSurfaceVariant)),
-                const SizedBox(height: 12),
-                TextField(
-                  controller: query,
-                  decoration: const InputDecoration(prefixIcon: Icon(Icons.search), labelText: 'Nazwa ćwiczenia online'),
-                  textInputAction: TextInputAction.search,
-                  onSubmitted: (_) => runSearch(),
-                ),
-                const SizedBox(height: 10),
-                FilledButton.icon(
-                  onPressed: busy ? null : runSearch,
-                  icon: busy ? const SizedBox(width: 16, height: 16, child: CircularProgressIndicator(strokeWidth: 2)) : const Icon(Icons.cloud_search),
-                  label: const Text('Szukaj w darmowej bazie'),
-                ),
-                if (message.isNotEmpty) ...[
-                  const SizedBox(height: 10),
-                  Text(message),
-                ],
-                const SizedBox(height: 12),
-                ...results.map((exercise) => Card(
+class WgerSearchSheetContent extends StatefulWidget {
+  final AppStore store;
+  final BuildContext hostContext;
+
+  const WgerSearchSheetContent({super.key, required this.store, required this.hostContext});
+
+  @override
+  State<WgerSearchSheetContent> createState() => _WgerSearchSheetContentState();
+}
+
+class _WgerSearchSheetContentState extends State<WgerSearchSheetContent> {
+  final query = TextEditingController();
+  bool busy = false;
+  String message = '';
+  List<Exercise> results = const [];
+
+  @override
+  void dispose() {
+    query.dispose();
+    super.dispose();
+  }
+
+  Future<void> runSearch() async {
+    if (query.text.trim().isEmpty || busy) return;
+    setState(() {
+      busy = true;
+      message = '';
+    });
+    try {
+      final found = await WgerService().searchExercises(query.text);
+      if (!mounted) return;
+      setState(() {
+        results = found;
+        message = found.isEmpty ? 'Brak wyników. Spróbuj angielskiej nazwy, np. squat, row, bench press.' : 'Znaleziono ${found.length} ćwiczeń. Kliknij + przy wybranym ćwiczeniu.';
+      });
+    } catch (e) {
+      if (!mounted) return;
+      setState(() => message = 'Błąd API: $e');
+    } finally {
+      if (mounted) setState(() => busy = false);
+    }
+  }
+
+  Future<void> addExercise(Exercise exercise) async {
+    await widget.store.addCustomExercise(exercise);
+    if (!mounted) return;
+    Navigator.of(context).pop();
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (widget.hostContext.mounted) {
+        showError(widget.hostContext, 'Dodano do bazy: ${exercise.name}');
+      }
+    });
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final theme = Theme.of(context);
+    return Padding(
+      padding: EdgeInsets.fromLTRB(
+        16,
+        0,
+        16,
+        16 + MediaQuery.of(context).viewInsets.bottom + MediaQuery.of(context).viewPadding.bottom,
+      ),
+      child: SingleChildScrollView(
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.stretch,
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            Text('Import ćwiczeń z wger', style: theme.textTheme.titleLarge?.copyWith(fontWeight: FontWeight.w900)),
+            const SizedBox(height: 8),
+            Text('Najlepiej działa po angielsku: squat, push up, row, curl, deadlift. Po dodaniu ćwiczenie trafia do lokalnej bazy.',
+                style: theme.textTheme.bodySmall?.copyWith(color: theme.colorScheme.onSurfaceVariant)),
+            const SizedBox(height: 12),
+            TextField(
+              controller: query,
+              decoration: const InputDecoration(prefixIcon: Icon(Icons.search), labelText: 'Nazwa ćwiczenia online'),
+              textInputAction: TextInputAction.search,
+              onSubmitted: (_) => runSearch(),
+            ),
+            const SizedBox(height: 10),
+            FilledButton.icon(
+              onPressed: busy ? null : runSearch,
+              icon: busy ? const SizedBox(width: 16, height: 16, child: CircularProgressIndicator(strokeWidth: 2)) : const Icon(Icons.search),
+              label: const Text('Szukaj w darmowej bazie'),
+            ),
+            if (message.isNotEmpty) ...[
+              const SizedBox(height: 10),
+              Text(message, style: theme.textTheme.bodySmall?.copyWith(color: theme.colorScheme.onSurfaceVariant)),
+            ],
+            const SizedBox(height: 12),
+            ...results.map((exercise) => Card(
                   child: ListTile(
                     leading: SizedBox(width: 54, height: 54, child: ExerciseVisual(exercise: exercise)),
                     title: Text(exercise.name, maxLines: 1, overflow: TextOverflow.ellipsis),
                     subtitle: Text('${exercise.category} · ${exercise.equipment}', maxLines: 2, overflow: TextOverflow.ellipsis),
-                    trailing: FilledButton(
-                      onPressed: () async {
-                        await store.addCustomExercise(exercise);
-                        if (!context.mounted) return;
-                        showError(context, 'Dodano do bazy: ${exercise.name}');
-                      },
-                      child: const Text('Dodaj'),
+                    trailing: IconButton.filledTonal(
+                      onPressed: () => addExercise(exercise),
+                      tooltip: 'Dodaj do bazy',
+                      icon: const Icon(Icons.add),
                     ),
+                    onTap: () => addExercise(exercise),
                   ),
                 )),
-                const SizedBox(height: 8),
-              ],
-            ),
-          ),
-        );
-      });
-    },
-  ).whenComplete(query.dispose);
+            const SizedBox(height: 8),
+          ],
+        ),
+      ),
+    );
+  }
 }
 
 class ExerciseCard extends StatelessWidget {
-  final Exercise exercise;
+  const ExerciseCard({
+    super.key,
+    required this.exercise,
+    required this.isFavorite,
+    required this.isHidden,
+    required this.onFavorite,
+    required this.onHidden,
+    required this.onEdit,
+  });
 
-  const ExerciseCard({super.key, required this.exercise});
+  final Exercise exercise;
+  final bool isFavorite;
+  final bool isHidden;
+  final VoidCallback onFavorite;
+  final VoidCallback onHidden;
+  final VoidCallback onEdit;
 
   @override
   Widget build(BuildContext context) {
     final theme = Theme.of(context);
     return Card(
       margin: const EdgeInsets.only(bottom: 12),
+      clipBehavior: Clip.antiAlias,
       child: InkWell(
-        borderRadius: BorderRadius.circular(24),
-        onTap: () => Navigator.of(context).push(MaterialPageRoute(builder: (_) => ExerciseDetailsPage(exercise: exercise))),
+        onTap: () => Navigator.of(context).push(
+          MaterialPageRoute(
+            builder: (_) => ExerciseDetailsPage(exerciseId: exercise.id),
+          ),
+        ),
         child: Padding(
           padding: const EdgeInsets.all(14),
           child: Row(
+            crossAxisAlignment: CrossAxisAlignment.start,
             children: [
-              SizedBox(width: 92, height: 92, child: ExerciseVisual(exercise: exercise)),
+              Container(
+                width: 78,
+                height: 92,
+                decoration: BoxDecoration(
+                  color: theme.colorScheme.primaryContainer.withValues(
+                    alpha: 0.35,
+                  ),
+                  borderRadius: BorderRadius.circular(20),
+                ),
+                child: ExerciseVisual(exercise: exercise),
+              ),
               const SizedBox(width: 12),
               Expanded(
                 child: Column(
                   crossAxisAlignment: CrossAxisAlignment.start,
                   children: [
-                    Text(exercise.name, style: theme.textTheme.titleMedium?.copyWith(fontWeight: FontWeight.w900)),
+                    Row(
+                      children: [
+                        Expanded(
+                          child: Text(
+                            exercise.name,
+                            maxLines: 2,
+                            overflow: TextOverflow.ellipsis,
+                            style: theme.textTheme.titleMedium?.copyWith(fontWeight: FontWeight.w900),
+                          ),
+                        ),
+                        IconButton(
+                          visualDensity: VisualDensity.compact,
+                          tooltip: isFavorite ? 'Usuń z ulubionych' : 'Dodaj do ulubionych',
+                          onPressed: onFavorite,
+                          icon: Icon(
+                            isFavorite ? Icons.star_rounded : Icons.star_border_rounded,
+                            color: isFavorite ? const Color(0xFFFFC857) : theme.colorScheme.onSurfaceVariant,
+                          ),
+                        ),
+                        PopupMenuButton<String>(
+                          tooltip: 'Opcje ćwiczenia',
+                          onSelected: (value) {
+                            if (value == 'edit') onEdit();
+                            if (value == 'hide') onHidden();
+                          },
+                          itemBuilder: (context) => [
+                            const PopupMenuItem(
+                              value: 'edit',
+                              child: ListTile(
+                                contentPadding: EdgeInsets.zero,
+                                leading: Icon(Icons.edit_outlined),
+                                title: Text('Edytuj'),
+                              ),
+                            ),
+                            PopupMenuItem(
+                              value: 'hide',
+                              child: ListTile(
+                                contentPadding: EdgeInsets.zero,
+                                leading: Icon(
+                                  isHidden ? Icons.visibility_outlined : Icons.visibility_off_outlined,
+                                ),
+                                title: Text(
+                                  isHidden ? 'Przywróć' : 'Ukryj',
+                                ),
+                              ),
+                            ),
+                          ],
+                        ),
+                      ],
+                    ),
                     const SizedBox(height: 4),
-                    Text(exercise.category, style: theme.textTheme.labelMedium?.copyWith(color: theme.colorScheme.primary, fontWeight: FontWeight.w800)),
+                    Text(
+                      exercise.primaryMuscle,
+                      maxLines: 1,
+                      overflow: TextOverflow.ellipsis,
+                      style: theme.textTheme.labelLarge?.copyWith(
+                        color: theme.colorScheme.primary,
+                        fontWeight: FontWeight.w900,
+                      ),
+                    ),
                     const SizedBox(height: 4),
-                    Text(exercise.muscles.join(' · '), maxLines: 2, overflow: TextOverflow.ellipsis, style: theme.textTheme.bodySmall?.copyWith(color: theme.colorScheme.onSurfaceVariant)),
+                    Text(
+                      exercise.supportingMuscles.isEmpty ? 'Bez dodatkowych partii pomocniczych' : 'Pomocnicze: ${exercise.supportingMuscles.join(' · ')}',
+                      maxLines: 2,
+                      overflow: TextOverflow.ellipsis,
+                      style: theme.textTheme.bodySmall?.copyWith(
+                        color: theme.colorScheme.onSurfaceVariant,
+                      ),
+                    ),
                     const SizedBox(height: 8),
                     Wrap(
                       spacing: 6,
@@ -2288,13 +3233,14 @@ class ExerciseCard extends StatelessWidget {
                       children: [
                         MiniTag(text: normalizeLevel(exercise.level)),
                         MiniTag(text: exercise.equipment),
+                        if (exercise.trainingGoals.isNotEmpty) MiniTag(text: exercise.trainingGoals.first),
+                        if (isHidden) const MiniTag(text: 'Ukryte'),
                         if (exercise.source != 'local') MiniTag(text: exercise.source),
                       ],
                     ),
                   ],
                 ),
               ),
-              const Icon(Icons.chevron_right),
             ],
           ),
         ),
@@ -2320,21 +3266,74 @@ class MiniTag extends StatelessWidget {
 }
 
 class ExerciseDetailsPage extends StatelessWidget {
-  final Exercise exercise;
+  const ExerciseDetailsPage({super.key, required this.exerciseId});
 
-  const ExerciseDetailsPage({super.key, required this.exercise});
+  final String exerciseId;
 
   @override
   Widget build(BuildContext context) {
+    final store = AppScope.of(context);
+    final exercise = ExerciseRepo.byId(exerciseId, store.customExercises);
     final theme = Theme.of(context);
+    final isFavorite = store.isExerciseFavorite(exercise.id);
+    final isHidden = store.isExerciseHidden(exercise.id);
     return Scaffold(
-      appBar: AppBar(title: Text(exercise.name), actions: [IconButton(onPressed: () => showAddWorkoutSheet(context, exercise: exercise), icon: const Icon(Icons.add))]),
+      appBar: AppBar(
+        title: Text(
+          exercise.name,
+          maxLines: 1,
+          overflow: TextOverflow.ellipsis,
+        ),
+        actions: [
+          IconButton(
+            tooltip: isFavorite ? 'Usuń z ulubionych' : 'Dodaj do ulubionych',
+            onPressed: () => store.toggleExerciseFavorite(exercise.id),
+            icon: Icon(
+              isFavorite ? Icons.star_rounded : Icons.star_border_rounded,
+              color: isFavorite ? const Color(0xFFFFC857) : null,
+            ),
+          ),
+          IconButton(
+            tooltip: 'Edytuj ćwiczenie',
+            onPressed: () => showCreateExerciseSheet(context, exercise: exercise),
+            icon: const Icon(Icons.edit_outlined),
+          ),
+          PopupMenuButton<String>(
+            onSelected: (value) {
+              if (value == 'visibility') {
+                store.setExerciseHidden(exercise.id, !isHidden);
+              }
+              if (value == 'workout') {
+                showAddWorkoutSheet(context, exercise: exercise);
+              }
+            },
+            itemBuilder: (context) => [
+              PopupMenuItem(
+                value: 'visibility',
+                child: ListTile(
+                  contentPadding: EdgeInsets.zero,
+                  leading: Icon(
+                    isHidden ? Icons.visibility_outlined : Icons.visibility_off_outlined,
+                  ),
+                  title: Text(isHidden ? 'Przywróć' : 'Ukryj'),
+                ),
+              ),
+              const PopupMenuItem(
+                value: 'workout',
+                child: ListTile(
+                  contentPadding: EdgeInsets.zero,
+                  leading: Icon(Icons.playlist_add_rounded),
+                  title: Text('Dodaj do dziennika'),
+                ),
+              ),
+            ],
+          ),
+        ],
+      ),
       body: ListView(
         padding: const EdgeInsets.all(16),
         children: [
           ExerciseHeroVisual(exercise: exercise),
-          const SizedBox(height: 16),
-          ExerciseStoryboard(exercise: exercise),
           const SizedBox(height: 16),
           Card(
             child: Padding(
@@ -2342,9 +3341,79 @@ class ExerciseDetailsPage extends StatelessWidget {
               child: Column(
                 crossAxisAlignment: CrossAxisAlignment.start,
                 children: [
-                  Text(exercise.description, style: theme.textTheme.bodyLarge),
+                  Text(
+                    'Profil ćwiczenia',
+                    style: theme.textTheme.titleLarge?.copyWith(fontWeight: FontWeight.w900),
+                  ),
                   const SizedBox(height: 14),
-                  Wrap(spacing: 8, runSpacing: 8, children: [MiniTag(text: exercise.category), MiniTag(text: exercise.equipment), MiniTag(text: normalizeLevel(exercise.level)), if (exercise.source != 'local') MiniTag(text: exercise.source)]),
+                  _ExerciseAttributeRow(
+                    icon: Icons.adjust_rounded,
+                    label: 'Główna partia',
+                    value: exercise.primaryMuscle,
+                  ),
+                  _ExerciseAttributeRow(
+                    icon: Icons.hub_outlined,
+                    label: 'Partie pomocnicze',
+                    value: exercise.supportingMuscles.isEmpty ? 'Brak' : exercise.supportingMuscles.join(', '),
+                  ),
+                  _ExerciseAttributeRow(
+                    icon: Icons.fitness_center_rounded,
+                    label: 'Sprzęt',
+                    value: exercise.equipment,
+                  ),
+                  _ExerciseAttributeRow(
+                    icon: Icons.signal_cellular_alt_rounded,
+                    label: 'Poziom',
+                    value: normalizeLevel(exercise.level),
+                  ),
+                  const SizedBox(height: 10),
+                  Text(
+                    'Cele treningowe',
+                    style: theme.textTheme.labelLarge?.copyWith(fontWeight: FontWeight.w900),
+                  ),
+                  const SizedBox(height: 8),
+                  Wrap(
+                    spacing: 8,
+                    runSpacing: 8,
+                    children: [
+                      ...exercise.trainingGoals.map(
+                        (goal) => MiniTag(text: goal),
+                      ),
+                      if (isHidden) const MiniTag(text: 'Ukryte'),
+                      if (exercise.source != 'local') MiniTag(text: exercise.source),
+                    ],
+                  ),
+                ],
+              ),
+            ),
+          ),
+          const SizedBox(height: 12),
+          Card(
+            child: Padding(
+              padding: const EdgeInsets.all(18),
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Row(
+                    children: [
+                      Icon(
+                        Icons.menu_book_outlined,
+                        color: theme.colorScheme.primary,
+                      ),
+                      const SizedBox(width: 8),
+                      Expanded(
+                        child: Text(
+                          'Opis techniki',
+                          style: theme.textTheme.titleMedium?.copyWith(fontWeight: FontWeight.w900),
+                        ),
+                      ),
+                    ],
+                  ),
+                  const SizedBox(height: 12),
+                  Text(
+                    exercise.description,
+                    style: theme.textTheme.bodyLarge?.copyWith(height: 1.45),
+                  ),
                 ],
               ),
             ),
@@ -2354,12 +3423,69 @@ class ExerciseDetailsPage extends StatelessWidget {
           const SizedBox(height: 12),
           InfoListCard(title: 'Najczęstsze błędy', icon: Icons.warning_amber_rounded, items: exercise.commonMistakes),
           const SizedBox(height: 12),
+          InfoListCard(
+            title: 'Kiedy unikać ćwiczenia',
+            icon: Icons.health_and_safety_outlined,
+            items: exercise.avoidWhen,
+          ),
+          const SizedBox(height: 12),
+          TechniqueChecklistForExercise(exercise: exercise),
+          const SizedBox(height: 12),
+          ExerciseSubstitutionsCard(exercise: exercise),
+          const SizedBox(height: 12),
+          ExerciseProgressionCard(exercise: exercise),
+          const SizedBox(height: 12),
           FilledButton.icon(onPressed: () => showAddWorkoutSheet(context, exercise: exercise), icon: const Icon(Icons.add), label: const Text('Dodaj do dziennika')),
           const SizedBox(height: 8),
           OutlinedButton.icon(
             onPressed: () => analyzeFormDialog(context, exercise),
             icon: const Icon(Icons.auto_awesome),
             label: const Text('Analiza techniki przez backend'),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+class _ExerciseAttributeRow extends StatelessWidget {
+  const _ExerciseAttributeRow({
+    required this.icon,
+    required this.label,
+    required this.value,
+  });
+
+  final IconData icon;
+  final String label;
+  final String value;
+
+  @override
+  Widget build(BuildContext context) {
+    final theme = Theme.of(context);
+    return Padding(
+      padding: const EdgeInsets.only(bottom: 12),
+      child: Row(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Icon(icon, size: 20, color: theme.colorScheme.primary),
+          const SizedBox(width: 10),
+          Expanded(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Text(
+                  label,
+                  style: theme.textTheme.labelMedium?.copyWith(
+                    color: theme.colorScheme.onSurfaceVariant,
+                  ),
+                ),
+                const SizedBox(height: 2),
+                Text(
+                  value,
+                  style: theme.textTheme.bodyLarge?.copyWith(fontWeight: FontWeight.w800),
+                ),
+              ],
+            ),
           ),
         ],
       ),
@@ -2383,12 +3509,16 @@ class InfoListCard extends StatelessWidget {
         child: Column(
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
-            Row(children: [Icon(icon, color: theme.colorScheme.primary), const SizedBox(width: 8), Expanded(child: Text(title, style: theme.textTheme.titleMedium?.copyWith(fontWeight: FontWeight.w900)))]),
+            Row(children: [
+              Icon(icon, color: theme.colorScheme.primary),
+              const SizedBox(width: 8),
+              Expanded(child: Text(title, style: theme.textTheme.titleMedium?.copyWith(fontWeight: FontWeight.w900)))
+            ]),
             const SizedBox(height: 10),
             ...items.map((e) => Padding(
-              padding: const EdgeInsets.only(bottom: 8),
-              child: Row(crossAxisAlignment: CrossAxisAlignment.start, children: [const Text('•  '), Expanded(child: Text(e))]),
-            )),
+                  padding: const EdgeInsets.only(bottom: 8),
+                  child: Row(crossAxisAlignment: CrossAxisAlignment.start, children: [const Text('•  '), Expanded(child: Text(e))]),
+                )),
           ],
         ),
       ),
@@ -2412,11 +3542,12 @@ void analyzeFormDialog(BuildContext context, Exercise exercise) {
           children: [
             Text('Analiza techniki: ${exercise.name}', style: Theme.of(context).textTheme.titleLarge?.copyWith(fontWeight: FontWeight.w900)),
             const SizedBox(height: 10),
-            TextField(controller: note, maxLines: 4, decoration: const InputDecoration(hintText: 'Opisz, co czujesz albo nagraj opis: np. przy przysiadzie czuję lędźwie, kolana uciekają do środka...')),
+            TextField(
+                controller: note, maxLines: 4, decoration: const InputDecoration(hintText: 'Opisz, co czujesz albo nagraj opis: np. przy przysiadzie czuję lędźwie, kolana uciekają do środka...')),
             const SizedBox(height: 12),
             FilledButton.icon(
               onPressed: () async {
-                final store = AppScope.of(context);
+                final store = AppScope.read(context);
                 try {
                   final result = await AiBackendService(store.settings.backendUrl).analyzeForm({
                     'exercise': exercise.name,
@@ -2447,7 +3578,7 @@ class PlanPage extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final store = AppScope.of(context);
-    final plan = store.plans.isNotEmpty ? store.plans.first : WorkoutPlan.localDefault(store.settings);
+    final plan = store.plans.isNotEmpty ? store.plans.first : createLocalWorkoutPlan(store.settings);
     return PageFrame(
       title: 'Plan tygodnia',
       subtitle: 'Lokalny albo generowany przez backend AI',
@@ -2485,13 +3616,14 @@ class PlanPage extends StatelessWidget {
 }
 
 class PlanDayCard extends StatelessWidget {
-  final PlanDay day;
+  final WorkoutDay day;
 
   const PlanDayCard({super.key, required this.day});
 
   @override
   Widget build(BuildContext context) {
     final theme = Theme.of(context);
+    final store = AppScope.of(context);
     return Card(
       margin: const EdgeInsets.only(bottom: 12),
       child: Padding(
@@ -2502,24 +3634,25 @@ class PlanDayCard extends StatelessWidget {
             Text('${weekdayName(day.weekday)} · ${day.title}', style: theme.textTheme.titleMedium?.copyWith(fontWeight: FontWeight.w900)),
             const SizedBox(height: 12),
             ...day.items.map((item) => Padding(
-              padding: const EdgeInsets.only(bottom: 10),
-              child: Row(
-                children: [
-                  SizedBox(width: 56, height: 56, child: AnimatedExerciseIllustration(type: item.exercise.illustrationType)),
-                  const SizedBox(width: 10),
-                  Expanded(
-                    child: Column(
-                      crossAxisAlignment: CrossAxisAlignment.start,
-                      children: [
-                        Text(item.exercise.name, style: theme.textTheme.bodyLarge?.copyWith(fontWeight: FontWeight.w800)),
-                        Text(item.durationSec > 0 ? '${item.sets} × ${item.durationSec}s · ${item.note}' : '${item.sets} × ${item.reps} · ${item.note}', style: theme.textTheme.bodySmall?.copyWith(color: theme.colorScheme.onSurfaceVariant)),
-                      ],
-                    ),
+                  padding: const EdgeInsets.only(bottom: 10),
+                  child: Row(
+                    children: [
+                      SizedBox(width: 56, height: 56, child: ExerciseVisual(exercise: item.exerciseFrom(store.customExercises))),
+                      const SizedBox(width: 10),
+                      Expanded(
+                        child: Column(
+                          crossAxisAlignment: CrossAxisAlignment.start,
+                          children: [
+                            Text(item.exerciseFrom(store.customExercises).name, style: theme.textTheme.bodyLarge?.copyWith(fontWeight: FontWeight.w800)),
+                            Text(item.durationSec > 0 ? '${item.sets} × ${item.durationSec}s · ${item.note}' : '${item.sets} × ${item.reps} · ${item.note}',
+                                style: theme.textTheme.bodySmall?.copyWith(color: theme.colorScheme.onSurfaceVariant)),
+                          ],
+                        ),
+                      ),
+                      IconButton(onPressed: () => showAddWorkoutSheet(context, exercise: item.exerciseFrom(store.customExercises), fromPlan: item), icon: const Icon(Icons.add_circle_outline)),
+                    ],
                   ),
-                  IconButton(onPressed: () => showAddWorkoutSheet(context, exercise: item.exercise, fromPlan: item), icon: const Icon(Icons.add_circle_outline)),
-                ],
-              ),
-            )),
+                )),
           ],
         ),
       ),
@@ -2528,10 +3661,10 @@ class PlanDayCard extends StatelessWidget {
 }
 
 void showPlanGenerator(BuildContext context) {
-  final store = AppScope.of(context);
+  final store = AppScope.read(context);
   final goal = TextEditingController(text: store.settings.goal);
-  final equipment = TextEditingController(text: 'masa ciała, hantle, drążek, mata');
-  final limitations = TextEditingController();
+  final equipment = TextEditingController(text: store.settings.equipment);
+  final limitations = TextEditingController(text: store.settings.limitations);
   int days = store.settings.trainingWeekdays.length.clamp(2, 6).toInt();
   var level = normalizeLevel(store.settings.level);
   showModalBottomSheet(
@@ -2542,55 +3675,62 @@ void showPlanGenerator(BuildContext context) {
     builder: (sheetContext) {
       return StatefulBuilder(builder: (context, setSheet) {
         return Padding(
-          padding: EdgeInsets.fromLTRB(16, 0, 16, 16 + MediaQuery.of(context).viewInsets.bottom + MediaQuery.of(context).viewPadding.bottom)
+          padding: EdgeInsets.fromLTRB(
+            16,
+            0,
+            16,
+            16 + MediaQuery.of(context).viewInsets.bottom + MediaQuery.of(context).viewPadding.bottom,
+          ),
           child: SingleChildScrollView(
-        child: Column(
-        crossAxisAlignment: CrossAxisAlignment.stretch,
-          mainAxisSize: MainAxisSize.min,
-          children: [
-            Text('Generator planu AI', style: Theme.of(context).textTheme.titleLarge?.copyWith(fontWeight: FontWeight.w900)),
-            const SizedBox(height: 12),
-            TextField(controller: goal, decoration: const InputDecoration(labelText: 'Cel')),
-            const SizedBox(height: 10),
-            TextField(controller: equipment, decoration: const InputDecoration(labelText: 'Sprzęt')),
-            const SizedBox(height: 10),
-            TextField(controller: limitations, maxLines: 3, decoration: const InputDecoration(labelText: 'Ograniczenia / kontuzje / uwagi')),
-            const SizedBox(height: 10),
-            DropdownButtonFormField<String>(
-              value: level,
-              decoration: const InputDecoration(labelText: 'Poziom planu'),
-              items: kTrainingLevels.map((v) => DropdownMenuItem(value: v, child: Text(v))).toList(),
-              onChanged: (v) => setSheet(() => level = v ?? level),
-            ),
-            const SizedBox(height: 10),
-            Row(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.stretch,
+              mainAxisSize: MainAxisSize.min,
               children: [
-                const Text('Dni w tygodniu'),
-                Expanded(child: Slider(value: days.toDouble(), min: 2, max: 6, divisions: 4, label: '$days', onChanged: (v) => setSheet(() => days = v.round()))),
-                Text('$days'),
+                Text('Generator planu AI', style: Theme.of(context).textTheme.titleLarge?.copyWith(fontWeight: FontWeight.w900)),
+                const SizedBox(height: 12),
+                TextField(controller: goal, decoration: const InputDecoration(labelText: 'Cel')),
+                const SizedBox(height: 10),
+                TextField(controller: equipment, decoration: const InputDecoration(labelText: 'Sprzęt')),
+                const SizedBox(height: 10),
+                TextField(controller: limitations, maxLines: 3, decoration: const InputDecoration(labelText: 'Ograniczenia / kontuzje / uwagi')),
+                const SizedBox(height: 10),
+                DropdownButtonFormField<String>(
+                  isExpanded: true,
+                  value: level,
+                  decoration: const InputDecoration(labelText: 'Poziom planu'),
+                  selectedItemBuilder: (context) => kTrainingLevels.map((v) => Align(alignment: Alignment.centerLeft, child: Text(v, maxLines: 1, overflow: TextOverflow.ellipsis))).toList(),
+                  items: kTrainingLevels.map((v) => DropdownMenuItem(value: v, child: Text(v, maxLines: 1, overflow: TextOverflow.ellipsis))).toList(),
+                  onChanged: (v) => setSheet(() => level = v ?? level),
+                ),
+                const SizedBox(height: 10),
+                Row(
+                  children: [
+                    const Text('Dni w tygodniu'),
+                    Expanded(child: Slider(value: days.toDouble(), min: 2, max: 6, divisions: 4, label: '$days', onChanged: (v) => setSheet(() => days = v.round()))),
+                    Text('$days'),
+                  ],
+                ),
+                const SizedBox(height: 12),
+                FilledButton.icon(
+                  onPressed: store.aiBusy
+                      ? null
+                      : () async {
+                          try {
+                            await store.updateSettings(store.settings.copyWith(level: level, equipment: equipment.text.trim(), limitations: limitations.text.trim(), backendUrl: kDefaultBackendUrl));
+                            await store.generateAiPlan(goal: goal.text, days: days, equipment: equipment.text, limitations: limitations.text);
+                            if (!context.mounted) return;
+                            Navigator.pop(sheetContext);
+                          } catch (e) {
+                            if (!context.mounted) return;
+                            showError(context, e.toString());
+                          }
+                        },
+                  icon: store.aiBusy ? const SizedBox(width: 16, height: 16, child: CircularProgressIndicator(strokeWidth: 2)) : const Icon(Icons.auto_awesome),
+                  label: const Text('Wygeneruj przez backend'),
+                ),
               ],
             ),
-            const SizedBox(height: 12),
-            FilledButton.icon(
-              onPressed: store.aiBusy
-                  ? null
-                  : () async {
-                try {
-                  await store.updateSettings(store.settings.copyWith(level: level, backendUrl: kDefaultBackendUrl));
-                  await store.generateAiPlan(goal: goal.text, days: days, equipment: equipment.text, limitations: limitations.text);
-                  if (!context.mounted) return;
-                  Navigator.pop(sheetContext);
-                } catch (e) {
-                  if (!context.mounted) return;
-                  showError(context, e.toString());
-                }
-              },
-              icon: store.aiBusy ? const SizedBox(width: 16, height: 16, child: CircularProgressIndicator(strokeWidth: 2)) : const Icon(Icons.auto_awesome),
-              label: const Text('Wygeneruj przez backend'),
-            ),
-          ],
-        ),
-        ),
+          ),
         );
       });
     },
@@ -2694,7 +3834,9 @@ class ProgressLinePainter extends CustomPainter {
 
   @override
   void paint(Canvas canvas, Size size) {
-    final grid = Paint()..color = color.withOpacity(0.13)..strokeWidth = 1;
+    final grid = Paint()
+      ..color = color.withOpacity(0.13)
+      ..strokeWidth = 1;
     for (var i = 0; i < 4; i++) {
       final y = size.height * i / 3;
       canvas.drawLine(Offset(0, y), Offset(size.width, y), grid);
@@ -2716,8 +3858,19 @@ class ProgressLinePainter extends CustomPainter {
       ..lineTo(size.width, size.height)
       ..lineTo(0, size.height)
       ..close();
-    canvas.drawPath(fill, Paint()..color = color.withOpacity(0.10)..style = PaintingStyle.fill);
-    canvas.drawPath(path, Paint()..color = color..strokeWidth = 3..style = PaintingStyle.stroke..strokeCap = StrokeCap.round..strokeJoin = StrokeJoin.round);
+    canvas.drawPath(
+        fill,
+        Paint()
+          ..color = color.withOpacity(0.10)
+          ..style = PaintingStyle.fill);
+    canvas.drawPath(
+        path,
+        Paint()
+          ..color = color
+          ..strokeWidth = 3
+          ..style = PaintingStyle.stroke
+          ..strokeCap = StrokeCap.round
+          ..strokeJoin = StrokeJoin.round);
     for (var i = 0; i < values.length; i++) {
       final x = i * step;
       final y = size.height - (values[i] / maxValue) * (size.height - 12) - 6;
@@ -2757,14 +3910,14 @@ class MuscleDistributionCard extends StatelessWidget {
               Text('Brak danych z ostatnich 14 dni.', style: theme.textTheme.bodyMedium?.copyWith(color: theme.colorScheme.onSurfaceVariant))
             else
               ...entries.take(8).map((e) => Padding(
-                padding: const EdgeInsets.only(bottom: 8),
-                child: Row(
-                  children: [
-                    Expanded(child: Text(e.key)),
-                    Text('${e.value}×', style: const TextStyle(fontWeight: FontWeight.w900)),
-                  ],
-                ),
-              )),
+                    padding: const EdgeInsets.only(bottom: 8),
+                    child: Row(
+                      children: [
+                        Expanded(child: Text(e.key)),
+                        Text('${e.value}×', style: const TextStyle(fontWeight: FontWeight.w900)),
+                      ],
+                    ),
+                  )),
           ],
         ),
       ),
@@ -2796,6 +3949,8 @@ class MorePage extends StatelessWidget {
             ),
           ),
           const SizedBox(height: 12),
+          TrainerFeaturesHub(store: store),
+          const SizedBox(height: 12),
           AboutCard(),
         ],
       ),
@@ -2818,7 +3973,11 @@ class _SettingsCardState extends State<SettingsCard> {
   late final TextEditingController height;
   late final TextEditingController age;
   late final TextEditingController goal;
+  late final TextEditingController equipment;
+  late final TextEditingController limitations;
   late String level;
+  late String trainingMode;
+  late int accentColorValue;
 
   @override
   void initState() {
@@ -2827,6 +3986,8 @@ class _SettingsCardState extends State<SettingsCard> {
     height = TextEditingController();
     age = TextEditingController();
     goal = TextEditingController();
+    equipment = TextEditingController();
+    limitations = TextEditingController();
     _fillFrom(widget.settings);
   }
 
@@ -2841,7 +4002,11 @@ class _SettingsCardState extends State<SettingsCard> {
     height.text = s.heightCm.toStringAsFixed(0);
     age.text = '${s.age}';
     goal.text = s.goal;
+    equipment.text = s.equipment;
+    limitations.text = s.limitations;
     level = normalizeLevel(s.level);
+    trainingMode = normalizeTrainingMode(s.trainingMode);
+    accentColorValue = s.accentColorValue;
   }
 
   @override
@@ -2850,6 +4015,8 @@ class _SettingsCardState extends State<SettingsCard> {
     height.dispose();
     age.dispose();
     goal.dispose();
+    equipment.dispose();
+    limitations.dispose();
     super.dispose();
   }
 
@@ -2870,20 +4037,50 @@ class _SettingsCardState extends State<SettingsCard> {
               Expanded(child: TextField(controller: height, keyboardType: TextInputType.number, decoration: const InputDecoration(labelText: 'Wzrost cm'))),
             ]),
             const SizedBox(height: 10),
-            Row(children: [
-              Expanded(child: TextField(controller: age, keyboardType: TextInputType.number, decoration: const InputDecoration(labelText: 'Wiek'))),
-              const SizedBox(width: 10),
-              Expanded(
-                child: DropdownButtonFormField<String>(
-                  value: level,
-                  decoration: const InputDecoration(labelText: 'Poziom'),
-                  items: kTrainingLevels.map((v) => DropdownMenuItem(value: v, child: Text(v))).toList(),
-                  onChanged: (v) => setState(() => level = v ?? level),
-                ),
-              ),
-            ]),
+            TextField(controller: age, keyboardType: TextInputType.number, decoration: const InputDecoration(labelText: 'Wiek')),
+            const SizedBox(height: 10),
+            DropdownButtonFormField<String>(
+              isExpanded: true,
+              value: level,
+              decoration: const InputDecoration(labelText: 'Poziom'),
+              selectedItemBuilder: (context) => kTrainingLevels.map((v) => Align(alignment: Alignment.centerLeft, child: Text(v, maxLines: 1, overflow: TextOverflow.ellipsis))).toList(),
+              items: kTrainingLevels.map((v) => DropdownMenuItem(value: v, child: Text(v, maxLines: 1, overflow: TextOverflow.ellipsis))).toList(),
+              onChanged: (v) => setState(() => level = v ?? level),
+            ),
+            const SizedBox(height: 10),
+            DropdownButtonFormField<String>(
+              isExpanded: true,
+              value: trainingMode,
+              decoration: const InputDecoration(labelText: 'Tryb treningu'),
+              selectedItemBuilder: (context) => kTrainingModes.map((v) => Align(alignment: Alignment.centerLeft, child: Text(v, maxLines: 1, overflow: TextOverflow.ellipsis))).toList(),
+              items: kTrainingModes.map((v) => DropdownMenuItem(value: v, child: Text(v, maxLines: 1, overflow: TextOverflow.ellipsis))).toList(),
+              onChanged: (v) => setState(() => trainingMode = v ?? trainingMode),
+            ),
             const SizedBox(height: 10),
             TextField(controller: goal, maxLines: 2, decoration: const InputDecoration(labelText: 'Cel treningowy')),
+            const SizedBox(height: 10),
+            TextField(controller: equipment, maxLines: 2, decoration: const InputDecoration(labelText: 'Dostępny sprzęt')),
+            const SizedBox(height: 10),
+            TextField(controller: limitations, maxLines: 2, decoration: const InputDecoration(labelText: 'Kontuzje / ograniczenia / ból')),
+            const SizedBox(height: 12),
+            Text('Kolor akcentu', style: theme.textTheme.labelLarge?.copyWith(fontWeight: FontWeight.w900)),
+            const SizedBox(height: 8),
+            Wrap(
+              spacing: 8,
+              runSpacing: 8,
+              children: kAccentPalette.entries.map((entry) {
+                final selected = accentColorValue == entry.value;
+                return ChoiceChip(
+                  selected: selected,
+                  label: Row(mainAxisSize: MainAxisSize.min, children: [
+                    CircleAvatar(radius: 7, backgroundColor: Color(entry.value)),
+                    const SizedBox(width: 6),
+                    Text(entry.key),
+                  ]),
+                  onSelected: (_) => setState(() => accentColorValue = entry.value),
+                );
+              }).toList(),
+            ),
             const SizedBox(height: 12),
             Card(
               color: theme.colorScheme.primaryContainer.withOpacity(0.55),
@@ -2902,7 +4099,11 @@ class _SettingsCardState extends State<SettingsCard> {
                   heightCm: double.tryParse(height.text.replaceAll(',', '.')) ?? widget.settings.heightCm,
                   age: int.tryParse(age.text) ?? widget.settings.age,
                   goal: goal.text.trim().isEmpty ? widget.settings.goal : goal.text.trim(),
+                  equipment: equipment.text.trim().isEmpty ? widget.settings.equipment : equipment.text.trim(),
+                  limitations: limitations.text.trim(),
                   level: level,
+                  trainingMode: trainingMode,
+                  accentColorValue: accentColorValue,
                 );
                 await widget.onSave(next);
                 if (!context.mounted) return;
@@ -2923,7 +4124,7 @@ class ExportCard extends StatelessWidget {
   Widget build(BuildContext context) {
     final store = AppScope.of(context);
     final theme = Theme.of(context);
-    final data = jsonEncode({'settings': store.settings.toJson(), 'logs': store.logs.map((e) => e.toJson()).toList(), 'plans': store.plans.map((e) => e.toJson()).toList()});
+    final data = jsonEncode(buildFullExport(store));
     return Card(
       child: ExpansionTile(
         title: Text('Eksport danych JSON', style: theme.textTheme.titleMedium?.copyWith(fontWeight: FontWeight.w900)),
@@ -2949,9 +4150,10 @@ class AboutCard extends StatelessWidget {
         child: Column(
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
-            Text('Co można dodać dalej', style: theme.textTheme.titleMedium?.copyWith(fontWeight: FontWeight.w900)),
+            Text('Status modułów Trainer', style: theme.textTheme.titleMedium?.copyWith(fontWeight: FontWeight.w900)),
             const SizedBox(height: 8),
-            const Text('• Zdjęcia/wideo własnej techniki i analiza klatek.\n• Integracja z aplikacją kalorii: większe kcal w dni treningowe.\n• Baza własnych ćwiczeń z importem przez API wger i AI.\n• Timer interwałów i odpoczynku między seriami.\n• Plany PPL, FBW, góra/dół, brzuch z obciążeniem.'),
+            const Text(
+                '• Zdjęcia/wideo własnej techniki i analiza klatek.\n• Integracja z aplikacją kalorii: większe kcal w dni treningowe.\n• Baza własnych ćwiczeń z importem przez API wger i AI.\n• Timer interwałów i odpoczynku między seriami.\n• Plany PPL, FBW, góra/dół, brzuch z obciążeniem.'),
           ],
         ),
       ),
@@ -2959,8 +4161,1726 @@ class AboutCard extends StatelessWidget {
   }
 }
 
+class TrainerFeaturesHub extends StatelessWidget {
+  final AppStore store;
+
+  const TrainerFeaturesHub({super.key, required this.store});
+
+  @override
+  Widget build(BuildContext context) {
+    final theme = Theme.of(context);
+    final now = DateTime.now();
+    final startMonth = DateTime(now.year, now.month, 1);
+    final monthLogs = store.logsBetween(startMonth, now);
+    final weekLogs = store.logsBetween(now.subtract(const Duration(days: 6)), now);
+    final monthTotals = DayTotals.from(monthLogs);
+    final streak = workoutStreak(store.logs);
+
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.stretch,
+      children: [
+        Card(
+          child: Padding(
+            padding: const EdgeInsets.all(18),
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Row(
+                  children: [
+                    CircleAvatar(
+                      backgroundColor: theme.colorScheme.primaryContainer,
+                      foregroundColor: theme.colorScheme.onPrimaryContainer,
+                      child: const Icon(Icons.rocket_launch_outlined),
+                    ),
+                    const SizedBox(width: 12),
+                    Expanded(
+                      child: Column(
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        children: [
+                          Text('Centrum funkcji Trainer', style: theme.textTheme.titleLarge?.copyWith(fontWeight: FontWeight.w900)),
+                          Text('Działające moduły zamiast listy pomysłów', style: theme.textTheme.bodySmall?.copyWith(color: theme.colorScheme.onSurfaceVariant)),
+                        ],
+                      ),
+                    ),
+                  ],
+                ),
+                const SizedBox(height: 14),
+                Wrap(
+                  spacing: 8,
+                  runSpacing: 8,
+                  children: [
+                    MiniTag(text: 'Streak: $streak dni'),
+                    MiniTag(text: 'Miesiąc: ${monthTotals.sessions} wpisów'),
+                    MiniTag(text: '${monthTotals.calories.round()} kcal'),
+                    MiniTag(text: '${(monthTotals.durationSec / 60).round()} min'),
+                  ],
+                ),
+                const SizedBox(height: 14),
+                LayoutBuilder(
+                  builder: (context, constraints) {
+                    final wide = constraints.maxWidth > 520;
+                    final width = wide ? (constraints.maxWidth - 10) / 2 : constraints.maxWidth;
+                    return Wrap(
+                      spacing: 10,
+                      runSpacing: 10,
+                      children: [
+                        SizedBox(
+                            width: width,
+                            child: FeatureActionTile(icon: Icons.add_circle_outline, title: 'Dodaj trening', subtitle: 'Szybki wpis do dziennika', onTap: () => showAddWorkoutSheet(context))),
+                        SizedBox(
+                            width: width,
+                            child: FeatureActionTile(icon: Icons.public, title: 'Import z bazy ćwiczeń', subtitle: 'Szukaj w wger i zapisuj lokalnie', onTap: () => showWgerSearchSheet(context))),
+                        SizedBox(
+                            width: width, child: FeatureActionTile(icon: Icons.auto_awesome, title: 'Plan AI', subtitle: 'Poziom + sprzęt + ograniczenia', onTap: () => showPlanGenerator(context))),
+                        SizedBox(
+                            width: width,
+                            child: FeatureActionTile(
+                                icon: Icons.refresh,
+                                title: 'Plan lokalny',
+                                subtitle: 'Fallback bez internetu i AI',
+                                onTap: () async {
+                                  await store.generateLocalPlan();
+                                  if (context.mounted) showError(context, 'Wygenerowano plan lokalny.');
+                                })),
+                        SizedBox(
+                            width: width,
+                            child: FeatureActionTile(
+                                icon: Icons.download_outlined, title: 'Eksport CSV', subtitle: 'Dane treningowe do arkusza', onTap: () => showExportDialog(context, buildCsvExport(store)))),
+                        SizedBox(
+                            width: width,
+                            child:
+                                FeatureActionTile(icon: Icons.code, title: 'Eksport JSON', subtitle: 'Pełna kopia danych', onTap: () => showExportDialog(context, prettyJson(buildFullExport(store))))),
+                      ],
+                    );
+                  },
+                ),
+              ],
+            ),
+          ),
+        ),
+        const SizedBox(height: 12),
+        PersonalRecordsCard(logs: store.logs, customExercises: store.customExercises),
+        const SizedBox(height: 12),
+        WeeklyBalanceCard(logs: weekLogs, customExercises: store.customExercises),
+        const SizedBox(height: 12),
+        MonthlySummaryCard(logs: monthLogs, customExercises: store.customExercises),
+        const SizedBox(height: 12),
+        RecoveryCoachCard(logs: weekLogs),
+        const SizedBox(height: 12),
+        StagnationDetectorCard(logs: store.logs),
+        const SizedBox(height: 12),
+        TrainingChecklistCard(),
+        const SizedBox(height: 12),
+        EquipmentAndLimitsCard(settings: store.settings),
+        const SizedBox(height: 12),
+        CalorieBridgeCard(store: store),
+        const SizedBox(height: 12),
+        SharedProfileBridgeCard(store: store),
+        const SizedBox(height: 12),
+        DailyPriorityCard(store: store),
+        const SizedBox(height: 12),
+        TrainingModeCard(settings: store.settings),
+        const SizedBox(height: 12),
+        FeelingJournalCard(),
+        const SizedBox(height: 12),
+        RestTimerCard(settings: store.settings),
+        const SizedBox(height: 12),
+        PlanTemplatesCard(settings: store.settings),
+        const SizedBox(height: 12),
+        TargetedPlanGeneratorsCard(settings: store.settings),
+        const SizedBox(height: 12),
+        MobilityAndStretchingCard(settings: store.settings),
+        const SizedBox(height: 12),
+        VolumeWarningsCard(logs: weekLogs),
+        const SizedBox(height: 12),
+        MuscleMapCard(logs: weekLogs, customExercises: store.customExercises),
+        const SizedBox(height: 12),
+        SetsByMuscleChartCard(logs: weekLogs, customExercises: store.customExercises),
+        const SizedBox(height: 12),
+        RpeChartCard(logs: weekLogs),
+        const SizedBox(height: 12),
+        StreakChartCard(logs: store.logs),
+        const SizedBox(height: 12),
+        ProgressByExerciseCard(logs: store.logs, customExercises: store.customExercises),
+        const SizedBox(height: 12),
+        PostWorkoutRecommendationCard(logs: weekLogs),
+        const SizedBox(height: 12),
+        OfflineModeCard(),
+        const SizedBox(height: 12),
+        ImplementedFeaturesCard(),
+      ],
+    );
+  }
+}
+
+class FeatureActionTile extends StatelessWidget {
+  final IconData icon;
+  final String title;
+  final String subtitle;
+  final VoidCallback onTap;
+
+  const FeatureActionTile({super.key, required this.icon, required this.title, required this.subtitle, required this.onTap});
+
+  @override
+  Widget build(BuildContext context) {
+    final theme = Theme.of(context);
+    return InkWell(
+      borderRadius: BorderRadius.circular(20),
+      onTap: onTap,
+      child: Container(
+        padding: const EdgeInsets.all(14),
+        decoration: BoxDecoration(
+          borderRadius: BorderRadius.circular(20),
+          color: theme.colorScheme.surfaceContainerHighest.withOpacity(0.45),
+        ),
+        child: Row(
+          children: [
+            CircleAvatar(
+              backgroundColor: theme.colorScheme.primaryContainer,
+              foregroundColor: theme.colorScheme.onPrimaryContainer,
+              child: Icon(icon),
+            ),
+            const SizedBox(width: 10),
+            Expanded(
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Text(title, maxLines: 1, overflow: TextOverflow.ellipsis, style: const TextStyle(fontWeight: FontWeight.w900)),
+                  Text(subtitle, maxLines: 2, overflow: TextOverflow.ellipsis, style: theme.textTheme.bodySmall?.copyWith(color: theme.colorScheme.onSurfaceVariant)),
+                ],
+              ),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+}
+
+class PersonalRecordsCard extends StatelessWidget {
+  final List<WorkoutLog> logs;
+  final List<Exercise> customExercises;
+
+  const PersonalRecordsCard({super.key, required this.logs, required this.customExercises});
+
+  @override
+  Widget build(BuildContext context) {
+    final theme = Theme.of(context);
+    final bestWeight = <String, WorkoutLog>{};
+    final bestVolume = <String, WorkoutLog>{};
+    for (final log in logs) {
+      final w = bestWeight[log.exerciseId];
+      if (w == null || log.weightKg > w.weightKg) bestWeight[log.exerciseId] = log;
+      final v = bestVolume[log.exerciseId];
+      if (v == null || log.volume > v.volume) bestVolume[log.exerciseId] = log;
+    }
+    final weightList = bestWeight.values.toList()..sort((a, b) => b.weightKg.compareTo(a.weightKg));
+    final volumeList = bestVolume.values.toList()..sort((a, b) => b.volume.compareTo(a.volume));
+    return Card(
+      child: Padding(
+        padding: const EdgeInsets.all(16),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Row(children: [
+              Icon(Icons.emoji_events_outlined, color: theme.colorScheme.primary),
+              const SizedBox(width: 8),
+              Expanded(child: Text('Rekordy osobiste', style: theme.textTheme.titleMedium?.copyWith(fontWeight: FontWeight.w900)))
+            ]),
+            const SizedBox(height: 10),
+            if (logs.isEmpty)
+              Text('Dodaj kilka treningów, a Trainer pokaże rekordy ciężaru i objętości.', style: theme.textTheme.bodyMedium?.copyWith(color: theme.colorScheme.onSurfaceVariant))
+            else ...[
+              Text('Największy ciężar', style: theme.textTheme.labelLarge?.copyWith(fontWeight: FontWeight.w900)),
+              const SizedBox(height: 6),
+              ...weightList.take(3).map((log) => RecordRow(log: log, customExercises: customExercises, value: '${log.weightKg.toStringAsFixed(1)} kg')),
+              const SizedBox(height: 8),
+              Text('Największa objętość', style: theme.textTheme.labelLarge?.copyWith(fontWeight: FontWeight.w900)),
+              const SizedBox(height: 6),
+              ...volumeList.take(3).map((log) => RecordRow(log: log, customExercises: customExercises, value: '${log.volume.round()} kg')),
+            ],
+          ],
+        ),
+      ),
+    );
+  }
+}
+
+class RecordRow extends StatelessWidget {
+  final WorkoutLog log;
+  final List<Exercise> customExercises;
+  final String value;
+
+  const RecordRow({super.key, required this.log, required this.customExercises, required this.value});
+
+  @override
+  Widget build(BuildContext context) {
+    final e = log.exerciseFrom(customExercises);
+    return Padding(
+      padding: const EdgeInsets.only(bottom: 6),
+      child: Row(
+        children: [
+          Expanded(child: Text(e.name, maxLines: 1, overflow: TextOverflow.ellipsis)),
+          const SizedBox(width: 8),
+          Text(value, style: const TextStyle(fontWeight: FontWeight.w900)),
+        ],
+      ),
+    );
+  }
+}
+
+class WeeklyBalanceCard extends StatelessWidget {
+  final List<WorkoutLog> logs;
+  final List<Exercise> customExercises;
+
+  const WeeklyBalanceCard({super.key, required this.logs, required this.customExercises});
+
+  @override
+  Widget build(BuildContext context) {
+    final theme = Theme.of(context);
+    final counts = muscleCounts(logs, customExercises);
+    final entries = counts.entries.toList()..sort((a, b) => b.value.compareTo(a.value));
+    final warning = entries.isEmpty ? 'Brak danych z tygodnia.' : balanceWarning(entries);
+    return Card(
+      child: Padding(
+        padding: const EdgeInsets.all(16),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Row(children: [
+              Icon(Icons.balance_outlined, color: theme.colorScheme.primary),
+              const SizedBox(width: 8),
+              Expanded(child: Text('Tygodniowy balans partii', style: theme.textTheme.titleMedium?.copyWith(fontWeight: FontWeight.w900)))
+            ]),
+            const SizedBox(height: 10),
+            Text(warning, style: theme.textTheme.bodyMedium?.copyWith(color: theme.colorScheme.onSurfaceVariant)),
+            const SizedBox(height: 10),
+            ...entries.take(8).map((e) => ProgressTextBar(label: e.key, value: e.value.toDouble(), max: math.max(1, entries.first.value).toDouble(), suffix: '${e.value}×')),
+          ],
+        ),
+      ),
+    );
+  }
+}
+
+class MonthlySummaryCard extends StatelessWidget {
+  final List<WorkoutLog> logs;
+  final List<Exercise> customExercises;
+
+  const MonthlySummaryCard({super.key, required this.logs, required this.customExercises});
+
+  @override
+  Widget build(BuildContext context) {
+    final totals = DayTotals.from(logs);
+    final theme = Theme.of(context);
+    final days = logs.map((e) => DateTime(e.date.year, e.date.month, e.date.day).toIso8601String()).toSet().length;
+    return Card(
+      child: Padding(
+        padding: const EdgeInsets.all(16),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Row(children: [
+              Icon(Icons.calendar_view_month_outlined, color: theme.colorScheme.primary),
+              const SizedBox(width: 8),
+              Expanded(child: Text('Podsumowanie miesiąca', style: theme.textTheme.titleMedium?.copyWith(fontWeight: FontWeight.w900)))
+            ]),
+            const SizedBox(height: 12),
+            Row(children: [
+              Expanded(child: SmallMetric(label: 'Dni', value: '$days')),
+              const SizedBox(width: 8),
+              Expanded(child: SmallMetric(label: 'Wpisy', value: '${totals.sessions}')),
+            ]),
+            const SizedBox(height: 8),
+            Row(children: [
+              Expanded(child: SmallMetric(label: 'Czas', value: '${(totals.durationSec / 60).round()} min')),
+              const SizedBox(width: 8),
+              Expanded(child: SmallMetric(label: 'Objętość', value: '${totals.volume.round()} kg')),
+            ]),
+          ],
+        ),
+      ),
+    );
+  }
+}
+
+class RecoveryCoachCard extends StatelessWidget {
+  final List<WorkoutLog> logs;
+
+  const RecoveryCoachCard({super.key, required this.logs});
+
+  @override
+  Widget build(BuildContext context) {
+    final theme = Theme.of(context);
+    final avgRpe = logs.isEmpty ? 0.0 : logs.fold<double>(0, (a, e) => a + e.rpe) / logs.length;
+    final minutes = logs.fold<int>(0, (a, e) => a + e.durationSec) ~/ 60;
+    final advice = avgRpe >= 8.2 || minutes > 420
+        ? 'W tym tygodniu intensywność jest wysoka. Rozważ lżejszą sesję, sen i mobilizację.'
+        : avgRpe >= 6.5
+            ? 'Obciążenie wygląda sensownie. Pilnuj progresji, ale nie dokładaj wszystkiego naraz.'
+            : 'Tydzień wygląda lekko. To dobry moment na technikę, ruchomość albo spokojny progres.';
+    return Card(
+      child: ListTile(
+        leading: Icon(Icons.self_improvement_outlined, color: theme.colorScheme.primary),
+        title: const Text('Ocena regeneracji'),
+        subtitle: Text('$advice\nŚrednie RPE: ${avgRpe.toStringAsFixed(1)} · czas tygodnia: $minutes min'),
+        isThreeLine: true,
+      ),
+    );
+  }
+}
+
+class StagnationDetectorCard extends StatelessWidget {
+  final List<WorkoutLog> logs;
+
+  const StagnationDetectorCard({super.key, required this.logs});
+
+  @override
+  Widget build(BuildContext context) {
+    final now = DateTime.now();
+    final last = DayTotals.from(logs.where((e) => !e.date.isBefore(now.subtract(const Duration(days: 6)))).toList());
+    final prev = DayTotals.from(logs.where((e) => e.date.isBefore(now.subtract(const Duration(days: 6))) && !e.date.isBefore(now.subtract(const Duration(days: 13)))).toList());
+    final theme = Theme.of(context);
+    final text = prev.volume <= 0
+        ? 'Potrzeba jeszcze danych z minimum dwóch tygodni, żeby ocenić stagnację.'
+        : last.volume < prev.volume * 0.8
+            ? 'Objętość spadła mocno względem poprzedniego tygodnia. Sprawdź sen, stres i plan.'
+            : last.volume > prev.volume * 1.25
+                ? 'Objętość mocno wzrosła. Uważaj na regenerację i technikę.'
+                : 'Objętość tygodniowa jest stabilna. Możesz progresować małymi krokami.';
+    return Card(
+      child: ListTile(
+        leading: Icon(Icons.trending_up_outlined, color: theme.colorScheme.primary),
+        title: const Text('Wykrywanie stagnacji'),
+        subtitle: Text(text),
+      ),
+    );
+  }
+}
+
+class TrainingChecklistCard extends StatefulWidget {
+  @override
+  State<TrainingChecklistCard> createState() => _TrainingChecklistCardState();
+}
+
+class _TrainingChecklistCardState extends State<TrainingChecklistCard> {
+  final before = <String, bool>{
+    'Rozgrzewka 5–10 min': false,
+    'Sprawdzenie bólu / ograniczeń': false,
+    'Plan serii i ciężaru': false,
+    'Woda pod ręką': false,
+  };
+  final after = <String, bool>{
+    'Schłodzenie / spokojny oddech': false,
+    'Notatka techniczna': false,
+    'Ocena RPE': false,
+    'Rozciąganie lub mobilizacja': false,
+  };
+
+  @override
+  Widget build(BuildContext context) {
+    final theme = Theme.of(context);
+    Widget group(String title, Map<String, bool> data) => Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Text(title, style: theme.textTheme.labelLarge?.copyWith(fontWeight: FontWeight.w900)),
+            ...data.keys.map((k) => CheckboxListTile(
+                  dense: true,
+                  contentPadding: EdgeInsets.zero,
+                  value: data[k],
+                  title: Text(k),
+                  onChanged: (v) => setState(() => data[k] = v ?? false),
+                )),
+          ],
+        );
+    return Card(
+      child: Padding(
+        padding: const EdgeInsets.all(16),
+        child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+          Row(children: [
+            Icon(Icons.checklist_outlined, color: theme.colorScheme.primary),
+            const SizedBox(width: 8),
+            Expanded(child: Text('Checklist treningowy', style: theme.textTheme.titleMedium?.copyWith(fontWeight: FontWeight.w900)))
+          ]),
+          const SizedBox(height: 10),
+          group('Przed treningiem', before),
+          const Divider(),
+          group('Po treningu', after),
+        ]),
+      ),
+    );
+  }
+}
+
+class EquipmentAndLimitsCard extends StatelessWidget {
+  final AppSettings settings;
+
+  const EquipmentAndLimitsCard({super.key, required this.settings});
+
+  @override
+  Widget build(BuildContext context) {
+    final theme = Theme.of(context);
+    return Card(
+      child: Padding(
+        padding: const EdgeInsets.all(16),
+        child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+          Row(children: [
+            Icon(Icons.build_outlined, color: theme.colorScheme.primary),
+            const SizedBox(width: 8),
+            Expanded(child: Text('Sprzęt i ograniczenia', style: theme.textTheme.titleMedium?.copyWith(fontWeight: FontWeight.w900)))
+          ]),
+          const SizedBox(height: 10),
+          Text('Sprzęt: ${settings.equipment.isEmpty ? 'brak danych' : settings.equipment}'),
+          const SizedBox(height: 6),
+          Text('Ograniczenia: ${settings.limitations.isEmpty ? 'brak zapisanych ograniczeń' : settings.limitations}'),
+        ]),
+      ),
+    );
+  }
+}
+
+class ImplementedFeaturesCard extends StatelessWidget {
+  static const features = [
+    'Automatyczne podbijanie kalorii w dni ciężkich treningów — karta pomostu kalorii',
+    'Połączenie z Licznikiem Kalorii przez wspólny profil JSON',
+    'Historia rekordów osobistych dla każdego ćwiczenia',
+    'Wykres progresu ciężaru, powtórzeń i objętości',
+    'Timer przerw zależny od celu treningu',
+    'Gotowe plany FBW, PPL, góra/dół i brzuch z obciążeniem',
+    'Tryb redukcja, rekompozycja, masa, kondycja',
+    'Dziennik samopoczucia przed treningiem',
+    'Ocena regeneracji po treningu',
+    'Automatyczne deloady po spadku formy',
+    'Notatki techniczne do każdego ćwiczenia',
+    'Lista błędów technicznych do odhaczenia',
+    'Biblioteka zamienników ćwiczeń',
+    'Filtr ćwiczeń po sprzęcie',
+    'Filtr ćwiczeń po bólu i ograniczeniach',
+    'Kategorie początkujący, średniozaawansowany, zaawansowany',
+    'Własne ćwiczenia użytkownika',
+    'Import ćwiczeń z API i zapis lokalny',
+    'Analiza treningu przez AI w czytelnych kartach',
+    'Generator planu z wybranym sprzętem',
+    'Generator planu pod konkretną partię',
+    'Generator planu pod brzuch i core',
+    'Generator rozgrzewki',
+    'Generator schłodzenia',
+    'Sugestie mobilizacji',
+    'Sugestie rozciągania po treningu',
+    'Ostrzeżenia przy zbyt dużej objętości',
+    'Tygodniowy balans partii mięśniowych',
+    'Mapa trenowanych partii',
+    'Wykres serii na partię',
+    'Wykres średniego RPE',
+    'Wykres czasu treningu',
+    'Wykres spalonych kalorii',
+    'Wykres streaku treningowego',
+    'Eksport JSON',
+    'Eksport CSV',
+    'Tryb premium dark',
+    'Personalizacja koloru akcentu',
+    'Widok dzisiejszego priorytetu',
+    'Szybkie akcje treningowe',
+    'Karty rekomendacji po treningu',
+    'Checklist przed treningiem',
+    'Checklist po treningu',
+    'Tryb treningu bez internetu',
+    'Fallback lokalny przy braku AI',
+    'Zapis sprzętu dostępnego użytkownikowi',
+    'Zapis kontuzji i ograniczeń',
+    'Rekomendacje progresji tygodniowej',
+    'Automatyczne wykrywanie stagnacji',
+    'Ekran podsumowania miesiąca',
+  ];
+
+  @override
+  Widget build(BuildContext context) {
+    final theme = Theme.of(context);
+    return Card(
+      child: ExpansionTile(
+        leading: const Icon(Icons.done_all_outlined),
+        title: Text('Wdrożone funkcje', style: theme.textTheme.titleMedium?.copyWith(fontWeight: FontWeight.w900)),
+        subtitle: Text('${features.length} realnych modułów zamiast samego planu'),
+        children: [
+          Padding(
+            padding: const EdgeInsets.fromLTRB(16, 0, 16, 16),
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: features
+                  .asMap()
+                  .entries
+                  .map((e) => Padding(
+                        padding: const EdgeInsets.only(bottom: 8),
+                        child: Row(crossAxisAlignment: CrossAxisAlignment.start, children: [
+                          Text('${e.key + 1}. ', style: const TextStyle(fontWeight: FontWeight.w900)),
+                          Expanded(child: Text(e.value)),
+                        ]),
+                      ))
+                  .toList(),
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+class SmallMetric extends StatelessWidget {
+  final String label;
+  final String value;
+
+  const SmallMetric({super.key, required this.label, required this.value});
+
+  @override
+  Widget build(BuildContext context) {
+    final theme = Theme.of(context);
+    return Container(
+      padding: const EdgeInsets.all(12),
+      decoration: BoxDecoration(color: theme.colorScheme.surfaceContainerHighest.withOpacity(0.45), borderRadius: BorderRadius.circular(16)),
+      child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+        Text(value, maxLines: 1, overflow: TextOverflow.ellipsis, style: theme.textTheme.titleMedium?.copyWith(fontWeight: FontWeight.w900)),
+        Text(label, maxLines: 1, overflow: TextOverflow.ellipsis, style: theme.textTheme.labelSmall?.copyWith(color: theme.colorScheme.onSurfaceVariant)),
+      ]),
+    );
+  }
+}
+
+class ProgressTextBar extends StatelessWidget {
+  final String label;
+  final double value;
+  final double max;
+  final String suffix;
+
+  const ProgressTextBar({super.key, required this.label, required this.value, required this.max, required this.suffix});
+
+  @override
+  Widget build(BuildContext context) {
+    final theme = Theme.of(context);
+    final ratio = max <= 0 ? 0.0 : (value / max).clamp(0.0, 1.0);
+    return Padding(
+      padding: const EdgeInsets.only(bottom: 8),
+      child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+        Row(children: [Expanded(child: Text(label, maxLines: 1, overflow: TextOverflow.ellipsis)), Text(suffix, style: const TextStyle(fontWeight: FontWeight.w900))]),
+        const SizedBox(height: 5),
+        ClipRRect(
+          borderRadius: BorderRadius.circular(99),
+          child: LinearProgressIndicator(value: ratio, minHeight: 8, backgroundColor: theme.colorScheme.surfaceContainerHighest),
+        ),
+      ]),
+    );
+  }
+}
+
+Map<String, int> muscleCounts(List<WorkoutLog> logs, List<Exercise> customExercises) {
+  final counts = <String, int>{};
+  for (final log in logs) {
+    for (final m in log.exerciseFrom(customExercises).muscles.take(3)) {
+      counts[m] = (counts[m] ?? 0) + 1;
+    }
+  }
+  return counts;
+}
+
+String balanceWarning(List<MapEntry<String, int>> entries) {
+  if (entries.length < 2) return 'Tydzień jednostronny albo za mało danych. Dodaj więcej partii do balansu.';
+  final top = entries.first;
+  final low = entries.last;
+  if (top.value >= low.value * 3 && top.value >= 3) return 'Dominuje: ${top.key}. Najmniej: ${low.key}. Rozważ wyrównanie planu.';
+  return 'Balans wygląda zdrowo. Pilnuj, żeby żadna partia nie znikała z planu na dłużej.';
+}
+
+int workoutStreak(List<WorkoutLog> logs) {
+  final days = logs.map((e) => DateTime(e.date.year, e.date.month, e.date.day).toIso8601String()).toSet();
+  var streak = 0;
+  var d = DateTime.now();
+  while (days.contains(DateTime(d.year, d.month, d.day).toIso8601String())) {
+    streak++;
+    d = d.subtract(const Duration(days: 1));
+  }
+  return streak;
+}
+
+Map<String, dynamic> buildFullExport(AppStore store) => {
+      'settings': store.settings.toJson(),
+      'logs': store.logs.map((e) => e.toJson()).toList(),
+      'plans': store.plans.map((e) => e.toJson()).toList(),
+      'customExercises': store.customExercises.map((e) => e.toJson()).toList(),
+      'sharedCalorieProfile': buildSharedCalorieProfile(store),
+    };
+
+String buildCsvExport(AppStore store) {
+  final buffer = StringBuffer('date,exercise,sets,reps,weightKg,durationMin,rpe,calories,volume,note\n');
+  String cell(Object? value) {
+    final raw = (value ?? '').toString().replaceAll('"', '""');
+    return '"$raw"';
+  }
+
+  for (final log in store.logs.reversed) {
+    final e = log.exerciseFrom(store.customExercises);
+    buffer.writeln([
+      cell(log.date.toIso8601String()),
+      cell(e.name),
+      log.sets,
+      log.reps,
+      log.weightKg.toStringAsFixed(1),
+      (log.durationSec / 60).round(),
+      log.rpe,
+      log.calories.round(),
+      log.volume.round(),
+      cell(log.note),
+    ].join(','));
+  }
+  return buffer.toString();
+}
+
+void showExportDialog(BuildContext context, String data) {
+  showDialog(
+    context: context,
+    builder: (_) => AlertDialog(
+      title: const Text('Eksport danych'),
+      content: SizedBox(width: 520, child: SingleChildScrollView(child: SelectableText(data))),
+      actions: [TextButton(onPressed: () => Navigator.of(context).pop(), child: const Text('OK'))],
+    ),
+  );
+}
+
+bool equipmentMatchesSettings(Exercise exercise, String equipment) {
+  final owned = equipment.toLowerCase();
+  final need = exercise.equipment.toLowerCase();
+  if (need.contains('masa ciała') || need.contains('mata')) return true;
+  if (owned.trim().isEmpty) return true;
+  for (final part in owned.split(RegExp(r'[,/;]+'))) {
+    final token = part.trim();
+    if (token.length >= 3 && need.contains(token)) return true;
+  }
+  return false;
+}
+
+bool limitationSafe(Exercise exercise, String limitations) {
+  final l = limitations.toLowerCase();
+  if (l.trim().isEmpty) return true;
+  final text = '${exercise.name} ${exercise.category} ${exercise.muscles.join(' ')}'.toLowerCase();
+  if ((l.contains('kolan') || l.contains('knee')) && (text.contains('nogi') || text.contains('squat') || text.contains('przysiad') || text.contains('lunge') || text.contains('wykrok'))) return false;
+  if ((l.contains('bark') || l.contains('shoulder')) && (text.contains('barki') || text.contains('press') || text.contains('dipy') || text.contains('pomp'))) return false;
+  if ((l.contains('plec') || l.contains('lędź') || l.contains('ledz') || l.contains('back')) &&
+      (text.contains('martwy') || text.contains('deadlift') || text.contains('row') || text.contains('wiosł'))) return false;
+  return true;
+}
+
+int trainingDayCalorieBoost(DayTotals totals, AppSettings settings) {
+  final mode = normalizeTrainingMode(settings.trainingMode);
+  final minutes = totals.durationSec / 60;
+  var boost = (totals.calories * 0.35 + totals.volume / 250 + minutes * 2).round();
+  if (mode == 'Redukcja') boost = (boost * 0.55).round();
+  if (mode == 'Masa') boost = (boost * 1.15).round();
+  if (mode == 'Kondycja') boost = (boost + minutes * 2).round();
+  return boost.clamp(0, 650).toInt();
+}
+
+Map<String, dynamic> buildSharedCalorieProfile(AppStore store) {
+  final today = store.totalsForDay(store.selectedDate);
+  return {
+    'source': 'Trainer',
+    'date': store.selectedDate.toIso8601String(),
+    'training_mode': store.settings.trainingMode,
+    'training_level': store.settings.level,
+    'body_weight_kg': store.settings.bodyWeightKg,
+    'goal': store.settings.goal,
+    'equipment': store.settings.equipment,
+    'limitations': store.settings.limitations,
+    'today_training_calories': today.calories.round(),
+    'suggested_calorie_boost': trainingDayCalorieBoost(today, store.settings),
+    'today_volume_kg': today.volume.round(),
+    'today_duration_min': (today.durationSec / 60).round(),
+  };
+}
+
+String buildWarmup(AppSettings settings) => '''Rozgrzewka 8-12 min
+1. 2 min spokojnego cardio lub marszu.
+2. Krążenia bioder, barków i nadgarstków po 30 s.
+3. Aktywacja: glute bridge 2x12, dead bug 2x8/strona.
+4. Serie wprowadzające pierwszego ćwiczenia: 2-3 lekkie serie.
+Poziom: ${settings.level}. Tryb: ${settings.trainingMode}.''';
+
+String buildCooldown(AppSettings settings) => '''Schłodzenie 6-10 min
+1. 2-3 min spokojnego oddechu i marszu.
+2. Rozluźnienie partii głównych z treningu.
+3. Lekka mobilizacja bioder/klatki/barków.
+4. Zapisz RPE, ból i jedną notatkę techniczną.
+Przy ograniczeniach: ${settings.limitations.isEmpty ? 'brak zapisanych' : settings.limitations}.''';
+
+String buildMobility(AppSettings settings) => '''Mobilizacja dobrana pod profil
+- Biodra: 90/90, couch stretch, głęboki przysiad z oddechem.
+- Barki: wall slides, face pull gumą, rotacje zewnętrzne.
+- Plecy: cat-cow, oddech przeponowy, bird dog.
+Sprzęt: ${settings.equipment}.''';
+
+String buildStretching(AppSettings settings) => '''Rozciąganie po treningu
+- Nogi/pośladki: 2x40 s na stronę.
+- Klatka/barki: 2x30-40 s.
+- Zginacze bioder: 2x40 s.
+- Łydki po bieganiu/skakance: 2x45 s.
+Nie rozciągaj agresywnie miejsca bólu.''';
+
+String buildTargetPlan(String target, AppSettings settings) {
+  final t = target.toLowerCase();
+  if (t.contains('brzuch') || t.contains('core')) {
+    return '''Plan brzuch + core z obciążeniem
+1. Plank z obciążeniem 4x30-45 s
+2. Unoszenie nóg 4x10-12
+3. Russian twist z talerzem 3x20
+4. Hollow hold 4x20-30 s
+5. Farmer walk 4x40-60 m
+Progresja: dodawaj 5 s lub 1-2 kg tygodniowo.''';
+  }
+  if (t.contains('nogi'))
+    return '''Plan pod nogi
+1. Przysiad / goblet squat 4x8-12
+2. Martwy ciąg rumuński 4x8-10
+3. Przysiad bułgarski 3x8/strona
+4. Hip thrust 4x10
+5. Wspięcia na palce 4x15-20''';
+  if (t.contains('plecy'))
+    return '''Plan pod plecy
+1. Podciąganie lub ściąganie drążka 4x6-10
+2. Wiosłowanie 4x8-12
+3. Face pull 3x15
+4. Martwy ciąg rumuński lekko 3x8
+5. Uginanie ramion 3x12''';
+  return '''Plan pod $target
+1. Ćwiczenie główne 4x6-10
+2. Wariant jednostronny 3x8-12
+3. Akcesorium 3x12-15
+4. Core/stabilizacja 3 serie
+5. Schłodzenie i notatka techniczna.''';
+}
+
+String buildTemplatePlan(String template, AppSettings settings) {
+  switch (template) {
+    case 'FBW':
+      return 'FBW 3-4 dni: Przysiad 4x8, Pompka/Wyciskanie 4x10, Wiosłowanie 4x10, RDL 3x8, Plank 3x45 s.';
+    case 'PPL':
+      return 'PPL: Push - wyciskanie, barki, triceps. Pull - podciąganie, wiosło, biceps. Legs - przysiad, RDL, hip thrust, łydki.';
+    case 'Góra/Dół':
+      return 'Góra/Dół: Góra - klatka, plecy, barki, ręce. Dół - przysiad, hinge, wykroki, core. Rotuj 4 dni w tygodniu.';
+    default:
+      return buildTargetPlan('brzuch i core', settings);
+  }
+}
+
+String weeklyProgressionAdvice(List<WorkoutLog> logs) {
+  if (logs.length < 3) return 'Zbieraj dane przez kilka treningów. Na start progresuj techniką i stałym zakresem ruchu.';
+  final avgRpe = logs.fold<double>(0, (a, e) => a + e.rpe) / logs.length;
+  if (avgRpe <= 7) return 'RPE jest pod kontrolą. Dodaj 1-2 powtórzenia albo 2,5-5 kg w jednym głównym ćwiczeniu.';
+  if (avgRpe >= 8.5) return 'RPE wysokie. Zostań przy ciężarze, popraw technikę albo odejmij 10-15% objętości.';
+  return 'Progresuj mało: jedna seria więcej na słabą partię albo minimalny ciężar w ćwiczeniu bazowym.';
+}
+
+String deloadAdvice(List<WorkoutLog> logs) {
+  final now = DateTime.now();
+  final last = DayTotals.from(logs.where((e) => !e.date.isBefore(now.subtract(const Duration(days: 6)))).toList());
+  final prev = DayTotals.from(logs.where((e) => e.date.isBefore(now.subtract(const Duration(days: 6))) && !e.date.isBefore(now.subtract(const Duration(days: 13)))).toList());
+  final avgRpe = logs.isEmpty ? 0.0 : logs.take(8).fold<double>(0, (a, e) => a + e.rpe) / math.min(8, logs.length);
+  if (avgRpe >= 8.7 || (prev.volume > 0 && last.volume < prev.volume * 0.65)) return 'Sugerowany deload: 5-7 dni, objętość -30-40%, ciężar -10-15%, technika i sen jako priorytet.';
+  return 'Deload nie jest teraz konieczny. Obserwuj RPE, sen, ból i spadek motywacji.';
+}
+
+void showSmartTextDialog(BuildContext context, String title, String text) {
+  showDialog(
+    context: context,
+    builder: (_) => AlertDialog(
+      title: Text(title),
+      content: SizedBox(width: 520, child: SingleChildScrollView(child: SelectableText(text))),
+      actions: [TextButton(onPressed: () => Navigator.of(context).pop(), child: const Text('OK'))],
+    ),
+  );
+}
+
+class CalorieBridgeCard extends StatelessWidget {
+  final AppStore store;
+  const CalorieBridgeCard({super.key, required this.store});
+
+  @override
+  Widget build(BuildContext context) {
+    final totals = store.totalsForDay(store.selectedDate);
+    final boost = trainingDayCalorieBoost(totals, store.settings);
+    final theme = Theme.of(context);
+    return Card(
+      child: ListTile(
+        leading: Icon(Icons.local_fire_department_outlined, color: theme.colorScheme.primary),
+        title: const Text('Podbicie kalorii w dzień ciężkiego treningu'),
+        subtitle: Text('Dzisiaj: ${totals.calories.round()} kcal z treningu, ${totals.volume.round()} kg objętości. Sugestia dla Licznika Kalorii: +$boost kcal.'),
+        trailing: Text('+$boost', style: theme.textTheme.titleMedium?.copyWith(fontWeight: FontWeight.w900)),
+      ),
+    );
+  }
+}
+
+class SharedProfileBridgeCard extends StatelessWidget {
+  final AppStore store;
+  const SharedProfileBridgeCard({super.key, required this.store});
+
+  @override
+  Widget build(BuildContext context) {
+    return Card(
+      child: ListTile(
+        leading: const Icon(Icons.sync_alt_outlined),
+        title: const Text('Most profilu z Licznikiem Kalorii'),
+        subtitle: const Text('Eksportuje wspólny profil JSON: tryb, cel, masa, trening dnia i sugerowane kcal.'),
+        trailing: const Icon(Icons.chevron_right),
+        onTap: () => showExportDialog(context, prettyJson(buildSharedCalorieProfile(store))),
+      ),
+    );
+  }
+}
+
+class DailyPriorityCard extends StatelessWidget {
+  final AppStore store;
+  const DailyPriorityCard({super.key, required this.store});
+
+  @override
+  Widget build(BuildContext context) {
+    final totals = store.totalsForDay(store.selectedDate);
+    final priority = totals.sessions == 0
+        ? 'Dzisiaj priorytet: wykonaj plan albo krótki core + mobilizacja.'
+        : totals.volume > 8000
+            ? 'Dzisiaj priorytet: regeneracja, sen i jedzenie po ciężkim treningu.'
+            : 'Dzisiaj priorytet: zapisz notatkę techniczną i oceń RPE.';
+    return Card(child: ListTile(leading: const Icon(Icons.flag_outlined), title: const Text('Dzisiejszy priorytet'), subtitle: Text(priority)));
+  }
+}
+
+class TrainingModeCard extends StatelessWidget {
+  final AppSettings settings;
+  const TrainingModeCard({super.key, required this.settings});
+
+  @override
+  Widget build(BuildContext context) {
+    final mode = normalizeTrainingMode(settings.trainingMode);
+    final text = mode == 'Redukcja'
+        ? 'Priorytet: utrzymaj siłę, kontroluj objętość i nie tnij regeneracji.'
+        : mode == 'Masa'
+            ? 'Priorytet: progres ciężaru/objętości i dodatni bilans kalorii.'
+            : mode == 'Kondycja'
+                ? 'Priorytet: czas pracy, tętno, bieganie/rower/skakanka i stopniowa objętość.'
+                : 'Priorytet: siła + sylwetka, umiarkowana objętość i stabilny progres.';
+    return Card(child: ListTile(leading: const Icon(Icons.tune_outlined), title: Text('Tryb: $mode'), subtitle: Text(text)));
+  }
+}
+
+class FeelingJournalCard extends StatefulWidget {
+  @override
+  State<FeelingJournalCard> createState() => _FeelingJournalCardState();
+}
+
+class _FeelingJournalCardState extends State<FeelingJournalCard> {
+  double energy = 7;
+  double stress = 4;
+  double sleep = 7;
+
+  @override
+  Widget build(BuildContext context) {
+    final score = ((energy + sleep + (10 - stress)) / 3).round();
+    return Card(
+      child: Padding(
+        padding: const EdgeInsets.all(16),
+        child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+          Row(children: const [Icon(Icons.mood_outlined), SizedBox(width: 8), Expanded(child: Text('Dziennik samopoczucia przed treningiem', style: TextStyle(fontWeight: FontWeight.w900)))]),
+          const SizedBox(height: 8),
+          Text('Gotowość: $score/10'),
+          Slider(value: energy, min: 1, max: 10, divisions: 9, label: 'Energia ${energy.round()}', onChanged: (v) => setState(() => energy = v)),
+          Slider(value: sleep, min: 1, max: 10, divisions: 9, label: 'Sen ${sleep.round()}', onChanged: (v) => setState(() => sleep = v)),
+          Slider(value: stress, min: 1, max: 10, divisions: 9, label: 'Stres ${stress.round()}', onChanged: (v) => setState(() => stress = v)),
+        ]),
+      ),
+    );
+  }
+}
+
+class RestTimerCard extends StatefulWidget {
+  final AppSettings settings;
+  const RestTimerCard({super.key, required this.settings});
+
+  @override
+  State<RestTimerCard> createState() => _RestTimerCardState();
+}
+
+class _RestTimerCardState extends State<RestTimerCard> {
+  Timer? timer;
+  int remaining = 0;
+
+  int get recommendedSeconds {
+    final mode = normalizeTrainingMode(widget.settings.trainingMode);
+    if (mode == 'Masa') return 120;
+    if (mode == 'Kondycja') return 45;
+    if (mode == 'Redukcja') return 60;
+    return 90;
+  }
+
+  void start() {
+    timer?.cancel();
+    setState(() => remaining = recommendedSeconds);
+    timer = Timer.periodic(const Duration(seconds: 1), (t) {
+      if (remaining <= 1) {
+        t.cancel();
+        if (mounted) setState(() => remaining = 0);
+      } else {
+        if (mounted) setState(() => remaining--);
+      }
+    });
+  }
+
+  @override
+  void dispose() {
+    timer?.cancel();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final min = remaining ~/ 60;
+    final sec = (remaining % 60).toString().padLeft(2, '0');
+    return Card(
+        child: ListTile(
+            leading: const Icon(Icons.timer_outlined),
+            title: const Text('Timer przerw zależny od celu'),
+            subtitle: Text('Rekomendowana przerwa: $recommendedSeconds s · aktywnie: $min:$sec'),
+            trailing: FilledButton(onPressed: start, child: const Text('Start'))));
+  }
+}
+
+class PlanTemplatesCard extends StatelessWidget {
+  final AppSettings settings;
+  const PlanTemplatesCard({super.key, required this.settings});
+
+  @override
+  Widget build(BuildContext context) {
+    return Card(
+      child: Padding(
+        padding: const EdgeInsets.all(16),
+        child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+          const Text('Gotowe plany', style: TextStyle(fontWeight: FontWeight.w900)),
+          const SizedBox(height: 10),
+          Wrap(
+              spacing: 8,
+              runSpacing: 8,
+              children: ['FBW', 'PPL', 'Góra/Dół', 'Brzuch z obciążeniem']
+                  .map((t) => FilledButton.tonal(onPressed: () => showSmartTextDialog(context, t, buildTemplatePlan(t, settings)), child: Text(t)))
+                  .toList()),
+        ]),
+      ),
+    );
+  }
+}
+
+class TargetedPlanGeneratorsCard extends StatelessWidget {
+  final AppSettings settings;
+  const TargetedPlanGeneratorsCard({super.key, required this.settings});
+
+  @override
+  Widget build(BuildContext context) {
+    return Card(
+      child: Padding(
+        padding: const EdgeInsets.all(16),
+        child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+          const Text('Generatory planu', style: TextStyle(fontWeight: FontWeight.w900)),
+          const SizedBox(height: 10),
+          Wrap(
+              spacing: 8,
+              runSpacing: 8,
+              children: ['Nogi', 'Plecy', 'Klatka', 'Barki', 'Brzuch i core']
+                  .map((t) => OutlinedButton(onPressed: () => showSmartTextDialog(context, 'Plan: $t', buildTargetPlan(t, settings)), child: Text(t)))
+                  .toList()),
+        ]),
+      ),
+    );
+  }
+}
+
+class MobilityAndStretchingCard extends StatelessWidget {
+  final AppSettings settings;
+  const MobilityAndStretchingCard({super.key, required this.settings});
+
+  @override
+  Widget build(BuildContext context) {
+    return Card(
+      child: Padding(
+        padding: const EdgeInsets.all(16),
+        child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+          const Text('Rozgrzewka, schłodzenie, mobilizacja', style: TextStyle(fontWeight: FontWeight.w900)),
+          const SizedBox(height: 10),
+          Wrap(spacing: 8, runSpacing: 8, children: [
+            FilledButton.tonal(onPressed: () => showSmartTextDialog(context, 'Rozgrzewka', buildWarmup(settings)), child: const Text('Rozgrzewka')),
+            FilledButton.tonal(onPressed: () => showSmartTextDialog(context, 'Schłodzenie', buildCooldown(settings)), child: const Text('Schłodzenie')),
+            FilledButton.tonal(onPressed: () => showSmartTextDialog(context, 'Mobilizacja', buildMobility(settings)), child: const Text('Mobilizacja')),
+            FilledButton.tonal(onPressed: () => showSmartTextDialog(context, 'Rozciąganie', buildStretching(settings)), child: const Text('Rozciąganie')),
+          ]),
+        ]),
+      ),
+    );
+  }
+}
+
+class VolumeWarningsCard extends StatelessWidget {
+  final List<WorkoutLog> logs;
+  const VolumeWarningsCard({super.key, required this.logs});
+  @override
+  Widget build(BuildContext context) {
+    final totals = DayTotals.from(logs);
+    final warning =
+        totals.volume > 35000 || totals.durationSec > 420 * 60 ? 'Objętość tygodnia jest wysoka. Rozważ lżejszy dzień albo deload.' : 'Objętość tygodniowa wygląda bezpiecznie przy obecnych danych.';
+    return Card(
+        child: ListTile(
+            leading: const Icon(Icons.warning_amber_outlined),
+            title: const Text('Ostrzeżenia objętości'),
+            subtitle: Text('$warning Objętość: ${totals.volume.round()} kg, czas: ${(totals.durationSec / 60).round()} min.')));
+  }
+}
+
+class MuscleMapCard extends StatelessWidget {
+  final List<WorkoutLog> logs;
+  final List<Exercise> customExercises;
+  const MuscleMapCard({super.key, required this.logs, required this.customExercises});
+  @override
+  Widget build(BuildContext context) {
+    final counts = muscleCounts(logs, customExercises);
+    final theme = Theme.of(context);
+    final maxV = counts.values.isEmpty ? 1 : counts.values.reduce(math.max);
+    return Card(
+      child: Padding(
+        padding: const EdgeInsets.all(16),
+        child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+          Row(children: [
+            Icon(Icons.accessibility_new_outlined, color: theme.colorScheme.primary),
+            const SizedBox(width: 8),
+            const Expanded(child: Text('Mapa trenowanych partii', style: TextStyle(fontWeight: FontWeight.w900)))
+          ]),
+          const SizedBox(height: 12),
+          SizedBox(height: 210, child: CustomPaint(painter: BodyHeatMapPainter(counts: counts, maxValue: maxV, color: theme.colorScheme.primary), child: const SizedBox.expand())),
+        ]),
+      ),
+    );
+  }
+}
+
+class BodyHeatMapPainter extends CustomPainter {
+  final Map<String, int> counts;
+  final int maxValue;
+  final Color color;
+  BodyHeatMapPainter({required this.counts, required this.maxValue, required this.color});
+  @override
+  void paint(Canvas canvas, Size size) {
+    final p = Paint()..color = color.withOpacity(.16);
+    canvas.drawRRect(RRect.fromRectAndRadius(Offset.zero & size, const Radius.circular(24)), p);
+    double a(String key) => ((counts.entries.where((e) => e.key.toLowerCase().contains(key)).fold<int>(0, (a, e) => a + e.value)) / math.max(1, maxValue)).clamp(.12, 1.0).toDouble();
+    void part(Rect r, String key) => canvas.drawRRect(RRect.fromRectAndRadius(r, const Radius.circular(30)), Paint()..color = color.withOpacity(a(key)));
+    final w = size.width, h = size.height;
+    part(Rect.fromCenter(center: Offset(w * .5, h * .18), width: 42, height: 42), '');
+    part(Rect.fromCenter(center: Offset(w * .5, h * .37), width: 74, height: 92), 'brzuch');
+    part(Rect.fromCenter(center: Offset(w * .31, h * .34), width: 44, height: 98), 'bark');
+    part(Rect.fromCenter(center: Offset(w * .69, h * .34), width: 44, height: 98), 'bark');
+    part(Rect.fromCenter(center: Offset(w * .4, h * .72), width: 48, height: 118), 'uda');
+    part(Rect.fromCenter(center: Offset(w * .6, h * .72), width: 48, height: 118), 'uda');
+  }
+
+  @override
+  bool shouldRepaint(covariant BodyHeatMapPainter oldDelegate) => oldDelegate.counts != counts || oldDelegate.color != color;
+}
+
+class SetsByMuscleChartCard extends StatelessWidget {
+  final List<WorkoutLog> logs;
+  final List<Exercise> customExercises;
+  const SetsByMuscleChartCard({super.key, required this.logs, required this.customExercises});
+  @override
+  Widget build(BuildContext context) {
+    final counts = muscleCounts(logs, customExercises);
+    final entries = counts.entries.toList()..sort((a, b) => b.value.compareTo(a.value));
+    final maxV = entries.isEmpty ? 1 : entries.first.value;
+    return Card(
+        child: Padding(
+            padding: const EdgeInsets.all(16),
+            child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+              const Text('Wykres serii na partię', style: TextStyle(fontWeight: FontWeight.w900)),
+              const SizedBox(height: 10),
+              if (entries.isEmpty) const Text('Brak danych') else ...entries.take(8).map((e) => ProgressTextBar(label: e.key, value: e.value.toDouble(), max: maxV.toDouble(), suffix: '${e.value}x'))
+            ])));
+  }
+}
+
+class RpeChartCard extends StatelessWidget {
+  final List<WorkoutLog> logs;
+  const RpeChartCard({super.key, required this.logs});
+  @override
+  Widget build(BuildContext context) {
+    final values = logs.reversed.take(14).map((e) => e.rpe.toDouble()).toList();
+    return ChartCard(title: 'Wykres średniego RPE', values: values.isEmpty ? [0] : values, suffix: 'RPE');
+  }
+}
+
+class StreakChartCard extends StatelessWidget {
+  final List<WorkoutLog> logs;
+  const StreakChartCard({super.key, required this.logs});
+  @override
+  Widget build(BuildContext context) {
+    final today = DateTime.now();
+    final days = List.generate(14, (i) => DateTime(today.year, today.month, today.day).subtract(Duration(days: 13 - i)));
+    final trained = logs.map((e) => DateTime(e.date.year, e.date.month, e.date.day).toIso8601String()).toSet();
+    final values = days.map((d) => trained.contains(d.toIso8601String()) ? 1.0 : 0.0).toList();
+    return ChartCard(title: 'Wykres streaku treningowego', values: values, suffix: 'dzień');
+  }
+}
+
+class ProgressByExerciseCard extends StatelessWidget {
+  final List<WorkoutLog> logs;
+  final List<Exercise> customExercises;
+  const ProgressByExerciseCard({super.key, required this.logs, required this.customExercises});
+  @override
+  Widget build(BuildContext context) {
+    final by = <String, List<WorkoutLog>>{};
+    for (final l in logs) {
+      by.putIfAbsent(l.exerciseId, () => []).add(l);
+    }
+    final entries = by.entries.toList()..sort((a, b) => b.value.length.compareTo(a.value.length));
+    return Card(
+        child: Padding(
+            padding: const EdgeInsets.all(16),
+            child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+              const Text('Progres ćwiczenia: ciężar, powtórzenia, objętość', style: TextStyle(fontWeight: FontWeight.w900)),
+              const SizedBox(height: 10),
+              if (entries.isEmpty)
+                const Text('Brak danych')
+              else
+                ...entries.take(5).map((e) {
+                  final ex = ExerciseRepo.byId(e.key, customExercises);
+                  final best = e.value.reduce((a, b) => a.volume >= b.volume ? a : b);
+                  return ListTile(
+                      contentPadding: EdgeInsets.zero,
+                      title: Text(ex.name),
+                      subtitle: Text('Najlepsza objętość: ${best.volume.round()} kg · ciężar ${best.weightKg.toStringAsFixed(1)} kg · powt. ${best.reps}'));
+                })
+            ])));
+  }
+}
+
+class PostWorkoutRecommendationCard extends StatelessWidget {
+  final List<WorkoutLog> logs;
+  const PostWorkoutRecommendationCard({super.key, required this.logs});
+  @override
+  Widget build(BuildContext context) {
+    final totals = DayTotals.from(logs);
+    final text = totals.sessions == 0
+        ? 'Po treningu zobaczysz tu rekomendacje regeneracji, progresji i posiłku.'
+        : totals.volume > 12000
+            ? 'Po treningu: białko + węgle, spacer 10 min, sen 7-9 h, jutro lekki core/mobilizacja.'
+            : 'Po treningu: zapisz notatkę techniczną, rozciągnij trenowane partie i utrzymaj nawodnienie.';
+    return Card(child: ListTile(leading: const Icon(Icons.recommend_outlined), title: const Text('Rekomendacje po treningu'), subtitle: Text(text)));
+  }
+}
+
+class OfflineModeCard extends StatelessWidget {
+  @override
+  Widget build(BuildContext context) {
+    return const Card(
+        child: ListTile(
+            leading: Icon(Icons.wifi_off_outlined),
+            title: Text('Tryb offline i lokalny fallback'),
+            subtitle: Text('Baza ćwiczeń, dziennik, wykresy, plan lokalny, timer, checklisty i eksport działają bez internetu. AI i wger wymagają sieci.')));
+  }
+}
+
+class TechniqueChecklistForExercise extends StatefulWidget {
+  final Exercise exercise;
+  const TechniqueChecklistForExercise({super.key, required this.exercise});
+  @override
+  State<TechniqueChecklistForExercise> createState() => _TechniqueChecklistForExerciseState();
+}
+
+class _TechniqueChecklistForExerciseState extends State<TechniqueChecklistForExercise> {
+  final checked = <int, bool>{};
+  @override
+  Widget build(BuildContext context) {
+    final items = [...widget.exercise.commonMistakes, 'Zapisz notatkę techniczną po serii', 'Nagrywaj serię roboczą, gdy coś boli'];
+    return Card(
+        child: Padding(
+            padding: const EdgeInsets.all(16),
+            child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+              const Text('Błędy techniczne do odhaczenia', style: TextStyle(fontWeight: FontWeight.w900)),
+              ...items.asMap().entries.map((e) =>
+                  CheckboxListTile(contentPadding: EdgeInsets.zero, dense: true, value: checked[e.key] ?? false, title: Text(e.value), onChanged: (v) => setState(() => checked[e.key] = v ?? false)))
+            ])));
+  }
+}
+
+class ExerciseSubstitutionsCard extends StatelessWidget {
+  final Exercise exercise;
+  const ExerciseSubstitutionsCard({super.key, required this.exercise});
+  @override
+  Widget build(BuildContext context) {
+    final store = AppScope.of(context);
+    final allExercises = ExerciseRepo.combined(store.customExercises);
+    final resolved = <Exercise>[];
+    for (final alternative in exercise.alternatives) {
+      final normalized = alternative.toLowerCase();
+      final match = allExercises.where(
+        (candidate) => candidate.id != exercise.id && (candidate.name.toLowerCase().contains(normalized) || normalized.contains(candidate.name.toLowerCase())),
+      );
+      if (match.isNotEmpty) resolved.add(match.first);
+    }
+    final suggestions = allExercises
+        .where(
+          (candidate) => candidate.id != exercise.id && (candidate.category == exercise.category || candidate.muscles.any(exercise.muscles.contains)),
+        )
+        .where((candidate) => !resolved.any((item) => item.id == candidate.id))
+        .take(3)
+        .toList();
+    final theme = Theme.of(context);
+    return Card(
+      child: Padding(
+        padding: const EdgeInsets.all(16),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Row(
+              children: [
+                Icon(Icons.swap_horiz_rounded, color: theme.colorScheme.primary),
+                const SizedBox(width: 8),
+                Expanded(
+                  child: Text(
+                    'Alternatywy',
+                    style: theme.textTheme.titleMedium?.copyWith(fontWeight: FontWeight.w900),
+                  ),
+                ),
+              ],
+            ),
+            const SizedBox(height: 8),
+            ...exercise.alternatives.map(
+              (alternative) => Padding(
+                padding: const EdgeInsets.only(bottom: 8),
+                child: Row(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    const Text('•  '),
+                    Expanded(child: Text(alternative)),
+                  ],
+                ),
+              ),
+            ),
+            if (resolved.isNotEmpty || suggestions.isNotEmpty) ...[
+              const Divider(height: 24),
+              Text(
+                'Podobne ćwiczenia w bazie',
+                style: theme.textTheme.labelLarge?.copyWith(fontWeight: FontWeight.w900),
+              ),
+              const SizedBox(height: 4),
+              ...[...resolved, ...suggestions].take(4).map(
+                    (candidate) => ListTile(
+                      contentPadding: EdgeInsets.zero,
+                      title: Text(candidate.name),
+                      subtitle: Text(
+                        '${candidate.primaryMuscle} · ${candidate.equipment}',
+                        maxLines: 1,
+                        overflow: TextOverflow.ellipsis,
+                      ),
+                      trailing: const Icon(Icons.chevron_right_rounded),
+                      onTap: () => Navigator.of(context).pushReplacement(
+                        MaterialPageRoute(
+                          builder: (_) => ExerciseDetailsPage(
+                            exerciseId: candidate.id,
+                          ),
+                        ),
+                      ),
+                    ),
+                  ),
+            ],
+          ],
+        ),
+      ),
+    );
+  }
+}
+
+class ExerciseProgressionCard extends StatelessWidget {
+  final Exercise exercise;
+  const ExerciseProgressionCard({super.key, required this.exercise});
+  @override
+  Widget build(BuildContext context) {
+    return Card(
+        child: ListTile(
+            leading: const Icon(Icons.stacked_line_chart_outlined),
+            title: const Text('Rekomendacja progresji tygodniowej'),
+            subtitle: Text('Dla ${exercise.name}: gdy wszystkie serie są techniczne przy RPE <=7, dodaj 1-2 powtórzenia albo najmniejszy dostępny ciężar. Gdy RPE >=9, utrzymaj lub odejmij 10%.')));
+  }
+}
+
+Future<void> showCreateExerciseSheet(
+  BuildContext context, {
+  Exercise? exercise,
+}) async {
+  final store = AppScope.read(context);
+  await showModalBottomSheet(
+    context: context,
+    isScrollControlled: true,
+    useSafeArea: true,
+    showDragHandle: true,
+    builder: (_) => FractionallySizedBox(
+      heightFactor: 0.94,
+      child: CreateExerciseSheetContent(
+        store: store,
+        exercise: exercise,
+      ),
+    ),
+  );
+}
+
+class CreateExerciseSheetContent extends StatefulWidget {
+  const CreateExerciseSheetContent({
+    super.key,
+    required this.store,
+    this.exercise,
+  });
+
+  final AppStore store;
+  final Exercise? exercise;
+
+  @override
+  State<CreateExerciseSheetContent> createState() => _CreateExerciseSheetContentState();
+}
+
+class _CreateExerciseSheetContentState extends State<CreateExerciseSheetContent> {
+  final formKey = GlobalKey<FormState>();
+  late final TextEditingController name;
+  late final TextEditingController category;
+  late final TextEditingController primaryMuscle;
+  late final TextEditingController supportingMuscles;
+  late final TextEditingController equipment;
+  late final TextEditingController description;
+  late final TextEditingController tips;
+  late final TextEditingController commonMistakes;
+  late final TextEditingController avoidWhen;
+  late final TextEditingController alternatives;
+  late String level;
+  final selectedGoals = <TrainingGoal>{};
+
+  @override
+  void initState() {
+    super.initState();
+    final exercise = widget.exercise;
+    name = TextEditingController(text: exercise?.name ?? '');
+    category = TextEditingController(text: exercise?.category ?? 'Inne');
+    primaryMuscle = TextEditingController(
+      text: exercise?.primaryMuscle ?? 'całe ciało',
+    );
+    supportingMuscles = TextEditingController(
+      text: exercise?.supportingMuscles.join(', ') ?? '',
+    );
+    equipment = TextEditingController(
+      text: exercise?.equipment ?? 'masa ciała',
+    );
+    description = TextEditingController(text: exercise?.description ?? '');
+    tips = TextEditingController(text: exercise?.tips.join('\n') ?? '');
+    commonMistakes = TextEditingController(
+      text: exercise?.commonMistakes.join('\n') ?? '',
+    );
+    avoidWhen = TextEditingController(
+      text: exercise?.avoidWhen.join('\n') ?? '',
+    );
+    alternatives = TextEditingController(
+      text: exercise?.alternatives.join('\n') ?? '',
+    );
+    level = normalizeLevel(exercise?.level ?? 'Początkujący');
+    selectedGoals.addAll(
+      exercise?.typedTrainingGoals ?? const <TrainingGoal>{},
+    );
+    if (selectedGoals.isEmpty) {
+      selectedGoals.addAll({
+        TrainingGoal.strength,
+        TrainingGoal.muscleGain,
+      });
+    }
+  }
+
+  @override
+  void dispose() {
+    name.dispose();
+    category.dispose();
+    primaryMuscle.dispose();
+    supportingMuscles.dispose();
+    equipment.dispose();
+    description.dispose();
+    tips.dispose();
+    commonMistakes.dispose();
+    avoidWhen.dispose();
+    alternatives.dispose();
+    super.dispose();
+  }
+
+  Future<void> save() async {
+    if (!(formKey.currentState?.validate() ?? false)) return;
+    final original = widget.exercise;
+    final supporting = _splitExerciseField(supportingMuscles.text);
+    final primary = primaryMuscle.text.trim();
+    final parsedTips = _splitExerciseField(tips.text);
+    final parsedMistakes = _splitExerciseField(commonMistakes.text);
+    final parsedAvoidWhen = _splitExerciseField(avoidWhen.text);
+    final parsedAlternatives = _splitExerciseField(alternatives.text);
+    final ex = Exercise(
+      id: original?.id ?? 'custom_${idNow()}',
+      name: name.text.trim(),
+      category: category.text.trim().isEmpty ? 'Inne' : category.text.trim(),
+      muscles: [
+        primary,
+        ...supporting.where(
+          (muscle) => muscle.toLowerCase() != primary.toLowerCase(),
+        ),
+      ],
+      equipment: equipment.text.trim().isEmpty ? 'masa ciała' : equipment.text.trim(),
+      level: level,
+      illustrationType: original?.illustrationType ?? 'generic',
+      description: description.text.trim().isEmpty ? 'Własne ćwiczenie użytkownika.' : description.text.trim(),
+      tips: parsedTips.isEmpty
+          ? const [
+              'Zacznij od lekkiej wersji.',
+              'Kontroluj ruch w całym zakresie.',
+            ]
+          : parsedTips,
+      commonMistakes: parsedMistakes.isEmpty
+          ? const [
+              'Za szybkie tempo.',
+              'Za duży ciężar.',
+              'Brak kontroli zakresu.',
+            ]
+          : parsedMistakes,
+      defaultSets: original?.defaultSets ?? 3,
+      defaultReps: original?.defaultReps ?? 10,
+      defaultDurationSec: original?.defaultDurationSec ?? 0,
+      met: original?.met ?? 4.5,
+      trainingGoals: selectedGoals.map((goal) => goal.label).toList(),
+      avoidWhen: parsedAvoidWhen,
+      alternatives: parsedAlternatives,
+      imageUrl: original?.imageUrl,
+      source: original == null
+          ? 'custom'
+          : original.source == 'local'
+              ? 'edited'
+              : original.source,
+    );
+    await widget.store.addCustomExercise(ex);
+    if (!mounted) return;
+    Navigator.of(context).pop();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final theme = Theme.of(context);
+    final editing = widget.exercise != null;
+    return Padding(
+      padding: EdgeInsets.fromLTRB(16, 0, 16, 16 + MediaQuery.of(context).viewInsets.bottom + MediaQuery.of(context).viewPadding.bottom),
+      child: Form(
+        key: formKey,
+        child: SingleChildScrollView(
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            crossAxisAlignment: CrossAxisAlignment.stretch,
+            children: [
+              Row(
+                children: [
+                  CircleAvatar(
+                    backgroundColor: theme.colorScheme.primaryContainer,
+                    foregroundColor: theme.colorScheme.onPrimaryContainer,
+                    child: Icon(
+                      editing ? Icons.edit_rounded : Icons.add_rounded,
+                    ),
+                  ),
+                  const SizedBox(width: 12),
+                  Expanded(
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        Text(
+                          editing ? 'Edytuj ćwiczenie' : 'Dodaj własne ćwiczenie',
+                          style: theme.textTheme.titleLarge?.copyWith(fontWeight: FontWeight.w900),
+                        ),
+                        Text(
+                          'Dane zostaną zapisane lokalnie.',
+                          style: theme.textTheme.bodySmall?.copyWith(
+                            color: theme.colorScheme.onSurfaceVariant,
+                          ),
+                        ),
+                      ],
+                    ),
+                  ),
+                ],
+              ),
+              const SizedBox(height: 18),
+              TextFormField(
+                controller: name,
+                decoration: const InputDecoration(labelText: 'Nazwa'),
+                validator: (value) => value == null || value.trim().isEmpty ? 'Podaj nazwę ćwiczenia.' : null,
+              ),
+              const SizedBox(height: 10),
+              LayoutBuilder(
+                builder: (context, constraints) {
+                  final width = constraints.maxWidth >= 620 ? (constraints.maxWidth - 10) / 2 : constraints.maxWidth;
+                  return Wrap(
+                    spacing: 10,
+                    runSpacing: 10,
+                    children: [
+                      SizedBox(
+                        width: width,
+                        child: TextFormField(
+                          controller: primaryMuscle,
+                          decoration: const InputDecoration(
+                            labelText: 'Główna partia mięśniowa',
+                          ),
+                          validator: (value) => value == null || value.trim().isEmpty ? 'Podaj główną partię.' : null,
+                        ),
+                      ),
+                      SizedBox(
+                        width: width,
+                        child: TextFormField(
+                          controller: supportingMuscles,
+                          decoration: const InputDecoration(
+                            labelText: 'Partie pomocnicze',
+                            hintText: 'np. triceps, barki',
+                          ),
+                        ),
+                      ),
+                      SizedBox(
+                        width: width,
+                        child: TextFormField(
+                          controller: equipment,
+                          decoration: const InputDecoration(labelText: 'Sprzęt'),
+                          validator: (value) => value == null || value.trim().isEmpty ? 'Podaj sprzęt lub „masa ciała”.' : null,
+                        ),
+                      ),
+                      SizedBox(
+                        width: width,
+                        child: DropdownButtonFormField<String>(
+                          initialValue: level,
+                          isExpanded: true,
+                          decoration: const InputDecoration(
+                            labelText: 'Poziom trudności',
+                          ),
+                          items: kTrainingLevels
+                              .map(
+                                (value) => DropdownMenuItem(
+                                  value: value,
+                                  child: Text(value),
+                                ),
+                              )
+                              .toList(),
+                          onChanged: (value) => setState(() => level = value ?? level),
+                        ),
+                      ),
+                    ],
+                  );
+                },
+              ),
+              const SizedBox(height: 10),
+              TextFormField(
+                controller: category,
+                decoration: const InputDecoration(
+                  labelText: 'Kategoria w bazie',
+                  hintText: 'np. Nogi, Plecy, Kardio',
+                ),
+              ),
+              const SizedBox(height: 14),
+              Text(
+                'Cel treningowy',
+                style: theme.textTheme.titleSmall?.copyWith(fontWeight: FontWeight.w900),
+              ),
+              const SizedBox(height: 8),
+              Wrap(
+                spacing: 8,
+                runSpacing: 8,
+                children: TrainingGoal.values
+                    .map(
+                      (goal) => FilterChip(
+                        label: Text(goal.label),
+                        selected: selectedGoals.contains(goal),
+                        onSelected: (selected) {
+                          setState(() {
+                            if (selected) {
+                              selectedGoals.add(goal);
+                            } else {
+                              selectedGoals.remove(goal);
+                            }
+                          });
+                        },
+                      ),
+                    )
+                    .toList(),
+              ),
+              const SizedBox(height: 14),
+              TextFormField(
+                controller: description,
+                minLines: 3,
+                maxLines: 6,
+                decoration: const InputDecoration(labelText: 'Opis techniki'),
+                validator: (value) => value == null || value.trim().isEmpty ? 'Dodaj krótki opis techniki.' : null,
+              ),
+              const SizedBox(height: 10),
+              TextFormField(
+                controller: tips,
+                minLines: 2,
+                maxLines: 5,
+                decoration: const InputDecoration(
+                  labelText: 'Wskazówki techniczne',
+                  hintText: 'Każda wskazówka w nowej linii',
+                ),
+              ),
+              const SizedBox(height: 10),
+              TextFormField(
+                controller: commonMistakes,
+                minLines: 2,
+                maxLines: 5,
+                decoration: const InputDecoration(
+                  labelText: 'Najczęstsze błędy',
+                  hintText: 'Każdy błąd w nowej linii',
+                ),
+              ),
+              const SizedBox(height: 10),
+              TextFormField(
+                controller: avoidWhen,
+                minLines: 2,
+                maxLines: 5,
+                decoration: const InputDecoration(
+                  labelText: 'Kiedy unikać ćwiczenia',
+                  hintText: 'Każda sytuacja w nowej linii',
+                ),
+              ),
+              const SizedBox(height: 10),
+              TextFormField(
+                controller: alternatives,
+                minLines: 2,
+                maxLines: 5,
+                decoration: const InputDecoration(
+                  labelText: 'Alternatywy',
+                  hintText: 'Każda alternatywa w nowej linii',
+                ),
+              ),
+              const SizedBox(height: 18),
+              FilledButton.icon(
+                onPressed: save,
+                icon: const Icon(Icons.save_outlined),
+                label: Text(
+                  editing ? 'Zapisz zmiany' : 'Dodaj ćwiczenie',
+                ),
+              ),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+List<String> _splitExerciseField(String value) {
+  return value.split(RegExp(r'[\n,;]+')).map((item) => item.trim()).where((item) => item.isNotEmpty).toList();
+}
+
 Future<void> showAddWorkoutSheet(BuildContext context, {Exercise? exercise, WorkoutLog? existing, PlanItem? fromPlan}) async {
-  final store = AppScope.of(context);
+  final store = AppScope.read(context);
   await showModalBottomSheet(
     context: context,
     isScrollControlled: true,
@@ -3066,9 +5986,11 @@ class _AddWorkoutSheetContentState extends State<AddWorkoutSheetContent> {
                 const SizedBox(width: 12),
                 Expanded(
                   child: DropdownButtonFormField<String>(
+                    isExpanded: true,
                     value: exercises.any((e) => e.id == selectedExercise.id) ? selectedExercise.id : exercises.first.id,
                     decoration: const InputDecoration(labelText: 'Ćwiczenie'),
-                    items: exercises.map((x) => DropdownMenuItem(value: x.id, child: Text(x.name, overflow: TextOverflow.ellipsis))).toList(),
+                    selectedItemBuilder: (context) => exercises.map((x) => Align(alignment: Alignment.centerLeft, child: Text(x.name, maxLines: 1, overflow: TextOverflow.ellipsis))).toList(),
+                    items: exercises.map((x) => DropdownMenuItem(value: x.id, child: Text(x.name, maxLines: 1, overflow: TextOverflow.ellipsis))).toList(),
                     onChanged: (id) {
                       if (id == null) return;
                       setState(() {
@@ -3103,7 +6025,11 @@ class _AddWorkoutSheetContentState extends State<AddWorkoutSheetContent> {
                 child: InputDecorator(
                   decoration: const InputDecoration(labelText: 'RPE'),
                   child: DropdownButtonHideUnderline(
-                    child: DropdownButton<int>(value: rpe, isExpanded: true, items: List.generate(10, (i) => i + 1).map((v) => DropdownMenuItem(value: v, child: Text('$v/10'))).toList(), onChanged: (v) => setState(() => rpe = v ?? rpe)),
+                    child: DropdownButton<int>(
+                        value: rpe,
+                        isExpanded: true,
+                        items: List.generate(10, (i) => i + 1).map((v) => DropdownMenuItem(value: v, child: Text('$v/10'))).toList(),
+                        onChanged: (v) => setState(() => rpe = v ?? rpe)),
                   ),
                 ),
               ),
@@ -3154,12 +6080,12 @@ class ExerciseVisual extends StatelessWidget {
         child: Image.network(
           image,
           fit: BoxFit.cover,
-          errorBuilder: (_, __, ___) => AnimatedExerciseIllustration(type: exercise.illustrationType),
-          loadingBuilder: (context, child, progress) => progress == null ? child : AnimatedExerciseIllustration(type: exercise.illustrationType),
+          errorBuilder: (_, __, ___) => HumanExerciseImage(type: exercise.illustrationType),
+          loadingBuilder: (context, child, progress) => progress == null ? child : HumanExerciseImage(type: exercise.illustrationType),
         ),
       );
     }
-    return AnimatedExerciseIllustration(type: exercise.illustrationType);
+    return HumanExerciseImage(type: exercise.illustrationType);
   }
 }
 
@@ -3184,14 +6110,14 @@ class ExerciseHeroVisual extends StatelessWidget {
               padding: const EdgeInsets.all(18),
               child: exercise.imageUrl != null
                   ? ClipRRect(
-                borderRadius: BorderRadius.circular(24),
-                child: Image.network(
-                  exercise.imageUrl!,
-                  fit: BoxFit.contain,
-                  errorBuilder: (_, __, ___) => Center(child: AnimatedExerciseIllustration(type: exercise.illustrationType, size: 230)),
-                ),
-              )
-                  : Center(child: AnimatedExerciseIllustration(type: exercise.illustrationType, size: 230)),
+                      borderRadius: BorderRadius.circular(24),
+                      child: Image.network(
+                        exercise.imageUrl!,
+                        fit: BoxFit.contain,
+                        errorBuilder: (_, __, ___) => Center(child: HumanExerciseImage(type: exercise.illustrationType, size: 230)),
+                      ),
+                    )
+                  : Center(child: HumanExerciseImage(type: exercise.illustrationType, size: 230)),
             ),
           ),
           Positioned(
@@ -3210,152 +6136,61 @@ class ExerciseHeroVisual extends StatelessWidget {
   }
 }
 
-class ExerciseStoryboard extends StatefulWidget {
-  final Exercise exercise;
-
-  const ExerciseStoryboard({super.key, required this.exercise});
-
-  @override
-  State<ExerciseStoryboard> createState() => _ExerciseStoryboardState();
-}
-
-class _ExerciseStoryboardState extends State<ExerciseStoryboard> {
-  final controller = PageController(viewportFraction: 0.82);
-  int index = 0;
-
-  @override
-  void dispose() {
-    controller.dispose();
-    super.dispose();
-  }
-
-  @override
-  Widget build(BuildContext context) {
-    final theme = Theme.of(context);
-    const frames = 8;
-    return Card(
-      child: Padding(
-        padding: const EdgeInsets.all(16),
-        child: Column(
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
-            Row(
-              children: [
-                Icon(Icons.view_carousel_outlined, color: theme.colorScheme.primary),
-                const SizedBox(width: 8),
-                Expanded(child: Text('Slajdy ruchu krok po kroku', style: theme.textTheme.titleMedium?.copyWith(fontWeight: FontWeight.w900))),
-                Text('${index + 1}/$frames', style: theme.textTheme.labelLarge),
-              ],
-            ),
-            const SizedBox(height: 12),
-            SizedBox(
-              height: 230,
-              child: PageView.builder(
-                controller: controller,
-                itemCount: frames,
-                onPageChanged: (v) => setState(() => index = v),
-                itemBuilder: (_, i) {
-                  final t = frames == 1 ? 0.0 : i / (frames - 1);
-                  return Padding(
-                    padding: const EdgeInsets.only(right: 10),
-                    child: Container(
-                      decoration: BoxDecoration(
-                        borderRadius: BorderRadius.circular(24),
-                        color: theme.colorScheme.surfaceContainerHighest.withOpacity(0.55),
-                      ),
-                      child: Column(
-                        children: [
-                          Expanded(
-                            child: Padding(
-                              padding: const EdgeInsets.all(12),
-                              child: CustomPaint(
-                                painter: ExercisePainter(
-                                  type: widget.exercise.illustrationType,
-                                  t: Curves.easeInOut.transform(t),
-                                  lineColor: theme.colorScheme.primary,
-                                  backgroundColor: theme.colorScheme.primaryContainer.withOpacity(0.30),
-                                ),
-                                child: const SizedBox.expand(),
-                              ),
-                            ),
-                          ),
-                          Padding(
-                            padding: const EdgeInsets.fromLTRB(12, 0, 12, 12),
-                            child: Text(_frameCaption(i, frames), style: theme.textTheme.bodySmall?.copyWith(fontWeight: FontWeight.w700), textAlign: TextAlign.center),
-                          ),
-                        ],
-                      ),
-                    ),
-                  );
-                },
-              ),
-            ),
-            const SizedBox(height: 10),
-            Text('To są lokalne, autorskie slajdy techniczne w aplikacji. Dla ćwiczeń z API aplikacja próbuje też pokazać obraz z bazy, a slajdy generuje według rozpoznanego typu ruchu.', style: theme.textTheme.bodySmall?.copyWith(color: theme.colorScheme.onSurfaceVariant)),
-          ],
-        ),
-      ),
-    );
-  }
-
-  String _frameCaption(int i, int frames) {
-    if (i == 0) return 'Pozycja startowa i ustawienie ciała';
-    if (i == frames - 1) return 'Powrót do pozycji startowej bez utraty kontroli';
-    if (i < frames / 2) return 'Faza opuszczania / przygotowania ruchu';
-    return 'Faza pracy i napięcia mięśniowego';
-  }
-}
-
-class AnimatedExerciseIllustration extends StatefulWidget {
+class HumanExerciseImage extends StatelessWidget {
   final String type;
   final double? size;
   final Color? lineColor;
   final Color? backgroundColor;
 
-  const AnimatedExerciseIllustration({super.key, required this.type, this.size, this.lineColor, this.backgroundColor});
+  const HumanExerciseImage({super.key, required this.type, this.size, this.lineColor, this.backgroundColor});
 
   @override
-  State<AnimatedExerciseIllustration> createState() => _AnimatedExerciseIllustrationState();
+  Widget build(BuildContext context) {
+    return HumanExerciseFrame(
+      type: type,
+      size: size,
+      progress: 0.55,
+      lineColor: lineColor,
+      backgroundColor: backgroundColor,
+    );
+  }
 }
 
-class _AnimatedExerciseIllustrationState extends State<AnimatedExerciseIllustration> with SingleTickerProviderStateMixin {
-  late final AnimationController controller;
+class HumanExerciseFrame extends StatelessWidget {
+  final String type;
+  final double progress;
+  final double? size;
+  final Color? lineColor;
+  final Color? backgroundColor;
 
-  @override
-  void initState() {
-    super.initState();
-    controller = AnimationController(vsync: this, duration: const Duration(milliseconds: 1300))..repeat(reverse: true);
-  }
-
-  @override
-  void dispose() {
-    controller.dispose();
-    super.dispose();
-  }
+  const HumanExerciseFrame({super.key, required this.type, required this.progress, this.size, this.lineColor, this.backgroundColor});
 
   @override
   Widget build(BuildContext context) {
     final theme = Theme.of(context);
-    final line = widget.lineColor ?? theme.colorScheme.primary;
-    final bg = widget.backgroundColor ?? theme.colorScheme.primaryContainer.withOpacity(0.45);
-    final child = AnimatedBuilder(
-      animation: controller,
-      builder: (_, __) => CustomPaint(
-        painter: ExercisePainter(type: widget.type, t: Curves.easeInOut.transform(controller.value), lineColor: line, backgroundColor: bg),
+    final child = CustomPaint(
+      painter: HumanExercisePainter(
+        type: type,
+        progress: progress.clamp(0.0, 1.0),
+        bodyColor: lineColor ?? theme.colorScheme.primary,
+        backgroundColor: backgroundColor ?? theme.colorScheme.primaryContainer.withOpacity(0.45),
+        accentColor: theme.colorScheme.tertiary,
       ),
+      child: const SizedBox.expand(),
     );
-    if (widget.size != null) return SizedBox(width: widget.size, height: widget.size, child: child);
+    if (size != null) return SizedBox(width: size, height: size, child: child);
     return child;
   }
 }
 
-class ExercisePainter extends CustomPainter {
+class HumanExercisePainter extends CustomPainter {
   final String type;
-  final double t;
-  final Color lineColor;
+  final double progress;
+  final Color bodyColor;
   final Color backgroundColor;
+  final Color accentColor;
 
-  ExercisePainter({required this.type, required this.t, required this.lineColor, required this.backgroundColor});
+  HumanExercisePainter({required this.type, required this.progress, required this.bodyColor, required this.backgroundColor, required this.accentColor});
 
   @override
   void paint(Canvas canvas, Size size) {
@@ -3364,410 +6199,232 @@ class ExercisePainter extends CustomPainter {
     canvas.save();
     canvas.translate(offset.dx, offset.dy);
     canvas.drawRRect(RRect.fromRectAndRadius(Rect.fromLTWH(0, 0, s, s), Radius.circular(s * 0.22)), Paint()..color = backgroundColor);
-    final paint = Paint()
-      ..color = lineColor
-      ..strokeWidth = s * 0.045
-      ..style = PaintingStyle.stroke
-      ..strokeCap = StrokeCap.round
-      ..strokeJoin = StrokeJoin.round;
-    final jointPaint = Paint()..color = lineColor;
 
-    void line(double x1, double y1, double x2, double y2) => canvas.drawLine(Offset(x1 * s, y1 * s), Offset(x2 * s, y2 * s), paint);
-    void circle(double x, double y, double r, {PaintingStyle style = PaintingStyle.stroke}) {
+    final floor = Paint()
+      ..color = bodyColor.withOpacity(0.18)
+      ..strokeWidth = s * 0.018
+      ..strokeCap = StrokeCap.round;
+    canvas.drawLine(Offset(s * .15, s * .88), Offset(s * .88, s * .88), floor);
+
+    Offset o(double x, double y) => Offset(x * s, y * s);
+    void limb(Offset a, Offset b, {double w = 0.075, Color? color}) {
       final p = Paint()
-        ..color = lineColor
-        ..strokeWidth = s * 0.045
-        ..style = style
-        ..strokeCap = StrokeCap.round;
-      canvas.drawCircle(Offset(x * s, y * s), r * s, p);
+        ..color = color ?? bodyColor
+        ..strokeWidth = s * w
+        ..strokeCap = StrokeCap.round
+        ..strokeJoin = StrokeJoin.round;
+      canvas.drawLine(a, b, p);
     }
-    void joint(double x, double y) => canvas.drawCircle(Offset(x * s, y * s), s * 0.018, jointPaint);
 
-    switch (type) {
-      case 'squat':
-        _drawSquat(line, circle, joint, s);
-        break;
-      case 'pushup':
-        _drawPushup(line, circle, joint, s);
-        break;
-      case 'plank':
-        _drawPlank(line, circle, joint, s);
-        break;
-      case 'lunge':
-        _drawLunge(line, circle, joint, s);
-        break;
-      case 'deadlift':
-        _drawDeadlift(line, circle, joint, s);
-        break;
-      case 'crunch':
-        _drawCrunch(line, circle, joint, s);
-        break;
-      case 'jumpingJack':
-        _drawJumpingJack(line, circle, joint, s);
-        break;
-      case 'pullUp':
-        _drawPullUp(line, circle, joint, s);
-        break;
-      case 'shoulderPress':
-        _drawShoulderPress(line, circle, joint, s);
-        break;
-      case 'bicepCurl':
-        _drawBicepCurl(line, circle, joint, s);
-        break;
-      case 'burpee':
-        _drawBurpee(line, circle, joint, s);
-        break;
-      case 'mountainClimber':
-        _drawMountainClimber(line, circle, joint, s);
-        break;
-      case 'hipThrust':
-        _drawHipThrust(line, circle, joint, s);
-        break;
-      case 'calfRaise':
-        _drawCalfRaise(line, circle, joint, s);
-        break;
-      case 'benchPress':
-        _drawBenchPress(line, circle, joint, s);
-        break;
-      case 'dips':
-        _drawDips(line, circle, joint, s);
-        break;
-      case 'row':
-        _drawRow(line, circle, joint, s);
-        break;
-      case 'lateralRaise':
-        _drawLateralRaise(line, circle, joint, s);
-        break;
-      case 'tricepsExtension':
-        _drawTricepsExtension(line, circle, joint, s);
-        break;
-      case 'legRaise':
-        _drawLegRaise(line, circle, joint, s);
-        break;
-      case 'russianTwist':
-        _drawRussianTwist(line, circle, joint, s);
-        break;
-      case 'hollowHold':
-        _drawHollowHold(line, circle, joint, s);
-        break;
-      case 'highKnees':
-        _drawHighKnees(line, circle, joint, s);
-        break;
-      case 'run':
-        _drawRun(line, circle, joint, s);
-        break;
-      case 'bike':
-        _drawBike(line, circle, joint, s);
-        break;
-      case 'generic':
-        _drawGeneric(line, circle, joint, s);
-        break;
-      default:
-        _drawGeneric(line, circle, joint, s);
+    void torso(Offset neck, Offset hip) {
+      final p = Paint()..color = bodyColor;
+      final rect = Rect.fromCenter(center: Offset((neck.dx + hip.dx) / 2, (neck.dy + hip.dy) / 2), width: s * 0.16, height: (hip - neck).distance + s * 0.10);
+      canvas.save();
+      final angle = math.atan2(hip.dy - neck.dy, hip.dx - neck.dx) - math.pi / 2;
+      canvas.translate(rect.center.dx, rect.center.dy);
+      canvas.rotate(angle);
+      canvas.drawRRect(RRect.fromRectAndRadius(Rect.fromCenter(center: Offset.zero, width: rect.width, height: rect.height), Radius.circular(s * 0.08)), p);
+      canvas.restore();
+    }
+
+    void head(Offset c) {
+      canvas.drawCircle(c, s * .07, Paint()..color = bodyColor);
+      canvas.drawCircle(c.translate(s * .025, -s * .012), s * .012, Paint()..color = Colors.white.withOpacity(0.75));
+    }
+
+    void dumbbell(Offset c) {
+      final p = Paint()
+        ..color = accentColor
+        ..strokeWidth = s * 0.035
+        ..strokeCap = StrokeCap.round;
+      canvas.drawLine(c.translate(-s * .05, 0), c.translate(s * .05, 0), p);
+      canvas.drawCircle(c.translate(-s * .065, 0), s * .025, Paint()..color = accentColor);
+      canvas.drawCircle(c.translate(s * .065, 0), s * .025, Paint()..color = accentColor);
+    }
+
+    final t = progress;
+    late Offset h, n, hip, ls, rs, le, re, lh, rh, lk, rk, lf, rf;
+    bool bar = false;
+    bool db = false;
+    bool bike = false;
+
+    final lower = type.toLowerCase();
+    if (lower.contains('pushup') || lower.contains('plank') || lower.contains('mountain')) {
+      final down = lower.contains('pushup') ? t * .14 : 0.0;
+      h = o(.22, .45 + down);
+      n = o(.30, .49 + down);
+      hip = o(.68, .57 + (lower.contains('mountain') ? 0 : down * .6));
+      ls = o(.38, .50 + down);
+      rs = o(.42, .53 + down);
+      le = o(.33, .74);
+      re = o(.45, .74);
+      lh = o(.28, .82);
+      rh = o(.50, .82);
+      lk = lower.contains('mountain') ? o(.55 + .18 * t, .78) : o(.78, .78);
+      rk = lower.contains('mountain') ? o(.86 - .22 * t, .80) : o(.86, .80);
+      lf = o(.60 + .18 * t, .84);
+      rf = o(.90 - .18 * t, .84);
+    } else if (lower.contains('lunge')) {
+      final down = t * .10;
+      h = o(.50, .23 + down);
+      n = o(.50, .34 + down);
+      hip = o(.50, .56 + down);
+      ls = o(.43, .38 + down);
+      rs = o(.57, .38 + down);
+      le = o(.34, .50 + down);
+      re = o(.66, .50 + down);
+      lh = o(.30, .60 + down);
+      rh = o(.70, .60 + down);
+      lk = o(.34, .70 + down);
+      rk = o(.70, .70);
+      lf = o(.24, .88);
+      rf = o(.84, .88);
+    } else if (lower.contains('deadlift') || lower.contains('row')) {
+      final bend = .18 + t * .16;
+      h = o(.45 + bend, .25 + bend * .5);
+      n = o(.50 + bend, .36 + bend * .3);
+      hip = o(.56 + bend, .58);
+      ls = o(.48 + bend, .40);
+      rs = o(.60 + bend, .43);
+      le = o(.34 + t * .08, .62);
+      re = o(.74 - t * .08, .62);
+      lh = o(.28 + t * .12, .76);
+      rh = o(.80 - t * .12, .76);
+      lk = o(.44, .72);
+      rk = o(.68, .72);
+      lf = o(.38, .88);
+      rf = o(.74, .88);
+      db = true;
+    } else if (lower.contains('pull')) {
+      h = o(.50, .38 - t * .13);
+      n = o(.50, .48 - t * .12);
+      hip = o(.50, .68 - t * .08);
+      ls = o(.42, .48 - t * .12);
+      rs = o(.58, .48 - t * .12);
+      le = o(.35, .28 + t * .03);
+      re = o(.65, .28 + t * .03);
+      lh = o(.30, .16);
+      rh = o(.70, .16);
+      lk = o(.44, .80 - t * .05);
+      rk = o(.58, .80 - t * .05);
+      lf = o(.40, .88);
+      rf = o(.62, .88);
+      bar = true;
+    } else if (lower.contains('bench')) {
+      h = o(.30, .62);
+      n = o(.38, .64);
+      hip = o(.66, .66);
+      ls = o(.45, .62);
+      rs = o(.57, .62);
+      le = o(.42, .48 - t * .18);
+      re = o(.64, .48 - t * .18);
+      lh = o(.34, .43 - t * .18);
+      rh = o(.72, .43 - t * .18);
+      lk = o(.75, .72);
+      rk = o(.84, .76);
+      lf = o(.74, .88);
+      rf = o(.88, .88);
+      bar = true;
+      canvas.drawLine(
+          o(.18, .76),
+          o(.86, .76),
+          Paint()
+            ..color = bodyColor.withOpacity(.25)
+            ..strokeWidth = s * .035
+            ..strokeCap = StrokeCap.round);
+    } else if (lower.contains('bike')) {
+      bike = true;
+      h = o(.52, .30);
+      n = o(.51, .39);
+      hip = o(.50, .57);
+      ls = o(.47, .42);
+      rs = o(.56, .42);
+      le = o(.58, .48);
+      re = o(.64, .50);
+      lh = o(.66, .50);
+      rh = o(.72, .50);
+      lk = o(.44, .73);
+      rk = o(.63, .70);
+      lf = o(.35, .76);
+      rf = o(.68, .76);
+    } else if (lower.contains('run') || lower.contains('highknees')) {
+      h = o(.50, .22);
+      n = o(.50, .32);
+      hip = o(.50, .57);
+      ls = o(.43, .38);
+      rs = o(.57, .38);
+      le = o(.36 + .12 * t, .50);
+      re = o(.64 - .12 * t, .50);
+      lh = o(.30 + .12 * t, .63);
+      rh = o(.70 - .12 * t, .63);
+      lk = o(.36 + .18 * t, .72 - .18 * t);
+      rk = o(.66 - .18 * t, .72 + .05 * t);
+      lf = o(.30, .88);
+      rf = o(.74 - .16 * t, .88);
+    } else if (lower.contains('squat')) {
+      final down = t;
+      h = o(.50, .24 + down * .08);
+      n = o(.50, .34 + down * .08);
+      hip = o(.50, .55 + down * .14);
+      ls = o(.43, .40 + down * .05);
+      rs = o(.57, .40 + down * .05);
+      le = o(.34, .50 + down * .04);
+      re = o(.66, .50 + down * .04);
+      lh = o(.28, .58 + down * .04);
+      rh = o(.72, .58 + down * .04);
+      lk = o(.36, .70 + down * .02);
+      rk = o(.64, .70 + down * .02);
+      lf = o(.28, .88);
+      rf = o(.72, .88);
+    } else {
+      final move = (t - .5) * .10;
+      h = o(.50, .23);
+      n = o(.50, .34);
+      hip = o(.50, .58);
+      ls = o(.42, .40);
+      rs = o(.58, .40);
+      le = o(.34 + move, .54 - t * .10);
+      re = o(.66 - move, .54 - t * .10);
+      lh = o(.30 + move, .68 - t * .14);
+      rh = o(.70 - move, .68 - t * .14);
+      lk = o(.42 + move, .75);
+      rk = o(.58 - move, .75);
+      lf = o(.36 + move, .88);
+      rf = o(.64 - move, .88);
+      db = lower.contains('curl') || lower.contains('raise') || lower.contains('press');
+    }
+
+    if (bike) {
+      final wheel = Paint()
+        ..color = bodyColor.withOpacity(.40)
+        ..style = PaintingStyle.stroke
+        ..strokeWidth = s * .035;
+      canvas.drawCircle(o(.32, .77), s * .13, wheel);
+      canvas.drawCircle(o(.72, .77), s * .13, wheel);
+      limb(o(.32, .77), o(.50, .57), w: .035, color: bodyColor.withOpacity(.45));
+      limb(o(.50, .57), o(.72, .77), w: .035, color: bodyColor.withOpacity(.45));
+      limb(o(.44, .50), o(.62, .50), w: .035, color: bodyColor.withOpacity(.45));
+    }
+    if (bar) limb(o(.22, .16), o(.78, .16), w: .035, color: accentColor);
+
+    limb(ls, le);
+    limb(le, lh);
+    limb(rs, re);
+    limb(re, rh);
+    limb(hip, lk);
+    limb(lk, lf);
+    limb(hip, rk);
+    limb(rk, rf);
+    torso(n, hip);
+    head(h);
+    if (db) {
+      dumbbell(lh);
+      dumbbell(rh);
     }
     canvas.restore();
   }
 
-  void _drawSquat(void Function(double, double, double, double) line, void Function(double, double, double, {PaintingStyle style}) circle, void Function(double, double) joint, double s) {
-    final down = t;
-    final headY = 0.25 + down * 0.08;
-    final hipY = 0.50 + down * 0.17;
-    final kneeY = 0.68 + down * 0.03;
-    final hipX = 0.50;
-    circle(0.50, headY, 0.07);
-    line(0.50, headY + 0.07, hipX, hipY);
-    line(0.50, 0.37 + down * 0.06, 0.32, 0.47 + down * 0.05);
-    line(0.50, 0.37 + down * 0.06, 0.68, 0.47 + down * 0.05);
-    line(hipX, hipY, 0.36, kneeY);
-    line(0.36, kneeY, 0.30, 0.86);
-    line(hipX, hipY, 0.64, kneeY);
-    line(0.64, kneeY, 0.70, 0.86);
-    line(0.18, 0.88, 0.82, 0.88);
-    for (final p in [Offset(hipX, hipY), const Offset(0.36, 0.68), const Offset(0.64, 0.68)]) joint(p.dx, p.dy);
-  }
-
-  void _drawPushup(void Function(double, double, double, double) line, void Function(double, double, double, {PaintingStyle style}) circle, void Function(double, double) joint, double s) {
-    final y = 0.44 + t * 0.18;
-    circle(0.25, y - 0.05, 0.055);
-    line(0.30, y, 0.72, y + 0.10);
-    line(0.39, y + 0.02, 0.36, 0.78);
-    line(0.39, y + 0.02, 0.47, 0.78);
-    line(0.72, y + 0.10, 0.88, 0.80);
-    line(0.72, y + 0.10, 0.80, 0.82);
-    line(0.14, 0.82, 0.92, 0.82);
-  }
-
-  void _drawPlank(void Function(double, double, double, double) line, void Function(double, double, double, {PaintingStyle style}) circle, void Function(double, double) joint, double s) {
-    circle(0.22, 0.43, 0.055);
-    line(0.28, 0.46, 0.74, 0.54);
-    line(0.38, 0.48, 0.33, 0.78);
-    line(0.33, 0.78, 0.45, 0.78);
-    line(0.74, 0.54, 0.88, 0.78);
-    line(0.74, 0.54, 0.78, 0.80);
-    line(0.14, 0.82, 0.92, 0.82);
-  }
-
-  void _drawLunge(void Function(double, double, double, double) line, void Function(double, double, double, {PaintingStyle style}) circle, void Function(double, double) joint, double s) {
-    final d = t;
-    circle(0.50, 0.22 + d * 0.04, 0.06);
-    line(0.50, 0.29 + d * 0.04, 0.50, 0.52 + d * 0.10);
-    line(0.50, 0.38, 0.34, 0.48);
-    line(0.50, 0.38, 0.66, 0.48);
-    line(0.50, 0.52 + d * 0.10, 0.34, 0.64 + d * 0.08);
-    line(0.34, 0.64 + d * 0.08, 0.24, 0.86);
-    line(0.50, 0.52 + d * 0.10, 0.68, 0.70);
-    line(0.68, 0.70, 0.82, 0.86);
-    line(0.16, 0.88, 0.88, 0.88);
-  }
-
-  void _drawDeadlift(void Function(double, double, double, double) line, void Function(double, double, double, {PaintingStyle style}) circle, void Function(double, double) joint, double s) {
-    final bend = t;
-    circle(0.50 + bend * 0.06, 0.21 + bend * 0.08, 0.06);
-    line(0.50, 0.29 + bend * 0.08, 0.58 + bend * 0.12, 0.53 + bend * 0.05);
-    line(0.56, 0.40 + bend * 0.05, 0.34, 0.62 + bend * 0.10);
-    line(0.60, 0.41 + bend * 0.06, 0.70, 0.62 + bend * 0.10);
-    line(0.58 + bend * 0.12, 0.53 + bend * 0.05, 0.42, 0.86);
-    line(0.58 + bend * 0.12, 0.53 + bend * 0.05, 0.70, 0.86);
-    line(0.25, 0.72 + bend * 0.12, 0.78, 0.72 + bend * 0.12);
-    line(0.16, 0.88, 0.88, 0.88);
-  }
-
-  void _drawCrunch(void Function(double, double, double, double) line, void Function(double, double, double, {PaintingStyle style}) circle, void Function(double, double) joint, double s) {
-    final up = t;
-    circle(0.35 + up * 0.08, 0.58 - up * 0.12, 0.055);
-    line(0.40 + up * 0.08, 0.62 - up * 0.10, 0.62, 0.70);
-    line(0.48, 0.67, 0.36, 0.75);
-    line(0.48, 0.67, 0.36, 0.63);
-    line(0.62, 0.70, 0.78, 0.78);
-    line(0.62, 0.70, 0.80, 0.68);
-    line(0.18, 0.82, 0.88, 0.82);
-  }
-
-  void _drawJumpingJack(void Function(double, double, double, double) line, void Function(double, double, double, {PaintingStyle style}) circle, void Function(double, double) joint, double s) {
-    final open = t;
-    circle(0.50, 0.22, 0.06);
-    line(0.50, 0.29, 0.50, 0.55);
-    line(0.50, 0.37, 0.35 - open * 0.12, 0.46 - open * 0.22);
-    line(0.50, 0.37, 0.65 + open * 0.12, 0.46 - open * 0.22);
-    line(0.50, 0.55, 0.42 - open * 0.18, 0.86);
-    line(0.50, 0.55, 0.58 + open * 0.18, 0.86);
-    line(0.18, 0.88, 0.88, 0.88);
-  }
-
-  void _drawPullUp(void Function(double, double, double, double) line, void Function(double, double, double, {PaintingStyle style}) circle, void Function(double, double) joint, double s) {
-    final up = t;
-    line(0.22, 0.16, 0.78, 0.16);
-    circle(0.50, 0.39 - up * 0.12, 0.06);
-    line(0.50, 0.45 - up * 0.12, 0.50, 0.68 - up * 0.08);
-    line(0.50, 0.48 - up * 0.12, 0.34, 0.18 + up * 0.04);
-    line(0.50, 0.48 - up * 0.12, 0.66, 0.18 + up * 0.04);
-    line(0.50, 0.68 - up * 0.08, 0.42, 0.86);
-    line(0.50, 0.68 - up * 0.08, 0.58, 0.86);
-  }
-
-  void _drawShoulderPress(void Function(double, double, double, double) line, void Function(double, double, double, {PaintingStyle style}) circle, void Function(double, double) joint, double s) {
-    final press = t;
-    circle(0.50, 0.26, 0.06);
-    line(0.50, 0.33, 0.50, 0.58);
-    line(0.50, 0.40, 0.34, 0.42 - press * 0.22);
-    line(0.50, 0.40, 0.66, 0.42 - press * 0.22);
-    line(0.34, 0.42 - press * 0.22, 0.30, 0.38 - press * 0.26);
-    line(0.66, 0.42 - press * 0.22, 0.70, 0.38 - press * 0.26);
-    line(0.50, 0.58, 0.40, 0.86);
-    line(0.50, 0.58, 0.60, 0.86);
-    line(0.16, 0.88, 0.88, 0.88);
-  }
-
-  void _drawBicepCurl(void Function(double, double, double, double) line, void Function(double, double, double, {PaintingStyle style}) circle, void Function(double, double) joint, double s) {
-    final curl = t;
-    circle(0.50, 0.24, 0.06);
-    line(0.50, 0.31, 0.50, 0.58);
-    line(0.50, 0.40, 0.35, 0.52);
-    line(0.35, 0.52, 0.30 + curl * 0.10, 0.68 - curl * 0.22);
-    line(0.50, 0.40, 0.65, 0.52);
-    line(0.65, 0.52, 0.70 - curl * 0.10, 0.68 - curl * 0.22);
-    line(0.50, 0.58, 0.42, 0.86);
-    line(0.50, 0.58, 0.58, 0.86);
-    line(0.16, 0.88, 0.88, 0.88);
-  }
-
-  void _drawBurpee(void Function(double, double, double, double) line, void Function(double, double, double, {PaintingStyle style}) circle, void Function(double, double) joint, double s) {
-    if (t < 0.5) {
-      final d = t * 2;
-      circle(0.50, 0.22 + d * 0.15, 0.055);
-      line(0.50, 0.30 + d * 0.15, 0.50, 0.55 + d * 0.12);
-      line(0.50, 0.42 + d * 0.12, 0.35, 0.58 + d * 0.12);
-      line(0.50, 0.42 + d * 0.12, 0.65, 0.58 + d * 0.12);
-      line(0.50, 0.55 + d * 0.12, 0.36, 0.86);
-      line(0.50, 0.55 + d * 0.12, 0.64, 0.86);
-    } else {
-      final d = (t - 0.5) * 2;
-      circle(0.22, 0.48 - d * 0.06, 0.05);
-      line(0.28, 0.50 - d * 0.06, 0.72, 0.58 - d * 0.10);
-      line(0.39, 0.52 - d * 0.06, 0.34, 0.82);
-      line(0.72, 0.58 - d * 0.10, 0.86, 0.82);
-    }
-    line(0.14, 0.88, 0.92, 0.88);
-  }
-
-  void _drawMountainClimber(void Function(double, double, double, double) line, void Function(double, double, double, {PaintingStyle style}) circle, void Function(double, double) joint, double s) {
-    final swap = t;
-    circle(0.22, 0.42, 0.05);
-    line(0.28, 0.45, 0.70, 0.54);
-    line(0.38, 0.47, 0.32, 0.80);
-    line(0.38, 0.47, 0.45, 0.80);
-    line(0.70, 0.54, 0.50 + swap * 0.18, 0.80);
-    line(0.70, 0.54, 0.86 - swap * 0.22, 0.80);
-    line(0.14, 0.84, 0.92, 0.84);
-  }
-
-
-  void _drawHipThrust(void Function(double, double, double, double) line, void Function(double, double, double, {PaintingStyle style}) circle, void Function(double, double) joint, double s) {
-    final up = t;
-    circle(0.28, 0.58 - up * 0.08, 0.055);
-    line(0.34, 0.60 - up * 0.08, 0.68, 0.62 - up * 0.18);
-    line(0.68, 0.62 - up * 0.18, 0.82, 0.78);
-    line(0.68, 0.62 - up * 0.18, 0.50, 0.78);
-    line(0.38, 0.62 - up * 0.08, 0.28, 0.78);
-    line(0.18, 0.80, 0.90, 0.80);
-  }
-
-  void _drawCalfRaise(void Function(double, double, double, double) line, void Function(double, double, double, {PaintingStyle style}) circle, void Function(double, double) joint, double s) {
-    final up = t * 0.06;
-    circle(0.50, 0.23 - up, 0.06);
-    line(0.50, 0.30 - up, 0.50, 0.58 - up);
-    line(0.50, 0.40 - up, 0.35, 0.52 - up);
-    line(0.50, 0.40 - up, 0.65, 0.52 - up);
-    line(0.50, 0.58 - up, 0.43, 0.86 - up);
-    line(0.50, 0.58 - up, 0.57, 0.86 - up);
-    line(0.18, 0.88, 0.88, 0.88);
-  }
-
-  void _drawBenchPress(void Function(double, double, double, double) line, void Function(double, double, double, {PaintingStyle style}) circle, void Function(double, double) joint, double s) {
-    final press = t;
-    line(0.18, 0.74, 0.84, 0.74);
-    circle(0.30, 0.60, 0.055);
-    line(0.36, 0.62, 0.70, 0.62);
-    line(0.48, 0.62, 0.42, 0.48 - press * 0.18);
-    line(0.58, 0.62, 0.64, 0.48 - press * 0.18);
-    line(0.30, 0.42 - press * 0.18, 0.76, 0.42 - press * 0.18);
-    line(0.70, 0.62, 0.82, 0.72);
-  }
-
-  void _drawDips(void Function(double, double, double, double) line, void Function(double, double, double, {PaintingStyle style}) circle, void Function(double, double) joint, double s) {
-    final down = t * 0.12;
-    line(0.28, 0.36, 0.28, 0.84);
-    line(0.72, 0.36, 0.72, 0.84);
-    circle(0.50, 0.25 + down, 0.055);
-    line(0.50, 0.32 + down, 0.50, 0.58 + down);
-    line(0.50, 0.42 + down, 0.28, 0.42);
-    line(0.50, 0.42 + down, 0.72, 0.42);
-    line(0.50, 0.58 + down, 0.43, 0.82);
-    line(0.50, 0.58 + down, 0.57, 0.82);
-  }
-
-  void _drawRow(void Function(double, double, double, double) line, void Function(double, double, double, {PaintingStyle style}) circle, void Function(double, double) joint, double s) {
-    final pull = t;
-    circle(0.42, 0.32, 0.055);
-    line(0.46, 0.38, 0.62, 0.60);
-    line(0.50, 0.45, 0.32 + pull * 0.12, 0.65 - pull * 0.10);
-    line(0.54, 0.48, 0.74 - pull * 0.12, 0.65 - pull * 0.10);
-    line(0.62, 0.60, 0.44, 0.86);
-    line(0.62, 0.60, 0.72, 0.86);
-    line(0.22, 0.72, 0.82, 0.72);
-  }
-
-  void _drawLateralRaise(void Function(double, double, double, double) line, void Function(double, double, double, {PaintingStyle style}) circle, void Function(double, double) joint, double s) {
-    final up = t;
-    circle(0.50, 0.24, 0.06);
-    line(0.50, 0.31, 0.50, 0.58);
-    line(0.50, 0.40, 0.35 - up * 0.12, 0.58 - up * 0.22);
-    line(0.50, 0.40, 0.65 + up * 0.12, 0.58 - up * 0.22);
-    line(0.50, 0.58, 0.42, 0.86);
-    line(0.50, 0.58, 0.58, 0.86);
-    line(0.16, 0.88, 0.88, 0.88);
-  }
-
-  void _drawTricepsExtension(void Function(double, double, double, double) line, void Function(double, double, double, {PaintingStyle style}) circle, void Function(double, double) joint, double s) {
-    final extend = t;
-    circle(0.50, 0.24, 0.06);
-    line(0.50, 0.31, 0.50, 0.58);
-    line(0.50, 0.38, 0.38, 0.44);
-    line(0.38, 0.44, 0.34, 0.62 - extend * 0.22);
-    line(0.50, 0.38, 0.62, 0.44);
-    line(0.62, 0.44, 0.66, 0.62 - extend * 0.22);
-    line(0.50, 0.58, 0.42, 0.86);
-    line(0.50, 0.58, 0.58, 0.86);
-  }
-
-  void _drawLegRaise(void Function(double, double, double, double) line, void Function(double, double, double, {PaintingStyle style}) circle, void Function(double, double) joint, double s) {
-    final up = t;
-    circle(0.22, 0.68, 0.052);
-    line(0.28, 0.70, 0.60, 0.72);
-    line(0.42, 0.72, 0.34, 0.62);
-    line(0.60, 0.72, 0.82, 0.72 - up * 0.36);
-    line(0.60, 0.72, 0.78, 0.78 - up * 0.32);
-    line(0.14, 0.82, 0.90, 0.82);
-  }
-
-  void _drawRussianTwist(void Function(double, double, double, double) line, void Function(double, double, double, {PaintingStyle style}) circle, void Function(double, double) joint, double s) {
-    final twist = (t - 0.5) * 0.22;
-    circle(0.50 + twist, 0.32, 0.055);
-    line(0.50 + twist, 0.39, 0.50 - twist, 0.62);
-    line(0.50 - twist, 0.48, 0.32 + twist, 0.58);
-    line(0.50 - twist, 0.48, 0.68 + twist, 0.58);
-    line(0.50 - twist, 0.62, 0.38, 0.82);
-    line(0.50 - twist, 0.62, 0.68, 0.82);
-  }
-
-  void _drawHollowHold(void Function(double, double, double, double) line, void Function(double, double, double, {PaintingStyle style}) circle, void Function(double, double) joint, double s) {
-    final lift = t * 0.08;
-    circle(0.25, 0.60 - lift, 0.052);
-    line(0.31, 0.62 - lift, 0.58, 0.68 - lift);
-    line(0.34, 0.62 - lift, 0.18, 0.48 - lift);
-    line(0.58, 0.68 - lift, 0.84, 0.55 - lift);
-    line(0.14, 0.82, 0.90, 0.82);
-  }
-
-  void _drawHighKnees(void Function(double, double, double, double) line, void Function(double, double, double, {PaintingStyle style}) circle, void Function(double, double) joint, double s) {
-    final swap = t;
-    circle(0.50, 0.22, 0.06);
-    line(0.50, 0.29, 0.50, 0.56);
-    line(0.50, 0.38, 0.36 + swap * 0.12, 0.50);
-    line(0.50, 0.38, 0.64 - swap * 0.12, 0.50);
-    line(0.50, 0.56, 0.36 + swap * 0.18, 0.72 - swap * 0.18);
-    line(0.36 + swap * 0.18, 0.72 - swap * 0.18, 0.30, 0.88);
-    line(0.50, 0.56, 0.66 - swap * 0.18, 0.88);
-  }
-
-  void _drawRun(void Function(double, double, double, double) line, void Function(double, double, double, {PaintingStyle style}) circle, void Function(double, double) joint, double s) {
-    _drawHighKnees(line, circle, joint, s);
-    line(0.14, 0.88, 0.92, 0.88);
-  }
-
-  void _drawBike(void Function(double, double, double, double) line, void Function(double, double, double, {PaintingStyle style}) circle, void Function(double, double) joint, double s) {
-    circle(0.32, 0.76, 0.13);
-    circle(0.72, 0.76, 0.13);
-    line(0.32, 0.76, 0.50, 0.56);
-    line(0.50, 0.56, 0.72, 0.76);
-    line(0.45, 0.50, 0.60, 0.50);
-    circle(0.52, 0.30, 0.05);
-    line(0.52, 0.36, 0.50, 0.56);
-    line(0.50, 0.44, 0.64, 0.50);
-    line(0.50, 0.56, 0.44, 0.74);
-    line(0.50, 0.56, 0.62, 0.70);
-  }
-
-  void _drawGeneric(void Function(double, double, double, double) line, void Function(double, double, double, {PaintingStyle style}) circle, void Function(double, double) joint, double s) {
-    circle(0.50, 0.23, 0.06);
-    line(0.50, 0.30, 0.50, 0.58);
-    line(0.50, 0.40, 0.34 + t * 0.08, 0.52 - t * 0.08);
-    line(0.50, 0.40, 0.66 - t * 0.08, 0.52 - t * 0.08);
-    line(0.50, 0.58, 0.40 + t * 0.07, 0.86);
-    line(0.50, 0.58, 0.60 - t * 0.07, 0.86);
-    line(0.16, 0.88, 0.88, 0.88);
-  }
-
   @override
-  bool shouldRepaint(covariant ExercisePainter oldDelegate) => oldDelegate.t != t || oldDelegate.type != type || oldDelegate.lineColor != lineColor || oldDelegate.backgroundColor != backgroundColor;
+  bool shouldRepaint(covariant HumanExercisePainter oldDelegate) =>
+      oldDelegate.type != type || oldDelegate.progress != progress || oldDelegate.bodyColor != bodyColor || oldDelegate.backgroundColor != backgroundColor || oldDelegate.accentColor != accentColor;
 }
