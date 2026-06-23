@@ -7738,6 +7738,436 @@ class ProgressPage extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final store = AppScope.of(context);
+    final now = DateTime.now();
+    final weekStart = startOfTrainingWeek(now);
+    final monthStart = DateTime(now.year, now.month);
+    final weekDays = List.generate(7, (index) => weekStart.add(Duration(days: index)));
+    final weekLogs = store.logsBetween(weekStart, now);
+    final monthLogs = store.logsBetween(monthStart, now);
+    final weekTotals = DayTotals.from(weekLogs);
+    final monthTotals = DayTotals.from(monthLogs);
+    final weekWorkoutCount = workoutEntryCount(weekLogs);
+    final monthWorkoutCount = workoutEntryCount(monthLogs);
+    final weekVolumeValues = weekDays.map((day) => store.totalsForDay(day).volume).toList();
+    final weekVolumeLabels = weekDays.map((day) => weekdayShortName(day.weekday)).toList();
+    final recentWeekStarts = List.generate(4, (index) => weekStart.subtract(Duration(days: (3 - index) * 7)));
+    final workoutCountValues = recentWeekStarts
+        .map(
+          (start) => workoutEntryCount(
+            store.logsBetween(start, start.add(const Duration(days: 6))),
+          ).toDouble(),
+        )
+        .toList();
+    final workoutCountLabels = ['T-3', 'T-2', 'T-1', 'Teraz'];
+    return PageFrame(
+      title: 'Progres',
+      subtitle: 'Podstawowe statystyki tygodnia i miesiąca',
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.stretch,
+        children: [
+          ProgressSummaryTiles(
+            weekWorkoutCount: weekWorkoutCount,
+            monthWorkoutCount: monthWorkoutCount,
+            weekVolume: weekTotals.volume,
+            monthVolume: monthTotals.volume,
+            weekSets: completedWorkoutSetCount(weekLogs),
+            monthSets: completedWorkoutSetCount(monthLogs),
+          ),
+          const SizedBox(height: 16),
+          SimpleProgressBarChartCard(
+            title: 'Objętość tygodniowa',
+            subtitle: 'Suma ciężar × powtórzenia z każdego dnia bieżącego tygodnia',
+            values: weekVolumeValues,
+            labels: weekVolumeLabels,
+            suffix: 'kg',
+            icon: Icons.monitor_weight_outlined,
+          ),
+          const SizedBox(height: 12),
+          SimpleProgressBarChartCard(
+            title: 'Liczba treningów',
+            subtitle: 'Unikalne sesje treningowe w ostatnich czterech tygodniach',
+            values: workoutCountValues,
+            labels: workoutCountLabels,
+            suffix: 'tr.',
+            icon: Icons.event_available_outlined,
+          ),
+          const SizedBox(height: 12),
+          BasicMuscleFrequencyCard(logs: monthLogs, customExercises: store.customExercises),
+        ],
+      ),
+    );
+  }
+}
+
+class ProgressSummaryTiles extends StatelessWidget {
+  const ProgressSummaryTiles({
+    super.key,
+    required this.weekWorkoutCount,
+    required this.monthWorkoutCount,
+    required this.weekVolume,
+    required this.monthVolume,
+    required this.weekSets,
+    required this.monthSets,
+  });
+
+  final int weekWorkoutCount;
+  final int monthWorkoutCount;
+  final double weekVolume;
+  final double monthVolume;
+  final int weekSets;
+  final int monthSets;
+
+  @override
+  Widget build(BuildContext context) {
+    return LayoutBuilder(
+      builder: (context, constraints) {
+        final width = constraints.maxWidth >= 720
+            ? (constraints.maxWidth - 20) / 3
+            : constraints.maxWidth >= 420
+                ? (constraints.maxWidth - 10) / 2
+                : constraints.maxWidth;
+        return Wrap(
+          spacing: 10,
+          runSpacing: 10,
+          children: [
+            SizedBox(
+              width: width,
+              child: ProgressMetricTile(
+                key: const Key('progress_week_workouts'),
+                label: 'Treningi tydzień',
+                value: '$weekWorkoutCount',
+                helper: 'unikalne sesje',
+                icon: Icons.calendar_view_week_outlined,
+              ),
+            ),
+            SizedBox(
+              width: width,
+              child: ProgressMetricTile(
+                key: const Key('progress_month_workouts'),
+                label: 'Treningi miesiąc',
+                value: '$monthWorkoutCount',
+                helper: 'unikalne sesje',
+                icon: Icons.calendar_month_outlined,
+              ),
+            ),
+            SizedBox(
+              width: width,
+              child: ProgressMetricTile(
+                key: const Key('progress_week_volume'),
+                label: 'Objętość tydzień',
+                value: formatProgressVolume(weekVolume),
+                helper: 'kg łącznie',
+                icon: Icons.fitness_center_outlined,
+              ),
+            ),
+            SizedBox(
+              width: width,
+              child: ProgressMetricTile(
+                key: const Key('progress_month_volume'),
+                label: 'Objętość miesiąc',
+                value: formatProgressVolume(monthVolume),
+                helper: 'kg łącznie',
+                icon: Icons.monitor_weight_outlined,
+              ),
+            ),
+            SizedBox(
+              width: width,
+              child: ProgressMetricTile(
+                key: const Key('progress_week_sets'),
+                label: 'Serie tydzień',
+                value: '$weekSets',
+                helper: 'wykonane serie',
+                icon: Icons.repeat_rounded,
+              ),
+            ),
+            SizedBox(
+              width: width,
+              child: ProgressMetricTile(
+                key: const Key('progress_month_sets'),
+                label: 'Serie miesiąc',
+                value: '$monthSets',
+                helper: 'wykonane serie',
+                icon: Icons.checklist_rtl_rounded,
+              ),
+            ),
+          ],
+        );
+      },
+    );
+  }
+}
+
+class ProgressMetricTile extends StatelessWidget {
+  const ProgressMetricTile({
+    super.key,
+    required this.label,
+    required this.value,
+    required this.helper,
+    required this.icon,
+  });
+
+  final String label;
+  final String value;
+  final String helper;
+  final IconData icon;
+
+  @override
+  Widget build(BuildContext context) {
+    final theme = Theme.of(context);
+    return Card(
+      margin: EdgeInsets.zero,
+      child: Padding(
+        padding: const EdgeInsets.all(14),
+        child: Row(
+          children: [
+            CircleAvatar(
+              backgroundColor: theme.colorScheme.primaryContainer,
+              foregroundColor: theme.colorScheme.onPrimaryContainer,
+              child: Icon(icon),
+            ),
+            const SizedBox(width: 10),
+            Expanded(
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Text(value, maxLines: 1, overflow: TextOverflow.ellipsis, style: theme.textTheme.titleLarge?.copyWith(fontWeight: FontWeight.w900)),
+                  const SizedBox(height: 2),
+                  Text(label, maxLines: 1, overflow: TextOverflow.ellipsis, style: theme.textTheme.labelLarge?.copyWith(fontWeight: FontWeight.w800)),
+                  Text(helper, maxLines: 1, overflow: TextOverflow.ellipsis, style: theme.textTheme.labelSmall?.copyWith(color: theme.colorScheme.onSurfaceVariant)),
+                ],
+              ),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+}
+
+class SimpleProgressBarChartCard extends StatelessWidget {
+  const SimpleProgressBarChartCard({
+    super.key,
+    required this.title,
+    required this.subtitle,
+    required this.values,
+    required this.labels,
+    required this.suffix,
+    required this.icon,
+  });
+
+  final String title;
+  final String subtitle;
+  final List<double> values;
+  final List<String> labels;
+  final String suffix;
+  final IconData icon;
+
+  @override
+  Widget build(BuildContext context) {
+    final theme = Theme.of(context);
+    final max = values.isEmpty ? 0.0 : values.reduce(math.max);
+    return Card(
+      child: Padding(
+        padding: const EdgeInsets.all(16),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.stretch,
+          children: [
+            Row(
+              children: [
+                Icon(icon, color: theme.colorScheme.primary),
+                const SizedBox(width: 8),
+                Expanded(child: Text(title, style: theme.textTheme.titleMedium?.copyWith(fontWeight: FontWeight.w900))),
+              ],
+            ),
+            const SizedBox(height: 4),
+            Text(subtitle, style: theme.textTheme.bodySmall?.copyWith(color: theme.colorScheme.onSurfaceVariant)),
+            const SizedBox(height: 14),
+            SizedBox(
+              height: 180,
+              child: Row(
+                crossAxisAlignment: CrossAxisAlignment.end,
+                children: [
+                  for (var index = 0; index < values.length; index++) ...[
+                    Expanded(
+                      child: _ProgressBarColumn(
+                        value: values[index],
+                        max: max,
+                        label: index < labels.length ? labels[index] : '',
+                        suffix: suffix,
+                      ),
+                    ),
+                    if (index < values.length - 1) const SizedBox(width: 8),
+                  ],
+                ],
+              ),
+            ),
+            const SizedBox(height: 8),
+            Text(
+              max == 0 ? 'Brak danych w tym okresie.' : 'Najwyższa wartość: ${max.round()} $suffix',
+              style: theme.textTheme.bodySmall?.copyWith(color: theme.colorScheme.onSurfaceVariant),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+}
+
+class _ProgressBarColumn extends StatelessWidget {
+  const _ProgressBarColumn({
+    required this.value,
+    required this.max,
+    required this.label,
+    required this.suffix,
+  });
+
+  final double value;
+  final double max;
+  final String label;
+  final String suffix;
+
+  @override
+  Widget build(BuildContext context) {
+    final theme = Theme.of(context);
+    final ratio = max <= 0 ? 0.0 : (value / max).clamp(0.0, 1.0);
+    return Column(
+      mainAxisAlignment: MainAxisAlignment.end,
+      children: [
+        SizedBox(
+          height: 28,
+          child: FittedBox(
+            fit: BoxFit.scaleDown,
+            child: Text(value == 0 ? '0' : '${value.round()} $suffix', style: theme.textTheme.labelSmall?.copyWith(fontWeight: FontWeight.w900)),
+          ),
+        ),
+        const SizedBox(height: 6),
+        Expanded(
+          child: Align(
+            alignment: Alignment.bottomCenter,
+            child: FractionallySizedBox(
+              heightFactor: math.max(0.04, ratio),
+              widthFactor: 1,
+              child: DecoratedBox(
+                decoration: BoxDecoration(
+                  borderRadius: BorderRadius.circular(14),
+                  gradient: LinearGradient(
+                    begin: Alignment.bottomCenter,
+                    end: Alignment.topCenter,
+                    colors: [
+                      theme.colorScheme.primary.withValues(alpha: 0.55),
+                      theme.colorScheme.primary,
+                    ],
+                  ),
+                ),
+              ),
+            ),
+          ),
+        ),
+        const SizedBox(height: 8),
+        Text(label, maxLines: 1, overflow: TextOverflow.ellipsis, style: theme.textTheme.labelSmall?.copyWith(color: theme.colorScheme.onSurfaceVariant)),
+      ],
+    );
+  }
+}
+
+class BasicMuscleFrequencyCard extends StatelessWidget {
+  const BasicMuscleFrequencyCard({
+    super.key,
+    required this.logs,
+    required this.customExercises,
+  });
+
+  final List<WorkoutLog> logs;
+  final List<Exercise> customExercises;
+
+  @override
+  Widget build(BuildContext context) {
+    final theme = Theme.of(context);
+    final counts = muscleCounts(logs, customExercises);
+    final most = counts.entries.toList()..sort((a, b) => b.value.compareTo(a.value));
+    final least = counts.entries.toList()..sort((a, b) => a.value.compareTo(b.value));
+    final max = most.isEmpty ? 1 : most.first.value;
+    return Card(
+      child: Padding(
+        padding: const EdgeInsets.all(16),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.stretch,
+          children: [
+            Row(
+              children: [
+                Icon(Icons.pie_chart_outline_rounded, color: theme.colorScheme.primary),
+                const SizedBox(width: 8),
+                Expanded(child: Text('Partie mięśniowe', style: theme.textTheme.titleMedium?.copyWith(fontWeight: FontWeight.w900))),
+              ],
+            ),
+            const SizedBox(height: 4),
+            Text('Najczęściej i najrzadziej trenowane partie w bieżącym miesiącu.', style: theme.textTheme.bodySmall?.copyWith(color: theme.colorScheme.onSurfaceVariant)),
+            const SizedBox(height: 14),
+            if (most.isEmpty)
+              Text('Brak danych. Zakończ trening, a Trainer pokaże rozkład partii.', style: theme.textTheme.bodyMedium?.copyWith(color: theme.colorScheme.onSurfaceVariant))
+            else
+              LayoutBuilder(
+                builder: (context, constraints) {
+                  final wide = constraints.maxWidth >= 520;
+                  final frequent = _MuscleRankColumn(title: 'Najczęściej trenowane partie', entries: most.take(5).toList(), max: max);
+                  final rare = _MuscleRankColumn(title: 'Najrzadziej trenowane partie', entries: least.take(5).toList(), max: max);
+                  if (!wide) {
+                    return Column(
+                      crossAxisAlignment: CrossAxisAlignment.stretch,
+                      children: [
+                        frequent,
+                        const SizedBox(height: 14),
+                        rare,
+                      ],
+                    );
+                  }
+                  return Row(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Expanded(child: frequent),
+                      const SizedBox(width: 16),
+                      Expanded(child: rare),
+                    ],
+                  );
+                },
+              ),
+          ],
+        ),
+      ),
+    );
+  }
+}
+
+class _MuscleRankColumn extends StatelessWidget {
+  const _MuscleRankColumn({
+    required this.title,
+    required this.entries,
+    required this.max,
+  });
+
+  final String title;
+  final List<MapEntry<String, int>> entries;
+  final int max;
+
+  @override
+  Widget build(BuildContext context) {
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.stretch,
+      children: [
+        Text(title, style: Theme.of(context).textTheme.labelLarge?.copyWith(fontWeight: FontWeight.w900)),
+        const SizedBox(height: 8),
+        for (final entry in entries) ProgressTextBar(label: entry.key, value: entry.value.toDouble(), max: max.toDouble(), suffix: '${entry.value}×'),
+      ],
+    );
+  }
+}
+
+class LegacyProgressPage extends StatelessWidget {
+  const LegacyProgressPage({super.key});
+
+  @override
+  Widget build(BuildContext context) {
+    final store = AppScope.of(context);
     final end = DateTime.now();
     final start = end.subtract(const Duration(days: 13));
     final days = List.generate(14, (i) => DateTime(start.year, start.month, start.day).add(Duration(days: i)));
@@ -8770,6 +9200,41 @@ Map<String, int> muscleCounts(List<WorkoutLog> logs, List<Exercise> customExerci
     }
   }
   return counts;
+}
+
+DateTime startOfTrainingWeek(DateTime date) {
+  final day = DateTime(date.year, date.month, date.day);
+  return day.subtract(Duration(days: day.weekday - DateTime.monday));
+}
+
+String weekdayShortName(int weekday) {
+  const names = {
+    DateTime.monday: 'Pn',
+    DateTime.tuesday: 'Wt',
+    DateTime.wednesday: 'Śr',
+    DateTime.thursday: 'Cz',
+    DateTime.friday: 'Pt',
+    DateTime.saturday: 'So',
+    DateTime.sunday: 'Nd',
+  };
+  return names[weekday] ?? 'D';
+}
+
+int workoutEntryCount(List<WorkoutLog> logs) {
+  final sorted = [...logs]..sort((a, b) => b.date.compareTo(a.date));
+  return _groupTrainerWorkoutHistory(sorted).length;
+}
+
+int completedWorkoutSetCount(List<WorkoutLog> logs) {
+  return logs.fold<int>(
+    0,
+    (sum, log) => sum + (log.workoutSets.isEmpty ? log.sets : log.workoutSets.where((set) => set.isCompleted).length),
+  );
+}
+
+String formatProgressVolume(double volume) {
+  if (volume >= 10000) return '${(volume / 1000).toStringAsFixed(1)}k kg';
+  return '${volume.round()} kg';
 }
 
 String balanceWarning(List<MapEntry<String, int>> entries) {
