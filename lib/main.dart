@@ -172,6 +172,7 @@ class AppStore extends ChangeNotifier {
     exerciseLibraryPreferences = trainerData.exerciseLibraryPreferences;
 
     final prefs = await SharedPreferences.getInstance();
+    final hasStoredPlans = prefs.containsKey(TrainerLocalRepository.plansKey);
     final rawSettings = prefs.getString(_settingsKey);
     if (rawSettings != null && rawSettings.isNotEmpty) {
       try {
@@ -179,9 +180,21 @@ class AppStore extends ChangeNotifier {
       } catch (_) {}
     }
 
-    if (plans.isEmpty) {
+    if (plans.isEmpty && !hasStoredPlans) {
       plans.add(createLocalWorkoutPlan(settings));
       await savePlans();
+    } else if (plans.isNotEmpty) {
+      final activeIndexes = <int>[
+        for (var index = 0; index < plans.length; index++)
+          if (plans[index].isActive) index,
+      ];
+      if (activeIndexes.length != 1) {
+        final activeIndex = activeIndexes.isEmpty ? 0 : activeIndexes.first;
+        for (var index = 0; index < plans.length; index++) {
+          plans[index] = plans[index].copyWith(isActive: index == activeIndex);
+        }
+        await savePlans();
+      }
     }
   }
 
@@ -199,6 +212,158 @@ class AppStore extends ChangeNotifier {
 
   Future<void> savePlans() async {
     await _trainerRepository.savePlans(plans);
+  }
+
+  WorkoutPlan? get activeWorkoutPlan {
+    for (final plan in plans) {
+      if (plan.isActive) return plan;
+    }
+    return plans.isEmpty ? null : plans.first;
+  }
+
+  Future<void> addWorkoutPlan(WorkoutPlan plan) async {
+    final shouldActivate = plans.isEmpty || plan.isActive;
+    if (shouldActivate) {
+      for (var index = 0; index < plans.length; index++) {
+        plans[index] = plans[index].copyWith(isActive: false);
+      }
+    }
+    plans.add(plan.copyWith(isActive: shouldActivate));
+    await savePlans();
+    notifyListeners();
+  }
+
+  Future<void> updateWorkoutPlan(WorkoutPlan updatedPlan) async {
+    final index = plans.indexWhere((plan) => plan.id == updatedPlan.id);
+    if (index < 0) return;
+    if (updatedPlan.isActive) {
+      for (var planIndex = 0; planIndex < plans.length; planIndex++) {
+        plans[planIndex] = plans[planIndex].copyWith(isActive: false);
+      }
+    }
+    plans[index] = updatedPlan;
+    if (plans.isNotEmpty && !plans.any((plan) => plan.isActive)) {
+      plans[index] = plans[index].copyWith(isActive: true);
+    }
+    await savePlans();
+    notifyListeners();
+  }
+
+  Future<void> deleteWorkoutPlan(String planId) async {
+    final removedWasActive = plans.any((plan) => plan.id == planId && plan.isActive);
+    plans.removeWhere((plan) => plan.id == planId);
+    if (removedWasActive && plans.isNotEmpty) {
+      plans[0] = plans[0].copyWith(isActive: true);
+    }
+    await savePlans();
+    notifyListeners();
+  }
+
+  Future<void> setActiveWorkoutPlan(String planId) async {
+    final activeIndex = plans.indexWhere((plan) => plan.id == planId);
+    if (activeIndex < 0) return;
+    for (var index = 0; index < plans.length; index++) {
+      plans[index] = plans[index].copyWith(isActive: index == activeIndex);
+    }
+    await savePlans();
+    notifyListeners();
+  }
+
+  Future<WorkoutPlan?> duplicateWorkoutPlan(String planId) async {
+    final source = plans.where((plan) => plan.id == planId);
+    if (source.isEmpty) return null;
+    final original = source.first;
+    final copy = original.copyWith(
+      id: 'plan_${idNow()}',
+      name: '${original.name} — kopia',
+      days: original.days
+          .map(
+            (day) => day.copyWith(
+              items: day.items.map((item) => item.copyWith()).toList(),
+            ),
+          )
+          .toList(),
+      isActive: false,
+    );
+    plans.add(copy);
+    await savePlans();
+    notifyListeners();
+    return copy;
+  }
+
+  Future<bool> copyWorkoutDay({
+    required String planId,
+    required int sourceWeekday,
+    required int targetWeekday,
+  }) async {
+    final planIndex = plans.indexWhere((plan) => plan.id == planId);
+    if (planIndex < 0 || sourceWeekday == targetWeekday) return false;
+    final plan = plans[planIndex];
+    final sourceDays = plan.days.where((day) => day.weekday == sourceWeekday);
+    if (sourceDays.isEmpty) return false;
+    final source = sourceDays.first;
+    final copiedDay = source.copyWith(
+      weekday: targetWeekday,
+      title: '${source.title} — kopia',
+      items: source.items.map((item) => item.copyWith()).toList(),
+    );
+    final updatedDays = [...plan.days];
+    final targetIndex = updatedDays.indexWhere((day) => day.weekday == targetWeekday);
+    if (targetIndex >= 0) {
+      updatedDays[targetIndex] = copiedDay;
+    } else {
+      updatedDays.add(copiedDay);
+    }
+    updatedDays.sort((left, right) => left.weekday.compareTo(right.weekday));
+    plans[planIndex] = plan.copyWith(days: updatedDays);
+    await savePlans();
+    notifyListeners();
+    return true;
+  }
+
+  Future<void> upsertPlanItem({
+    required String planId,
+    required int weekday,
+    required PlanItem item,
+  }) async {
+    final planIndex = plans.indexWhere((plan) => plan.id == planId);
+    if (planIndex < 0) return;
+    final plan = plans[planIndex];
+    final dayIndex = plan.days.indexWhere((day) => day.weekday == weekday);
+    if (dayIndex < 0) return;
+    final day = plan.days[dayIndex];
+    final items = [...day.items];
+    final itemIndex = items.indexWhere((entry) => entry.exerciseId == item.exerciseId);
+    if (itemIndex >= 0) {
+      items[itemIndex] = item;
+    } else {
+      items.add(item);
+    }
+    final days = [...plan.days];
+    days[dayIndex] = day.copyWith(items: items);
+    plans[planIndex] = plan.copyWith(days: days);
+    await savePlans();
+    notifyListeners();
+  }
+
+  Future<void> removePlanItem({
+    required String planId,
+    required int weekday,
+    required String exerciseId,
+  }) async {
+    final planIndex = plans.indexWhere((plan) => plan.id == planId);
+    if (planIndex < 0) return;
+    final plan = plans[planIndex];
+    final dayIndex = plan.days.indexWhere((day) => day.weekday == weekday);
+    if (dayIndex < 0) return;
+    final day = plan.days[dayIndex];
+    final days = [...plan.days];
+    days[dayIndex] = day.copyWith(
+      items: day.items.where((item) => item.exerciseId != exerciseId).toList(),
+    );
+    plans[planIndex] = plan.copyWith(days: days);
+    await savePlans();
+    notifyListeners();
   }
 
   Future<void> saveSettings() async {
@@ -287,6 +452,8 @@ class AppStore extends ChangeNotifier {
           reps: exercise.defaultReps,
           durationSec: exercise.defaultDurationSec,
           note: 'Dodano z bazy ćwiczeń',
+          suggestedWeightKg: 0,
+          restSeconds: 90,
         ),
       ],
     );
@@ -1666,7 +1833,7 @@ class TrainerHomePage extends StatelessWidget {
   Widget build(BuildContext context) {
     final store = AppScope.of(context);
     final todayLogs = store.logsForDay(DateTime.now());
-    final plan = store.plans.isEmpty ? null : store.plans.first;
+    final plan = store.activeWorkoutPlan;
     WorkoutDay? todayPlan;
     if (plan != null) {
       for (final day in plan.days) {
@@ -4231,86 +4398,722 @@ class PlanPage extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final store = AppScope.of(context);
-    final plan = store.plans.isNotEmpty ? store.plans.first : createLocalWorkoutPlan(store.settings);
+    final activePlan = store.activeWorkoutPlan;
     return PageFrame(
-      title: 'Plan tygodnia',
-      subtitle: 'Lokalny albo generowany przez backend AI',
-      actions: [IconButton.filledTonal(onPressed: () => showPlanGenerator(context), icon: const Icon(Icons.auto_awesome))],
+      title: 'Plany treningowe',
+      subtitle: '${store.plans.length} ${store.plans.length == 1 ? 'plan' : 'planów'} zapisanych lokalnie',
+      actions: [
+        IconButton.filledTonal(
+          tooltip: 'Utwórz plan',
+          onPressed: () => showWorkoutPlanEditor(context),
+          icon: const Icon(Icons.add_rounded),
+        ),
+        const SizedBox(width: 8),
+        IconButton.filledTonal(
+          tooltip: 'Generator planu AI',
+          onPressed: () => showPlanGenerator(context),
+          icon: const Icon(Icons.auto_awesome),
+        ),
+      ],
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.stretch,
         children: [
-          Card(
-            child: Padding(
-              padding: const EdgeInsets.all(18),
-              child: Column(
-                crossAxisAlignment: CrossAxisAlignment.start,
-                children: [
-                  Text(plan.name, style: Theme.of(context).textTheme.titleLarge?.copyWith(fontWeight: FontWeight.w900)),
-                  const SizedBox(height: 6),
-                  Text(plan.note, style: Theme.of(context).textTheme.bodyMedium?.copyWith(color: Theme.of(context).colorScheme.onSurfaceVariant)),
-                  const SizedBox(height: 12),
-                  Row(
-                    children: [
-                      Expanded(child: OutlinedButton.icon(onPressed: store.generateLocalPlan, icon: const Icon(Icons.refresh), label: const Text('Lokalny'))),
-                      const SizedBox(width: 10),
-                      Expanded(child: FilledButton.icon(onPressed: () => showPlanGenerator(context), icon: const Icon(Icons.auto_awesome), label: const Text('AI'))),
-                    ],
-                  ),
-                ],
-              ),
-            ),
+          if (activePlan != null) ...[
+            _ActivePlanSummary(plan: activePlan),
+            const SizedBox(height: 14),
+          ],
+          FilledButton.icon(
+            onPressed: () => showWorkoutPlanEditor(context),
+            icon: const Icon(Icons.add_rounded),
+            label: const Text('Dodaj plan'),
           ),
           const SizedBox(height: 14),
-          ...plan.days.map((d) => PlanDayCard(day: d)),
+          if (store.plans.isEmpty)
+            EmptyCard(
+              icon: Icons.event_note_rounded,
+              title: 'Brak planów treningowych',
+              text: 'Utwórz pierwszy plan i przypisz ćwiczenia do wybranych dni tygodnia.',
+              buttonLabel: 'Utwórz plan',
+              onPressed: () => showWorkoutPlanEditor(context),
+            )
+          else
+            for (final plan in store.plans) WorkoutPlanCard(plan: plan),
         ],
       ),
     );
   }
 }
 
-class PlanDayCard extends StatelessWidget {
-  final WorkoutDay day;
+class _ActivePlanSummary extends StatelessWidget {
+  const _ActivePlanSummary({required this.plan});
 
-  const PlanDayCard({super.key, required this.day});
+  final WorkoutPlan plan;
+
+  @override
+  Widget build(BuildContext context) {
+    final theme = Theme.of(context);
+    final exerciseCount = plan.days.fold<int>(0, (sum, day) => sum + day.items.length);
+    return Card(
+      color: theme.colorScheme.primaryContainer.withValues(alpha: 0.45),
+      child: Padding(
+        padding: const EdgeInsets.all(18),
+        child: Row(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            CircleAvatar(
+              backgroundColor: theme.colorScheme.primary,
+              foregroundColor: theme.colorScheme.onPrimary,
+              child: const Icon(Icons.bolt_rounded),
+            ),
+            const SizedBox(width: 12),
+            Expanded(
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Text('Aktywny plan', style: theme.textTheme.labelLarge?.copyWith(color: theme.colorScheme.primary, fontWeight: FontWeight.w900)),
+                  const SizedBox(height: 3),
+                  Text(plan.name, maxLines: 2, overflow: TextOverflow.ellipsis, style: theme.textTheme.titleLarge?.copyWith(fontWeight: FontWeight.w900)),
+                  const SizedBox(height: 4),
+                  Text('${plan.goal} · ${plan.days.length} dni · $exerciseCount ćwiczeń', style: theme.textTheme.bodyMedium?.copyWith(color: theme.colorScheme.onSurfaceVariant)),
+                ],
+              ),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+}
+
+class WorkoutPlanCard extends StatelessWidget {
+  const WorkoutPlanCard({super.key, required this.plan});
+
+  final WorkoutPlan plan;
 
   @override
   Widget build(BuildContext context) {
     final theme = Theme.of(context);
     final store = AppScope.of(context);
     return Card(
-      margin: const EdgeInsets.only(bottom: 12),
+      margin: const EdgeInsets.only(bottom: 14),
       child: Padding(
-        padding: const EdgeInsets.all(16),
+        padding: const EdgeInsets.all(18),
         child: Column(
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
-            Text('${weekdayName(day.weekday)} · ${day.title}', style: theme.textTheme.titleMedium?.copyWith(fontWeight: FontWeight.w900)),
-            const SizedBox(height: 12),
-            ...day.items.map((item) => Padding(
-                  padding: const EdgeInsets.only(bottom: 10),
-                  child: Row(
+            Row(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Expanded(
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
                     children: [
-                      SizedBox(width: 56, height: 56, child: ExerciseVisual(exercise: item.exerciseFrom(store.customExercises))),
-                      const SizedBox(width: 10),
-                      Expanded(
-                        child: Column(
-                          crossAxisAlignment: CrossAxisAlignment.start,
-                          children: [
-                            Text(item.exerciseFrom(store.customExercises).name, style: theme.textTheme.bodyLarge?.copyWith(fontWeight: FontWeight.w800)),
-                            Text(item.durationSec > 0 ? '${item.sets} × ${item.durationSec}s · ${item.note}' : '${item.sets} × ${item.reps} · ${item.note}',
-                                style: theme.textTheme.bodySmall?.copyWith(color: theme.colorScheme.onSurfaceVariant)),
-                          ],
-                        ),
+                      Text(plan.name, maxLines: 2, overflow: TextOverflow.ellipsis, style: theme.textTheme.titleLarge?.copyWith(fontWeight: FontWeight.w900)),
+                      const SizedBox(height: 8),
+                      Wrap(
+                        spacing: 8,
+                        runSpacing: 8,
+                        children: [
+                          MiniTag(text: plan.goal),
+                          MiniTag(text: '${plan.days.length} dni'),
+                          if (plan.isActive) const MiniTag(text: 'Aktywny'),
+                        ],
                       ),
-                      IconButton(onPressed: () => showAddWorkoutSheet(context, exercise: item.exerciseFrom(store.customExercises), fromPlan: item), icon: const Icon(Icons.add_circle_outline)),
                     ],
                   ),
-                )),
+                ),
+                PopupMenuButton<String>(
+                  tooltip: 'Opcje planu',
+                  onSelected: (value) async {
+                    if (value == 'active') {
+                      await store.setActiveWorkoutPlan(plan.id);
+                    } else if (value == 'edit') {
+                      if (context.mounted) await showWorkoutPlanEditor(context, plan: plan);
+                    } else if (value == 'duplicate') {
+                      final copy = await store.duplicateWorkoutPlan(plan.id);
+                      if (context.mounted && copy != null) showError(context, 'Skopiowano cały tydzień jako „${copy.name}”.');
+                    } else if (value == 'delete') {
+                      if (context.mounted) await showDeleteWorkoutPlanDialog(context, plan);
+                    }
+                  },
+                  itemBuilder: (context) => [
+                    if (!plan.isActive)
+                      const PopupMenuItem(
+                        value: 'active',
+                        child: ListTile(contentPadding: EdgeInsets.zero, leading: Icon(Icons.bolt_outlined), title: Text('Ustaw jako aktywny')),
+                      ),
+                    const PopupMenuItem(
+                      value: 'edit',
+                      child: ListTile(contentPadding: EdgeInsets.zero, leading: Icon(Icons.edit_outlined), title: Text('Edytuj plan i dni')),
+                    ),
+                    const PopupMenuItem(
+                      value: 'duplicate',
+                      child: ListTile(contentPadding: EdgeInsets.zero, leading: Icon(Icons.copy_all_outlined), title: Text('Kopiuj cały tydzień')),
+                    ),
+                    const PopupMenuItem(
+                      value: 'delete',
+                      child: ListTile(contentPadding: EdgeInsets.zero, leading: Icon(Icons.delete_outline), title: Text('Usuń plan')),
+                    ),
+                  ],
+                ),
+              ],
+            ),
+            if (plan.note.trim().isNotEmpty) ...[
+              const SizedBox(height: 10),
+              Text(plan.note, style: theme.textTheme.bodyMedium?.copyWith(color: theme.colorScheme.onSurfaceVariant)),
+            ],
+            const SizedBox(height: 16),
+            if (!plan.isActive)
+              Padding(
+                padding: const EdgeInsets.only(bottom: 12),
+                child: OutlinedButton.icon(
+                  onPressed: () => store.setActiveWorkoutPlan(plan.id),
+                  icon: const Icon(Icons.bolt_outlined),
+                  label: const Text('Ustaw jako aktywny'),
+                ),
+              ),
+            if (plan.days.isEmpty)
+              Container(
+                width: double.infinity,
+                padding: const EdgeInsets.all(16),
+                decoration: BoxDecoration(color: theme.colorScheme.surfaceContainerHighest, borderRadius: BorderRadius.circular(16)),
+                child: Text('Ten plan nie ma jeszcze dni treningowych.', style: theme.textTheme.bodyMedium?.copyWith(color: theme.colorScheme.onSurfaceVariant)),
+              )
+            else
+              for (final day in plan.days) WorkoutPlanDayCard(plan: plan, day: day),
+            const SizedBox(height: 4),
+            OutlinedButton.icon(
+              onPressed: () => showWorkoutPlanEditor(context, plan: plan),
+              icon: const Icon(Icons.calendar_month_outlined),
+              label: const Text('Edytuj plan i dni'),
+            ),
           ],
         ),
       ),
     );
   }
+}
+
+class WorkoutPlanDayCard extends StatelessWidget {
+  const WorkoutPlanDayCard({super.key, required this.plan, required this.day});
+
+  final WorkoutPlan plan;
+  final WorkoutDay day;
+
+  @override
+  Widget build(BuildContext context) {
+    final theme = Theme.of(context);
+    final store = AppScope.of(context);
+    return Container(
+      margin: const EdgeInsets.only(bottom: 12),
+      padding: const EdgeInsets.all(14),
+      decoration: BoxDecoration(
+        color: theme.colorScheme.surfaceContainerHighest.withValues(alpha: 0.55),
+        borderRadius: BorderRadius.circular(18),
+        border: Border.all(color: theme.colorScheme.outlineVariant.withValues(alpha: 0.45)),
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.stretch,
+        children: [
+          Row(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              CircleAvatar(
+                radius: 19,
+                backgroundColor: theme.colorScheme.primaryContainer,
+                child: Text('${day.weekday}', style: theme.textTheme.labelLarge?.copyWith(fontWeight: FontWeight.w900)),
+              ),
+              const SizedBox(width: 10),
+              Expanded(
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Text(weekdayName(day.weekday), style: theme.textTheme.titleMedium?.copyWith(fontWeight: FontWeight.w900)),
+                    Text('${day.title} · ${day.items.length} ćwiczeń',
+                        maxLines: 2, overflow: TextOverflow.ellipsis, style: theme.textTheme.bodySmall?.copyWith(color: theme.colorScheme.onSurfaceVariant)),
+                  ],
+                ),
+              ),
+              IconButton(
+                tooltip: 'Kopiuj dzień',
+                onPressed: () => showCopyWorkoutDaySheet(context, plan: plan, day: day),
+                icon: const Icon(Icons.content_copy_outlined),
+              ),
+            ],
+          ),
+          const SizedBox(height: 12),
+          if (day.items.isEmpty)
+            Padding(
+              padding: const EdgeInsets.only(bottom: 10),
+              child: Text('Brak ćwiczeń. Dodaj je z lokalnej bazy.', style: theme.textTheme.bodyMedium?.copyWith(color: theme.colorScheme.onSurfaceVariant)),
+            )
+          else
+            for (final item in day.items)
+              _PlanExerciseTile(
+                plan: plan,
+                day: day,
+                item: item,
+                exercise: item.exerciseFrom(store.customExercises),
+              ),
+          FilledButton.tonalIcon(
+            onPressed: () => showPlanExercisePicker(context, plan: plan, day: day),
+            icon: const Icon(Icons.playlist_add_rounded),
+            label: const Text('Dodaj ćwiczenie'),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+@Deprecated('Użyj WorkoutPlanDayCard z jawnym planem.')
+class PlanDayCard extends StatelessWidget {
+  const PlanDayCard({super.key, required this.day});
+
+  final WorkoutDay day;
+
+  @override
+  Widget build(BuildContext context) {
+    final plan = AppScope.of(context).activeWorkoutPlan;
+    if (plan == null) return const SizedBox.shrink();
+    return WorkoutPlanDayCard(plan: plan, day: day);
+  }
+}
+
+class _PlanExerciseTile extends StatelessWidget {
+  const _PlanExerciseTile({required this.plan, required this.day, required this.item, required this.exercise});
+
+  final WorkoutPlan plan;
+  final WorkoutDay day;
+  final PlanItem item;
+  final Exercise exercise;
+
+  @override
+  Widget build(BuildContext context) {
+    final theme = Theme.of(context);
+    final store = AppScope.of(context);
+    final weight = item.suggestedWeightKg > 0 ? '${_formatPlanWeight(item.suggestedWeightKg)} kg' : 'bez ciężaru';
+    return Container(
+      margin: const EdgeInsets.only(bottom: 10),
+      padding: const EdgeInsets.all(10),
+      decoration: BoxDecoration(color: theme.colorScheme.surface, borderRadius: BorderRadius.circular(15)),
+      child: Row(
+        children: [
+          SizedBox(width: 48, height: 48, child: ExerciseVisual(exercise: exercise)),
+          const SizedBox(width: 10),
+          Expanded(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Text(exercise.name, maxLines: 2, overflow: TextOverflow.ellipsis, style: theme.textTheme.bodyLarge?.copyWith(fontWeight: FontWeight.w800)),
+                const SizedBox(height: 3),
+                Text('${item.sets} serie × ${item.reps} powt. · $weight · ${item.restSeconds} s przerwy',
+                    maxLines: 3, overflow: TextOverflow.ellipsis, style: theme.textTheme.bodySmall?.copyWith(color: theme.colorScheme.onSurfaceVariant)),
+              ],
+            ),
+          ),
+          PopupMenuButton<String>(
+            tooltip: 'Opcje ćwiczenia',
+            onSelected: (value) async {
+              if (value == 'edit') {
+                await showPlanItemEditor(context, plan: plan, day: day, exercise: exercise, existing: item);
+              } else if (value == 'delete') {
+                await store.removePlanItem(planId: plan.id, weekday: day.weekday, exerciseId: item.exerciseId);
+              }
+            },
+            itemBuilder: (context) => const [
+              PopupMenuItem(value: 'edit', child: ListTile(contentPadding: EdgeInsets.zero, leading: Icon(Icons.tune_rounded), title: Text('Edytuj parametry'))),
+              PopupMenuItem(value: 'delete', child: ListTile(contentPadding: EdgeInsets.zero, leading: Icon(Icons.delete_outline), title: Text('Usuń z dnia'))),
+            ],
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+String _formatPlanWeight(double value) => value == value.roundToDouble() ? value.toStringAsFixed(0) : value.toStringAsFixed(1);
+
+Future<void> showWorkoutPlanEditor(BuildContext context, {WorkoutPlan? plan}) async {
+  final store = AppScope.read(context);
+  var planName = plan?.name ?? '';
+  var goal = normalizeWorkoutPlanGoal(plan?.goal ?? store.settings.goal);
+  final selectedWeekdays = <int>{
+    if (plan != null) ...plan.days.map((day) => day.weekday) else ...store.settings.trainingWeekdays,
+  };
+  if (selectedWeekdays.isEmpty) selectedWeekdays.addAll(const [1, 3, 5]);
+
+  await showModalBottomSheet<void>(
+    context: context,
+    isScrollControlled: true,
+    useSafeArea: true,
+    showDragHandle: true,
+    builder: (sheetContext) => StatefulBuilder(
+      builder: (context, setSheetState) => Padding(
+        padding: EdgeInsets.fromLTRB(16, 0, 16, 16 + MediaQuery.of(context).viewInsets.bottom + MediaQuery.of(context).viewPadding.bottom),
+        child: SingleChildScrollView(
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            crossAxisAlignment: CrossAxisAlignment.stretch,
+            children: [
+              Text(plan == null ? 'Nowy plan treningowy' : 'Edytuj plan', style: Theme.of(context).textTheme.titleLarge?.copyWith(fontWeight: FontWeight.w900)),
+              const SizedBox(height: 14),
+              TextFormField(
+                initialValue: planName,
+                textCapitalization: TextCapitalization.sentences,
+                decoration: const InputDecoration(labelText: 'Nazwa planu'),
+                onChanged: (value) => planName = value,
+              ),
+              const SizedBox(height: 12),
+              DropdownButtonFormField<String>(
+                isExpanded: true,
+                initialValue: goal,
+                decoration: const InputDecoration(labelText: 'Cel planu'),
+                items: workoutPlanGoals.map((value) => DropdownMenuItem(value: value, child: Text(value))).toList(),
+                onChanged: (value) => setSheetState(() => goal = value ?? goal),
+              ),
+              const SizedBox(height: 16),
+              Text('Dni tygodnia', style: Theme.of(context).textTheme.titleMedium?.copyWith(fontWeight: FontWeight.w900)),
+              const SizedBox(height: 8),
+              Wrap(
+                spacing: 8,
+                runSpacing: 8,
+                children: [
+                  for (var weekday = 1; weekday <= 7; weekday++)
+                    FilterChip(
+                      label: Text(weekdayName(weekday)),
+                      selected: selectedWeekdays.contains(weekday),
+                      onSelected: (selected) {
+                        setSheetState(() {
+                          if (selected) {
+                            selectedWeekdays.add(weekday);
+                          } else {
+                            selectedWeekdays.remove(weekday);
+                          }
+                        });
+                      },
+                    ),
+                ],
+              ),
+              const SizedBox(height: 8),
+              Text('Usunięcie zaznaczenia dnia usunie go z planu razem z przypisanymi ćwiczeniami.',
+                  style: Theme.of(context).textTheme.bodySmall?.copyWith(color: Theme.of(context).colorScheme.onSurfaceVariant)),
+              const SizedBox(height: 18),
+              FilledButton.icon(
+                onPressed: () async {
+                  final cleanedName = planName.trim();
+                  if (cleanedName.isEmpty) {
+                    showError(sheetContext, 'Wpisz nazwę planu.');
+                    return;
+                  }
+                  if (selectedWeekdays.isEmpty) {
+                    showError(sheetContext, 'Wybierz przynajmniej jeden dzień tygodnia.');
+                    return;
+                  }
+                  final weekdays = selectedWeekdays.toList()..sort();
+                  final days = <WorkoutDay>[];
+                  for (final weekday in weekdays) {
+                    WorkoutDay? existingDay;
+                    if (plan != null) {
+                      for (final day in plan.days) {
+                        if (day.weekday == weekday) {
+                          existingDay = day;
+                          break;
+                        }
+                      }
+                    }
+                    days.add(existingDay ?? WorkoutDay(weekday: weekday, title: 'Trening', items: const []));
+                  }
+                  final updated = WorkoutPlan(
+                    id: plan?.id ?? 'plan_${idNow()}',
+                    name: cleanedName,
+                    days: days,
+                    note: plan?.note ?? 'Plan utworzony ręcznie.',
+                    goal: goal,
+                    isActive: plan?.isActive ?? store.plans.isEmpty,
+                  );
+                  if (plan == null) {
+                    await store.addWorkoutPlan(updated);
+                  } else {
+                    await store.updateWorkoutPlan(updated);
+                  }
+                  if (sheetContext.mounted) Navigator.pop(sheetContext);
+                },
+                icon: const Icon(Icons.save_outlined),
+                label: Text(plan == null ? 'Utwórz plan' : 'Zapisz zmiany'),
+              ),
+            ],
+          ),
+        ),
+      ),
+    ),
+  );
+}
+
+Future<void> showDeleteWorkoutPlanDialog(BuildContext context, WorkoutPlan plan) async {
+  final store = AppScope.read(context);
+  final confirmed = await showDialog<bool>(
+    context: context,
+    builder: (dialogContext) => AlertDialog(
+      title: const Text('Usunąć plan?'),
+      content: Text('Plan „${plan.name}” oraz wszystkie przypisane dni zostaną usunięte lokalnie.'),
+      actions: [
+        TextButton(onPressed: () => Navigator.pop(dialogContext, false), child: const Text('Anuluj')),
+        FilledButton(onPressed: () => Navigator.pop(dialogContext, true), child: const Text('Usuń')),
+      ],
+    ),
+  );
+  if (confirmed == true) await store.deleteWorkoutPlan(plan.id);
+}
+
+Future<void> showCopyWorkoutDaySheet(BuildContext context, {required WorkoutPlan plan, required WorkoutDay day}) async {
+  final store = AppScope.read(context);
+  final hostContext = context;
+  await showModalBottomSheet<void>(
+    context: context,
+    useSafeArea: true,
+    showDragHandle: true,
+    builder: (sheetContext) => Padding(
+      padding: const EdgeInsets.fromLTRB(16, 0, 16, 20),
+      child: Column(
+        mainAxisSize: MainAxisSize.min,
+        crossAxisAlignment: CrossAxisAlignment.stretch,
+        children: [
+          Text('Kopiuj ${weekdayName(day.weekday)}', style: Theme.of(sheetContext).textTheme.titleLarge?.copyWith(fontWeight: FontWeight.w900)),
+          const SizedBox(height: 4),
+          Text('Wybierz dzień docelowy. Jeśli już istnieje, jego zawartość zostanie zastąpiona.',
+              style: Theme.of(sheetContext).textTheme.bodyMedium?.copyWith(color: Theme.of(sheetContext).colorScheme.onSurfaceVariant)),
+          const SizedBox(height: 12),
+          ConstrainedBox(
+            constraints: BoxConstraints(maxHeight: MediaQuery.sizeOf(sheetContext).height * 0.62),
+            child: ListView(
+              shrinkWrap: true,
+              children: [
+                for (var weekday = 1; weekday <= 7; weekday++)
+                  if (weekday != day.weekday)
+                    ListTile(
+                      leading: CircleAvatar(child: Text('$weekday')),
+                      title: Text(weekdayName(weekday)),
+                      subtitle: Text(plan.days.any((entry) => entry.weekday == weekday) ? 'Zastąpi istniejący dzień' : 'Doda nowy dzień do planu'),
+                      trailing: const Icon(Icons.chevron_right_rounded),
+                      onTap: () async {
+                        final copied = await store.copyWorkoutDay(planId: plan.id, sourceWeekday: day.weekday, targetWeekday: weekday);
+                        if (sheetContext.mounted) Navigator.pop(sheetContext);
+                        if (hostContext.mounted && copied) showError(hostContext, 'Skopiowano dzień na ${weekdayName(weekday)}.');
+                      },
+                    ),
+              ],
+            ),
+          ),
+        ],
+      ),
+    ),
+  );
+}
+
+Future<void> showPlanExercisePicker(BuildContext context, {required WorkoutPlan plan, required WorkoutDay day}) async {
+  final store = AppScope.read(context);
+  var query = '';
+  final selected = await showModalBottomSheet<Exercise>(
+    context: context,
+    isScrollControlled: true,
+    useSafeArea: true,
+    showDragHandle: true,
+    builder: (sheetContext) => StatefulBuilder(
+      builder: (context, setSheetState) {
+        final exercises = ExerciseRepo.combined(store.customExercises).where((exercise) {
+          if (store.isExerciseHidden(exercise.id)) return false;
+          return query.isEmpty || exercise.name.toLowerCase().contains(query);
+        }).toList();
+        return FractionallySizedBox(
+          heightFactor: 0.86,
+          child: Column(
+            children: [
+              Padding(
+                padding: const EdgeInsets.fromLTRB(16, 0, 16, 12),
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.stretch,
+                  children: [
+                    Text('Dodaj ćwiczenie', style: Theme.of(context).textTheme.titleLarge?.copyWith(fontWeight: FontWeight.w900)),
+                    const SizedBox(height: 4),
+                    Text('${plan.name} · ${weekdayName(day.weekday)}',
+                        maxLines: 2, overflow: TextOverflow.ellipsis, style: Theme.of(context).textTheme.bodyMedium?.copyWith(color: Theme.of(context).colorScheme.onSurfaceVariant)),
+                    const SizedBox(height: 12),
+                    TextField(
+                      autofocus: true,
+                      decoration: const InputDecoration(prefixIcon: Icon(Icons.search_rounded), labelText: 'Szukaj po nazwie'),
+                      onChanged: (value) => setSheetState(() => query = value.trim().toLowerCase()),
+                    ),
+                  ],
+                ),
+              ),
+              Expanded(
+                child: exercises.isEmpty
+                    ? const Center(child: Text('Brak pasujących ćwiczeń'))
+                    : ListView.builder(
+                        padding: const EdgeInsets.fromLTRB(16, 0, 16, 20),
+                        itemCount: exercises.length,
+                        itemBuilder: (context, index) {
+                          final exercise = exercises[index];
+                          final alreadyAdded = day.items.any((item) => item.exerciseId == exercise.id);
+                          return Card(
+                            margin: const EdgeInsets.only(bottom: 8),
+                            child: ListTile(
+                              leading: SizedBox(width: 48, height: 48, child: ExerciseVisual(exercise: exercise)),
+                              title: Text(exercise.name, maxLines: 2, overflow: TextOverflow.ellipsis),
+                              subtitle: Text('${exercise.primaryMuscle} · ${exercise.equipment}', maxLines: 2, overflow: TextOverflow.ellipsis),
+                              trailing: Icon(alreadyAdded ? Icons.tune_rounded : Icons.add_circle_outline_rounded),
+                              onTap: () => Navigator.pop(sheetContext, exercise),
+                            ),
+                          );
+                        },
+                      ),
+              ),
+            ],
+          ),
+        );
+      },
+    ),
+  );
+  if (!context.mounted || selected == null) return;
+  PlanItem? existing;
+  for (final item in day.items) {
+    if (item.exerciseId == selected.id) {
+      existing = item;
+      break;
+    }
+  }
+  await showPlanItemEditor(context, plan: plan, day: day, exercise: selected, existing: existing);
+}
+
+Future<void> showPlanItemEditor(
+  BuildContext context, {
+  required WorkoutPlan plan,
+  required WorkoutDay day,
+  required Exercise exercise,
+  PlanItem? existing,
+}) async {
+  final store = AppScope.read(context);
+  var setsValue = '${existing?.sets ?? exercise.defaultSets}';
+  var repsValue = '${existing?.reps ?? (exercise.defaultReps > 0 ? exercise.defaultReps : 10)}';
+  var weightValue = _formatPlanWeight(existing?.suggestedWeightKg ?? 0);
+  var restValue = '${existing?.restSeconds ?? 90}';
+  var noteValue = existing?.note ?? '';
+
+  await showModalBottomSheet<void>(
+    context: context,
+    isScrollControlled: true,
+    useSafeArea: true,
+    showDragHandle: true,
+    builder: (sheetContext) => Padding(
+      padding: EdgeInsets.fromLTRB(16, 0, 16, 16 + MediaQuery.of(sheetContext).viewInsets.bottom + MediaQuery.of(sheetContext).viewPadding.bottom),
+      child: SingleChildScrollView(
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          crossAxisAlignment: CrossAxisAlignment.stretch,
+          children: [
+            Text(existing == null ? 'Dodaj do dnia' : 'Edytuj ćwiczenie', style: Theme.of(sheetContext).textTheme.titleLarge?.copyWith(fontWeight: FontWeight.w900)),
+            const SizedBox(height: 4),
+            Text('${exercise.name} · ${weekdayName(day.weekday)}',
+                maxLines: 2, overflow: TextOverflow.ellipsis, style: Theme.of(sheetContext).textTheme.bodyMedium?.copyWith(color: Theme.of(sheetContext).colorScheme.onSurfaceVariant)),
+            const SizedBox(height: 14),
+            Row(
+              children: [
+                Expanded(
+                  child: TextFormField(
+                    initialValue: setsValue,
+                    keyboardType: TextInputType.number,
+                    decoration: const InputDecoration(labelText: 'Liczba serii'),
+                    onChanged: (value) => setsValue = value,
+                  ),
+                ),
+                const SizedBox(width: 10),
+                Expanded(
+                  child: TextFormField(
+                    initialValue: repsValue,
+                    keyboardType: TextInputType.number,
+                    decoration: const InputDecoration(labelText: 'Powtórzenia'),
+                    onChanged: (value) => repsValue = value,
+                  ),
+                ),
+              ],
+            ),
+            const SizedBox(height: 10),
+            Row(
+              children: [
+                Expanded(
+                  child: TextFormField(
+                    initialValue: weightValue,
+                    keyboardType: const TextInputType.numberWithOptions(decimal: true),
+                    decoration: const InputDecoration(labelText: 'Ciężar (kg)'),
+                    onChanged: (value) => weightValue = value,
+                  ),
+                ),
+                const SizedBox(width: 10),
+                Expanded(
+                  child: TextFormField(
+                    initialValue: restValue,
+                    keyboardType: TextInputType.number,
+                    decoration: const InputDecoration(labelText: 'Przerwa (s)'),
+                    onChanged: (value) => restValue = value,
+                  ),
+                ),
+              ],
+            ),
+            const SizedBox(height: 10),
+            TextFormField(
+              initialValue: noteValue,
+              textCapitalization: TextCapitalization.sentences,
+              maxLines: 2,
+              decoration: const InputDecoration(labelText: 'Notatka (opcjonalnie)'),
+              onChanged: (value) => noteValue = value,
+            ),
+            const SizedBox(height: 16),
+            FilledButton.icon(
+              onPressed: () async {
+                final parsedSets = int.tryParse(setsValue.trim());
+                final parsedReps = int.tryParse(repsValue.trim());
+                final parsedWeight = double.tryParse(weightValue.trim().replaceAll(',', '.'));
+                final parsedRest = int.tryParse(restValue.trim());
+                if (parsedSets == null || parsedSets < 1 || parsedSets > 99) {
+                  showError(sheetContext, 'Liczba serii musi mieścić się w zakresie 1–99.');
+                  return;
+                }
+                if (parsedReps == null || parsedReps < 1 || parsedReps > 999) {
+                  showError(sheetContext, 'Liczba powtórzeń musi mieścić się w zakresie 1–999.');
+                  return;
+                }
+                if (parsedWeight == null || parsedWeight < 0 || parsedWeight > 9999) {
+                  showError(sheetContext, 'Podaj poprawny sugerowany ciężar.');
+                  return;
+                }
+                if (parsedRest == null || parsedRest < 0 || parsedRest > 3600) {
+                  showError(sheetContext, 'Przerwa musi mieścić się w zakresie 0–3600 sekund.');
+                  return;
+                }
+                await store.upsertPlanItem(
+                  planId: plan.id,
+                  weekday: day.weekday,
+                  item: PlanItem(
+                    exerciseId: exercise.id,
+                    sets: parsedSets,
+                    reps: parsedReps,
+                    durationSec: existing?.durationSec ?? exercise.defaultDurationSec,
+                    note: noteValue.trim(),
+                    suggestedWeightKg: parsedWeight,
+                    restSeconds: parsedRest,
+                  ),
+                );
+                if (sheetContext.mounted) Navigator.pop(sheetContext);
+              },
+              icon: const Icon(Icons.save_outlined),
+              label: Text(existing == null ? 'Dodaj ćwiczenie' : 'Zapisz parametry'),
+            ),
+          ],
+        ),
+      ),
+    ),
+  );
 }
 
 void showPlanGenerator(BuildContext context) {

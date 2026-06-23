@@ -84,6 +84,8 @@ class WorkoutPlanFactory {
       days: days,
       note:
           'Plan lokalny dopasowany do poziomu: $normalizedLevel. Możesz go nadpisać planem AI przez Twój backend.',
+      goal: normalizeWorkoutPlanGoal(goal),
+      isActive: true,
     );
   }
 
@@ -146,6 +148,8 @@ class WorkoutPlanFactory {
       name: json['name']?.toString() ?? 'Plan AI: $goal',
       days: days,
       note: json['note']?.toString() ?? 'Plan utworzony przez backend AI.',
+      goal: normalizeWorkoutPlanGoal(goal),
+      isActive: true,
     );
   }
 

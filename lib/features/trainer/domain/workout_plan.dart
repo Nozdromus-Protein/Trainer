@@ -4,24 +4,32 @@ class WorkoutPlan {
     required this.name,
     required this.days,
     required this.note,
+    this.goal = 'Sylwetka',
+    this.isActive = false,
   });
 
   final String id;
   final String name;
   final List<WorkoutDay> days;
   final String note;
+  final String goal;
+  final bool isActive;
 
   WorkoutPlan copyWith({
     String? id,
     String? name,
     List<WorkoutDay>? days,
     String? note,
+    String? goal,
+    bool? isActive,
   }) {
     return WorkoutPlan(
       id: id ?? this.id,
       name: name ?? this.name,
       days: days ?? this.days,
       note: note ?? this.note,
+      goal: goal ?? this.goal,
+      isActive: isActive ?? this.isActive,
     );
   }
 
@@ -30,6 +38,8 @@ class WorkoutPlan {
         'name': name,
         'days': days.map((day) => day.toJson()).toList(),
         'note': note,
+        'goal': goal,
+        'isActive': isActive,
       };
 
   factory WorkoutPlan.fromJson(Map<String, dynamic> json) => WorkoutPlan(
@@ -43,7 +53,41 @@ class WorkoutPlan {
             )
             .toList(),
         note: json['note']?.toString() ?? '',
+        goal: normalizeWorkoutPlanGoal(json['goal']?.toString() ?? ''),
+        isActive: json['isActive'] as bool? ?? false,
       );
+}
+
+const List<String> workoutPlanGoals = [
+  'Masa',
+  'Redukcja',
+  'Siła',
+  'Kondycja',
+  'Sylwetka',
+];
+
+String normalizeWorkoutPlanGoal(String value) {
+  final normalized = value.trim().toLowerCase();
+  if (normalized.contains('masa') ||
+      normalized.contains('hipert') ||
+      normalized.contains('mięś') ||
+      normalized.contains('mies')) {
+    return 'Masa';
+  }
+  if (normalized.contains('redu') ||
+      normalized.contains('spal') ||
+      normalized.contains('fat')) {
+    return 'Redukcja';
+  }
+  if (normalized.contains('sił') || normalized.contains('sil')) {
+    return 'Siła';
+  }
+  if (normalized.contains('kond') ||
+      normalized.contains('wydol') ||
+      normalized.contains('cardio')) {
+    return 'Kondycja';
+  }
+  return 'Sylwetka';
 }
 
 class WorkoutDay {
@@ -94,6 +138,8 @@ class PlanItem {
     required this.reps,
     required this.durationSec,
     required this.note,
+    this.suggestedWeightKg = 0,
+    this.restSeconds = 90,
   });
 
   final String exerciseId;
@@ -101,6 +147,28 @@ class PlanItem {
   final int reps;
   final int durationSec;
   final String note;
+  final double suggestedWeightKg;
+  final int restSeconds;
+
+  PlanItem copyWith({
+    String? exerciseId,
+    int? sets,
+    int? reps,
+    int? durationSec,
+    String? note,
+    double? suggestedWeightKg,
+    int? restSeconds,
+  }) {
+    return PlanItem(
+      exerciseId: exerciseId ?? this.exerciseId,
+      sets: sets ?? this.sets,
+      reps: reps ?? this.reps,
+      durationSec: durationSec ?? this.durationSec,
+      note: note ?? this.note,
+      suggestedWeightKg: suggestedWeightKg ?? this.suggestedWeightKg,
+      restSeconds: restSeconds ?? this.restSeconds,
+    );
+  }
 
   Map<String, dynamic> toJson() => {
         'exerciseId': exerciseId,
@@ -108,6 +176,8 @@ class PlanItem {
         'reps': reps,
         'durationSec': durationSec,
         'note': note,
+        'suggestedWeightKg': suggestedWeightKg,
+        'restSeconds': restSeconds,
       };
 
   factory PlanItem.fromJson(Map<String, dynamic> json) => PlanItem(
@@ -116,5 +186,7 @@ class PlanItem {
         reps: (json['reps'] as num?)?.toInt() ?? 10,
         durationSec: (json['durationSec'] as num?)?.toInt() ?? 0,
         note: json['note']?.toString() ?? '',
+        suggestedWeightKg: (json['suggestedWeightKg'] as num?)?.toDouble() ?? 0,
+        restSeconds: (json['restSeconds'] as num?)?.toInt() ?? 90,
       );
 }

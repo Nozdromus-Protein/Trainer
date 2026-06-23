@@ -94,6 +94,8 @@ void main() {
         id: 'plan-1',
         name: 'Plan testowy',
         note: 'Lokalny',
+        goal: 'Siła',
+        isActive: true,
         days: [
           WorkoutDay(
             weekday: DateTime.monday,
@@ -105,6 +107,8 @@ void main() {
                 reps: 12,
                 durationSec: 0,
                 note: '',
+                suggestedWeightKg: 42.5,
+                restSeconds: 120,
               ),
             ],
           ),
@@ -115,6 +119,10 @@ void main() {
 
       expect(restored.days, hasLength(1));
       expect(restored.days.single.items.single.exerciseId, 'pushup');
+      expect(restored.goal, 'Siła');
+      expect(restored.isActive, isTrue);
+      expect(restored.days.single.items.single.suggestedWeightKg, 42.5);
+      expect(restored.days.single.items.single.restSeconds, 120);
     });
   });
 }
