@@ -1,3 +1,4 @@
+export 'active_workout_session.dart';
 export 'exercise.dart';
 export 'exercise_library_preferences.dart';
 export 'trainer_enums.dart';

@@ -14,6 +14,10 @@ class WorkoutSession {
     required this.note,
     required this.aiConfidence,
     this.workoutSets = const [],
+    this.sessionId = '',
+    this.sessionName = '',
+    this.sessionStartedAt,
+    this.sessionEndedAt,
   });
 
   final String id;
@@ -28,6 +32,10 @@ class WorkoutSession {
   final String note;
   final double aiConfidence;
   final List<WorkoutSet> workoutSets;
+  final String sessionId;
+  final String sessionName;
+  final DateTime? sessionStartedAt;
+  final DateTime? sessionEndedAt;
 
   double get volume => workoutSets.isEmpty
       ? sets * reps * weightKg
@@ -49,6 +57,10 @@ class WorkoutSession {
         'aiConfidence': aiConfidence,
         'workoutSets':
             workoutSets.map((workoutSet) => workoutSet.toJson()).toList(),
+        'sessionId': sessionId,
+        'sessionName': sessionName,
+        'sessionStartedAt': sessionStartedAt?.toIso8601String(),
+        'sessionEndedAt': sessionEndedAt?.toIso8601String(),
       };
 
   factory WorkoutSession.fromJson(Map<String, dynamic> json) => WorkoutSession(
@@ -71,6 +83,12 @@ class WorkoutSession {
               (value) => WorkoutSet.fromJson(Map<String, dynamic>.from(value)),
             )
             .toList(),
+        sessionId: json['sessionId']?.toString() ?? '',
+        sessionName: json['sessionName']?.toString() ?? '',
+        sessionStartedAt:
+            DateTime.tryParse(json['sessionStartedAt']?.toString() ?? ''),
+        sessionEndedAt:
+            DateTime.tryParse(json['sessionEndedAt']?.toString() ?? ''),
       );
 }
 
@@ -88,6 +106,10 @@ class WorkoutLog extends WorkoutSession {
     required super.note,
     required super.aiConfidence,
     super.workoutSets,
+    super.sessionId,
+    super.sessionName,
+    super.sessionStartedAt,
+    super.sessionEndedAt,
   });
 
   WorkoutLog copyWith({
@@ -103,6 +125,10 @@ class WorkoutLog extends WorkoutSession {
     String? note,
     double? aiConfidence,
     List<WorkoutSet>? workoutSets,
+    String? sessionId,
+    String? sessionName,
+    DateTime? sessionStartedAt,
+    DateTime? sessionEndedAt,
   }) {
     return WorkoutLog(
       id: id ?? this.id,
@@ -117,6 +143,10 @@ class WorkoutLog extends WorkoutSession {
       note: note ?? this.note,
       aiConfidence: aiConfidence ?? this.aiConfidence,
       workoutSets: workoutSets ?? this.workoutSets,
+      sessionId: sessionId ?? this.sessionId,
+      sessionName: sessionName ?? this.sessionName,
+      sessionStartedAt: sessionStartedAt ?? this.sessionStartedAt,
+      sessionEndedAt: sessionEndedAt ?? this.sessionEndedAt,
     );
   }
 
@@ -135,6 +165,10 @@ class WorkoutLog extends WorkoutSession {
       note: session.note,
       aiConfidence: session.aiConfidence,
       workoutSets: session.workoutSets,
+      sessionId: session.sessionId,
+      sessionName: session.sessionName,
+      sessionStartedAt: session.sessionStartedAt,
+      sessionEndedAt: session.sessionEndedAt,
     );
   }
 }

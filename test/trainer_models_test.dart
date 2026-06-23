@@ -124,5 +124,45 @@ void main() {
       expect(restored.days.single.items.single.suggestedWeightKg, 42.5);
       expect(restored.days.single.items.single.restSeconds, 120);
     });
+
+    test('ActiveWorkoutSession restores completed sets and progress', () {
+      final session = ActiveWorkoutSession(
+        id: 'active-1',
+        planId: 'plan-1',
+        planName: 'Plan testowy',
+        weekday: DateTime.monday,
+        dayTitle: 'Góra',
+        startedAt: DateTime(2026, 6, 23, 18),
+        currentExerciseIndex: 0,
+        exercises: const [
+          ActiveWorkoutExercise(
+            exerciseId: 'pushup',
+            plannedSets: 3,
+            plannedReps: 12,
+            suggestedWeightKg: 10,
+            restSeconds: 90,
+            note: '',
+            completedSets: [
+              WorkoutSet(
+                id: 'set-1',
+                order: 1,
+                repetitions: 12,
+                weightKg: 10,
+                durationSec: 0,
+                rpe: 8,
+                isCompleted: true,
+              ),
+            ],
+          ),
+        ],
+      );
+
+      final restored = ActiveWorkoutSession.fromJson(session.toJson());
+
+      expect(restored.completedSetCount, 1);
+      expect(restored.completedExerciseCount, 1);
+      expect(restored.volume, 120);
+      expect(restored.averageRpe, 8);
+    });
   });
 }

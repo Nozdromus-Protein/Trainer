@@ -57,6 +57,27 @@ void main() {
         hiddenExerciseIds: {'squat'},
       ),
     );
+    await repository.saveActiveWorkoutSession(
+      ActiveWorkoutSession(
+        id: 'active-1',
+        planId: 'plan-1',
+        planName: 'Plan lokalny',
+        weekday: DateTime.monday,
+        dayTitle: 'Góra',
+        startedAt: DateTime(2026, 6, 23, 18),
+        currentExerciseIndex: 0,
+        exercises: const [
+          ActiveWorkoutExercise(
+            exerciseId: 'squat',
+            plannedSets: 3,
+            plannedReps: 10,
+            suggestedWeightKg: 40,
+            restSeconds: 90,
+            note: '',
+          ),
+        ],
+      ),
+    );
     final restored = await repository.load();
 
     expect(restored.sessions.single.note, 'Test lokalnego zapisu');
@@ -69,6 +90,11 @@ void main() {
     expect(
       restored.exerciseLibraryPreferences.hiddenExerciseIds,
       contains('squat'),
+    );
+    expect(restored.activeWorkoutSession?.id, 'active-1');
+    expect(
+      restored.activeWorkoutSession?.exercises.single.suggestedWeightKg,
+      40,
     );
   });
 }

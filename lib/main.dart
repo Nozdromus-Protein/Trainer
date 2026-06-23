@@ -151,6 +151,7 @@ class AppStore extends ChangeNotifier {
   final List<WorkoutPlan> plans = [];
   final List<Exercise> customExercises = [];
   ExerciseLibraryPreferences exerciseLibraryPreferences = const ExerciseLibraryPreferences();
+  ActiveWorkoutSession? activeWorkoutSession;
   AppSettings settings = AppSettings.defaults();
   DateTime selectedDate = DateTime.now();
   String? lastAiMessage;
@@ -170,6 +171,11 @@ class AppStore extends ChangeNotifier {
       ..clear()
       ..addAll(trainerData.customExercises);
     exerciseLibraryPreferences = trainerData.exerciseLibraryPreferences;
+    activeWorkoutSession = trainerData.activeWorkoutSession;
+    if (activeWorkoutSession?.exercises.isEmpty ?? false) {
+      activeWorkoutSession = null;
+      await saveActiveWorkoutSession();
+    }
 
     final prefs = await SharedPreferences.getInstance();
     final hasStoredPlans = prefs.containsKey(TrainerLocalRepository.plansKey);
@@ -204,6 +210,7 @@ class AppStore extends ChangeNotifier {
     await saveSettings();
     await saveCustomExercises();
     await saveExerciseLibraryPreferences();
+    await saveActiveWorkoutSession();
   }
 
   Future<void> saveLogs() async {
@@ -381,6 +388,10 @@ class AppStore extends ChangeNotifier {
     );
   }
 
+  Future<void> saveActiveWorkoutSession() async {
+    await _trainerRepository.saveActiveWorkoutSession(activeWorkoutSession);
+  }
+
   Future<void> addCustomExercise(Exercise exercise) async {
     final cleaned = exercise.copyWith(source: exercise.source.isEmpty ? 'wger' : exercise.source);
     final index = customExercises.indexWhere((e) => e.id == cleaned.id);
@@ -495,6 +506,182 @@ class AppStore extends ChangeNotifier {
     logs.removeWhere((e) => e.id == id);
     await saveLogs();
     notifyListeners();
+  }
+
+  Future<void> deleteLogsBySession(String sessionId) async {
+    logs.removeWhere((log) => log.sessionId == sessionId);
+    await saveLogs();
+    notifyListeners();
+  }
+
+  Future<bool> startActiveWorkout({
+    required WorkoutPlan plan,
+    required WorkoutDay day,
+  }) async {
+    if (day.items.isEmpty) return false;
+    activeWorkoutSession = ActiveWorkoutSession(
+      id: 'workout_${idNow()}',
+      planId: plan.id,
+      planName: plan.name,
+      weekday: day.weekday,
+      dayTitle: day.title,
+      startedAt: DateTime.now(),
+      currentExerciseIndex: 0,
+      exercises: day.items
+          .map(
+            (item) => ActiveWorkoutExercise(
+              exerciseId: item.exerciseId,
+              plannedSets: item.sets,
+              plannedReps: item.reps,
+              suggestedWeightKg: item.suggestedWeightKg,
+              restSeconds: item.restSeconds,
+              note: item.note,
+            ),
+          )
+          .toList(),
+    );
+    await saveActiveWorkoutSession();
+    notifyListeners();
+    return true;
+  }
+
+  Future<void> selectActiveWorkoutExercise(int index) async {
+    final session = activeWorkoutSession;
+    if (session == null || session.exercises.isEmpty) return;
+    activeWorkoutSession = session.copyWith(
+      currentExerciseIndex: index.clamp(0, session.exercises.length - 1),
+    );
+    await saveActiveWorkoutSession();
+    notifyListeners();
+  }
+
+  Future<bool> saveActiveWorkoutSet({
+    required double weightKg,
+    required int repetitions,
+    required int rpe,
+  }) async {
+    final session = activeWorkoutSession;
+    final exercise = session?.currentExercise;
+    if (session == null || exercise == null) return false;
+    if (exercise.completedSets.length >= exercise.plannedSets) return false;
+    final exercises = [...session.exercises];
+    final index = session.currentExerciseIndex;
+    exercises[index] = exercise.copyWith(
+      completedSets: [
+        ...exercise.completedSets,
+        WorkoutSet(
+          id: 'set_${idNow()}',
+          order: exercise.completedSets.length + 1,
+          repetitions: repetitions,
+          weightKg: weightKg,
+          durationSec: 0,
+          rpe: rpe,
+          isCompleted: true,
+        ),
+      ],
+      isSkipped: false,
+    );
+    activeWorkoutSession = session.copyWith(exercises: exercises);
+    await saveActiveWorkoutSession();
+    notifyListeners();
+    return true;
+  }
+
+  Future<void> moveToNextActiveExercise({bool skipCurrent = false}) async {
+    final session = activeWorkoutSession;
+    if (session == null || session.exercises.isEmpty) return;
+    final exercises = [...session.exercises];
+    if (skipCurrent) {
+      final current = exercises[session.currentExerciseIndex];
+      exercises[session.currentExerciseIndex] = current.copyWith(isSkipped: true);
+    }
+    final nextIndex = math.min(
+      session.currentExerciseIndex + 1,
+      session.exercises.length - 1,
+    );
+    activeWorkoutSession = session.copyWith(
+      exercises: exercises,
+      currentExerciseIndex: nextIndex,
+    );
+    await saveActiveWorkoutSession();
+    notifyListeners();
+  }
+
+  Future<void> discardActiveWorkout() async {
+    activeWorkoutSession = null;
+    await saveActiveWorkoutSession();
+    notifyListeners();
+  }
+
+  Future<CompletedWorkoutSummary?> finishActiveWorkout() async {
+    final session = activeWorkoutSession;
+    if (session == null || session.completedSetCount == 0) return null;
+    final endedAt = DateTime.now();
+    final performed = session.exercises.where((exercise) => exercise.completedSets.isNotEmpty).toList();
+    final durationSeconds = math.max(
+      0,
+      endedAt.difference(session.startedAt).inSeconds,
+    );
+    final baseDuration = performed.isEmpty ? 0 : durationSeconds ~/ performed.length;
+    final durationRemainder = performed.isEmpty ? 0 : durationSeconds % performed.length;
+    final sessionName = '${session.planName} · ${session.dayTitle}';
+    final completedLogs = <WorkoutLog>[];
+
+    for (var index = 0; index < performed.length; index++) {
+      final activeExercise = performed[index];
+      final exercise = ExerciseRepo.byId(
+        activeExercise.exerciseId,
+        customExercises,
+      );
+      final sets = activeExercise.completedSets;
+      final assignedDuration = baseDuration + (index < durationRemainder ? 1 : 0);
+      final averageReps = (sets.fold<int>(0, (sum, set) => sum + set.repetitions) / sets.length).round();
+      final averageWeight = sets.fold<double>(0, (sum, set) => sum + set.weightKg) / sets.length;
+      final averageRpe = (sets.fold<int>(0, (sum, set) => sum + set.rpe) / sets.length).round();
+      final minutes = assignedDuration / 60;
+      completedLogs.add(
+        WorkoutLog(
+          id: '${session.id}_${activeExercise.exerciseId}',
+          exerciseId: activeExercise.exerciseId,
+          date: endedAt,
+          sets: sets.length,
+          reps: averageReps,
+          weightKg: averageWeight,
+          durationSec: assignedDuration,
+          rpe: averageRpe,
+          calories: estimateCalories(
+            met: exercise.met,
+            weightKg: settings.bodyWeightKg,
+            minutes: minutes,
+          ),
+          note: activeExercise.note,
+          aiConfidence: 0,
+          workoutSets: sets,
+          sessionId: session.id,
+          sessionName: sessionName,
+          sessionStartedAt: session.startedAt,
+          sessionEndedAt: endedAt,
+        ),
+      );
+    }
+
+    logs.removeWhere((log) => log.sessionId == session.id);
+    logs.insertAll(0, completedLogs);
+    await saveLogs();
+    final summary = CompletedWorkoutSummary(
+      sessionId: session.id,
+      name: sessionName,
+      startedAt: session.startedAt,
+      endedAt: endedAt,
+      exerciseCount: session.completedExerciseCount,
+      setCount: session.completedSetCount,
+      volume: session.volume,
+      averageRpe: session.averageRpe,
+    );
+    activeWorkoutSession = null;
+    await saveActiveWorkoutSession();
+    notifyListeners();
+    return summary;
   }
 
   List<WorkoutLog> logsForDay(DateTime day) {
@@ -2085,6 +2272,7 @@ class HistoryPage extends StatelessWidget {
   Widget build(BuildContext context) {
     final store = AppScope.of(context);
     final logs = [...store.logs]..sort((a, b) => b.date.compareTo(a.date));
+    final entries = _groupWorkoutHistory(logs);
     return PageFrame(
       title: 'Historia',
       subtitle: 'Wszystkie treningi zapisane lokalnie na urządzeniu',
@@ -2133,22 +2321,124 @@ class HistoryPage extends StatelessWidget {
           : Column(
               crossAxisAlignment: CrossAxisAlignment.stretch,
               children: [
-                for (var index = 0; index < logs.length; index++) ...[
-                  if (index == 0 || !sameDay(logs[index - 1].date, logs[index].date)) ...[
+                for (var index = 0; index < entries.length; index++) ...[
+                  if (index == 0 || !sameDay(entries[index - 1].date, entries[index].date)) ...[
                     if (index > 0) const SizedBox(height: 8),
                     Padding(
                       padding: const EdgeInsets.fromLTRB(4, 8, 4, 8),
                       child: Text(
-                        '${weekdayName(logs[index].date.weekday)} · ${shortDate(logs[index].date)}',
+                        '${weekdayName(entries[index].date.weekday)} · ${shortDate(entries[index].date)}',
                         style: Theme.of(context).textTheme.titleSmall?.copyWith(fontWeight: FontWeight.w900),
                       ),
                     ),
                   ],
-                  WorkoutLogCard(log: logs[index]),
+                  if (entries[index].isPlannedSession) WorkoutHistorySessionCard(logs: entries[index].logs) else WorkoutLogCard(log: entries[index].logs.single),
                   const SizedBox(height: 10),
                 ],
               ],
             ),
+    );
+  }
+}
+
+class _WorkoutHistoryEntry {
+  const _WorkoutHistoryEntry(this.logs);
+
+  final List<WorkoutLog> logs;
+
+  DateTime get date => logs.first.date;
+  bool get isPlannedSession => logs.first.sessionId.isNotEmpty;
+}
+
+List<_WorkoutHistoryEntry> _groupWorkoutHistory(List<WorkoutLog> sortedLogs) {
+  final groups = <String, List<WorkoutLog>>{};
+  for (final log in sortedLogs) {
+    final key = log.sessionId.isEmpty ? 'log_${log.id}' : 'session_${log.sessionId}';
+    groups.putIfAbsent(key, () => <WorkoutLog>[]).add(log);
+  }
+  return groups.values.map(_WorkoutHistoryEntry.new).toList();
+}
+
+class WorkoutHistorySessionCard extends StatelessWidget {
+  const WorkoutHistorySessionCard({super.key, required this.logs});
+
+  final List<WorkoutLog> logs;
+
+  @override
+  Widget build(BuildContext context) {
+    final store = AppScope.of(context);
+    final theme = Theme.of(context);
+    final first = logs.first;
+    final exerciseNames = logs.map((log) => log.exerciseFrom(store.customExercises).name).toList();
+    final setCount = logs.fold<int>(0, (sum, log) => sum + log.sets);
+    final volume = logs.fold<double>(0, (sum, log) => sum + log.volume);
+    final rpeSets = logs.expand((log) => log.workoutSets).where((set) => set.rpe > 0).toList();
+    final averageRpe = rpeSets.isEmpty ? 0.0 : rpeSets.fold<int>(0, (sum, set) => sum + set.rpe) / rpeSets.length;
+    final duration = first.sessionStartedAt != null && first.sessionEndedAt != null
+        ? first.sessionEndedAt!.difference(first.sessionStartedAt!)
+        : Duration(seconds: logs.fold<int>(0, (sum, log) => sum + log.durationSec));
+    return Card(
+      child: Padding(
+        padding: const EdgeInsets.all(16),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.stretch,
+          children: [
+            Row(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                CircleAvatar(
+                  backgroundColor: theme.colorScheme.primaryContainer,
+                  child: Icon(Icons.flag_rounded, color: theme.colorScheme.primary),
+                ),
+                const SizedBox(width: 12),
+                Expanded(
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Text(first.sessionName.isEmpty ? 'Trening z planu' : first.sessionName,
+                          maxLines: 2, overflow: TextOverflow.ellipsis, style: theme.textTheme.titleMedium?.copyWith(fontWeight: FontWeight.w900)),
+                      const SizedBox(height: 4),
+                      Text(exerciseNames.join(' · '), maxLines: 2, overflow: TextOverflow.ellipsis, style: theme.textTheme.bodySmall?.copyWith(color: theme.colorScheme.onSurfaceVariant)),
+                    ],
+                  ),
+                ),
+                PopupMenuButton<String>(
+                  onSelected: (value) async {
+                    if (value != 'delete') return;
+                    final confirmed = await showDialog<bool>(
+                      context: context,
+                      builder: (dialogContext) => AlertDialog(
+                        title: const Text('Usunąć sesję?'),
+                        content: const Text('Wszystkie ćwiczenia i serie tego treningu zostaną usunięte z historii.'),
+                        actions: [
+                          TextButton(onPressed: () => Navigator.pop(dialogContext, false), child: const Text('Anuluj')),
+                          FilledButton(onPressed: () => Navigator.pop(dialogContext, true), child: const Text('Usuń')),
+                        ],
+                      ),
+                    );
+                    if (confirmed == true) await store.deleteLogsBySession(first.sessionId);
+                  },
+                  itemBuilder: (_) => const [
+                    PopupMenuItem(value: 'delete', child: Text('Usuń sesję')),
+                  ],
+                ),
+              ],
+            ),
+            const SizedBox(height: 14),
+            Wrap(
+              spacing: 8,
+              runSpacing: 8,
+              children: [
+                MiniTag(text: formatWorkoutDuration(duration)),
+                MiniTag(text: '${logs.length} ćwiczeń'),
+                MiniTag(text: '$setCount serii'),
+                MiniTag(text: '${volume.round()} kg'),
+                MiniTag(text: averageRpe == 0 ? 'RPE —' : 'RPE ${averageRpe.toStringAsFixed(1)}'),
+              ],
+            ),
+          ],
+        ),
+      ),
     );
   }
 }
@@ -2174,6 +2464,30 @@ class TodayPage extends StatelessWidget {
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.stretch,
         children: [
+          if (store.activeWorkoutSession != null) ...[
+            Card(
+              color: Theme.of(context).colorScheme.primaryContainer.withValues(alpha: 0.45),
+              child: Padding(
+                padding: const EdgeInsets.all(16),
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.stretch,
+                  children: [
+                    Text('Trening w toku', style: Theme.of(context).textTheme.labelLarge?.copyWith(color: Theme.of(context).colorScheme.primary, fontWeight: FontWeight.w900)),
+                    const SizedBox(height: 4),
+                    Text('${store.activeWorkoutSession!.planName} · ${store.activeWorkoutSession!.dayTitle}',
+                        maxLines: 2, overflow: TextOverflow.ellipsis, style: Theme.of(context).textTheme.titleMedium?.copyWith(fontWeight: FontWeight.w900)),
+                    const SizedBox(height: 10),
+                    FilledButton.icon(
+                      onPressed: () => openActiveWorkoutPage(context),
+                      icon: const Icon(Icons.play_circle_outline_rounded),
+                      label: const Text('Wznów trening'),
+                    ),
+                  ],
+                ),
+              ),
+            ),
+            const SizedBox(height: 14),
+          ],
           DateSwitcher(date: day, onChanged: store.setSelectedDate),
           const SizedBox(height: 14),
           DailyHero(totals: totals),
@@ -4457,24 +4771,513 @@ class _ActivePlanSummary extends StatelessWidget {
       color: theme.colorScheme.primaryContainer.withValues(alpha: 0.45),
       child: Padding(
         padding: const EdgeInsets.all(18),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.stretch,
+          children: [
+            Row(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                CircleAvatar(
+                  backgroundColor: theme.colorScheme.primary,
+                  foregroundColor: theme.colorScheme.onPrimary,
+                  child: const Icon(Icons.bolt_rounded),
+                ),
+                const SizedBox(width: 12),
+                Expanded(
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Text('Aktywny plan', style: theme.textTheme.labelLarge?.copyWith(color: theme.colorScheme.primary, fontWeight: FontWeight.w900)),
+                      const SizedBox(height: 3),
+                      Text(plan.name, maxLines: 2, overflow: TextOverflow.ellipsis, style: theme.textTheme.titleLarge?.copyWith(fontWeight: FontWeight.w900)),
+                      const SizedBox(height: 4),
+                      Text('${plan.goal} · ${plan.days.length} dni · $exerciseCount ćwiczeń', style: theme.textTheme.bodyMedium?.copyWith(color: theme.colorScheme.onSurfaceVariant)),
+                    ],
+                  ),
+                ),
+              ],
+            ),
+            const SizedBox(height: 14),
+            FilledButton.icon(
+              onPressed: () => startWorkoutFromActivePlan(context, plan),
+              icon: Icon(AppScope.of(context).activeWorkoutSession == null ? Icons.play_arrow_rounded : Icons.play_circle_outline_rounded),
+              label: Text(AppScope.of(context).activeWorkoutSession == null ? 'Rozpocznij trening' : 'Wznów trening'),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+}
+
+enum _ActiveWorkoutConflictAction { resume, replace }
+
+Future<void> openActiveWorkoutPage(BuildContext context) async {
+  if (AppScope.read(context).activeWorkoutSession == null) return;
+  await Navigator.of(context).push(
+    MaterialPageRoute<void>(
+      builder: (_) => const ActiveWorkoutPage(),
+    ),
+  );
+}
+
+Future<void> startWorkoutFromActivePlan(
+  BuildContext context,
+  WorkoutPlan plan,
+) async {
+  final store = AppScope.read(context);
+  if (store.activeWorkoutSession != null) {
+    await openActiveWorkoutPage(context);
+    return;
+  }
+  WorkoutDay? today;
+  for (final day in plan.days) {
+    if (day.weekday == DateTime.now().weekday && day.items.isNotEmpty) {
+      today = day;
+      break;
+    }
+  }
+  if (today != null) {
+    await startWorkoutForDay(context, plan: plan, day: today);
+    return;
+  }
+  final availableDays = plan.days.where((day) => day.items.isNotEmpty).toList();
+  if (availableDays.isEmpty) {
+    showError(context, 'Dodaj ćwiczenia do planu przed rozpoczęciem treningu.');
+    return;
+  }
+  final selectedDay = await showModalBottomSheet<WorkoutDay>(
+    context: context,
+    useSafeArea: true,
+    showDragHandle: true,
+    builder: (sheetContext) => Padding(
+      padding: const EdgeInsets.fromLTRB(16, 0, 16, 20),
+      child: Column(
+        mainAxisSize: MainAxisSize.min,
+        crossAxisAlignment: CrossAxisAlignment.stretch,
+        children: [
+          Text('Wybierz dzień treningowy', style: Theme.of(sheetContext).textTheme.titleLarge?.copyWith(fontWeight: FontWeight.w900)),
+          const SizedBox(height: 10),
+          ConstrainedBox(
+            constraints: BoxConstraints(maxHeight: MediaQuery.sizeOf(sheetContext).height * 0.6),
+            child: ListView(
+              shrinkWrap: true,
+              children: [
+                for (final day in availableDays)
+                  ListTile(
+                    leading: CircleAvatar(child: Text('${day.weekday}')),
+                    title: Text(weekdayName(day.weekday)),
+                    subtitle: Text('${day.title} · ${day.items.length} ćwiczeń'),
+                    trailing: const Icon(Icons.play_arrow_rounded),
+                    onTap: () => Navigator.pop(sheetContext, day),
+                  ),
+              ],
+            ),
+          ),
+        ],
+      ),
+    ),
+  );
+  if (context.mounted && selectedDay != null) {
+    await startWorkoutForDay(context, plan: plan, day: selectedDay);
+  }
+}
+
+Future<void> startWorkoutForDay(
+  BuildContext context, {
+  required WorkoutPlan plan,
+  required WorkoutDay day,
+}) async {
+  final store = AppScope.read(context);
+  if (day.items.isEmpty) {
+    showError(context, 'Ten dzień nie ma jeszcze ćwiczeń.');
+    return;
+  }
+  final existing = store.activeWorkoutSession;
+  if (existing != null) {
+    final action = await showDialog<_ActiveWorkoutConflictAction>(
+      context: context,
+      builder: (dialogContext) => AlertDialog(
+        title: const Text('Trening już trwa'),
+        content: Text('Masz zapisaną sesję „${existing.planName} · ${existing.dayTitle}”. Możesz ją wznowić albo potwierdzić rozpoczęcie nowej.'),
+        actions: [
+          TextButton(onPressed: () => Navigator.pop(dialogContext), child: const Text('Anuluj')),
+          OutlinedButton(
+            onPressed: () => Navigator.pop(dialogContext, _ActiveWorkoutConflictAction.resume),
+            child: const Text('Wznów'),
+          ),
+          FilledButton(
+            onPressed: () => Navigator.pop(dialogContext, _ActiveWorkoutConflictAction.replace),
+            child: const Text('Porzuć i rozpocznij'),
+          ),
+        ],
+      ),
+    );
+    if (!context.mounted || action == null) return;
+    if (action == _ActiveWorkoutConflictAction.resume) {
+      await openActiveWorkoutPage(context);
+      return;
+    }
+    await store.discardActiveWorkout();
+  }
+  final started = await store.startActiveWorkout(plan: plan, day: day);
+  if (!context.mounted) return;
+  if (!started) {
+    showError(context, 'Nie udało się rozpocząć pustego treningu.');
+    return;
+  }
+  await openActiveWorkoutPage(context);
+}
+
+class ActiveWorkoutPage extends StatefulWidget {
+  const ActiveWorkoutPage({super.key});
+
+  @override
+  State<ActiveWorkoutPage> createState() => _ActiveWorkoutPageState();
+}
+
+class _ActiveWorkoutPageState extends State<ActiveWorkoutPage> {
+  final weight = TextEditingController();
+  final repetitions = TextEditingController();
+  Timer? timer;
+  int rpe = 7;
+  String? loadedExerciseId;
+  int? loadedExerciseIndex;
+  bool leaving = false;
+
+  @override
+  void initState() {
+    super.initState();
+    timer = Timer.periodic(const Duration(seconds: 1), (_) {
+      if (mounted) setState(() {});
+    });
+  }
+
+  @override
+  void dispose() {
+    timer?.cancel();
+    weight.dispose();
+    repetitions.dispose();
+    super.dispose();
+  }
+
+  void syncFields(ActiveWorkoutSession session) {
+    final exercise = session.currentExercise;
+    if (exercise == null) return;
+    if (loadedExerciseId == exercise.exerciseId && loadedExerciseIndex == session.currentExerciseIndex) return;
+    loadedExerciseId = exercise.exerciseId;
+    loadedExerciseIndex = session.currentExerciseIndex;
+    final lastSet = exercise.completedSets.isEmpty ? null : exercise.completedSets.last;
+    weight.text = _formatPlanWeight(lastSet?.weightKg ?? exercise.suggestedWeightKg);
+    repetitions.text = '${lastSet?.repetitions ?? exercise.plannedReps}';
+    rpe = lastSet?.rpe ?? 7;
+  }
+
+  Future<bool> confirmLeave() async {
+    if (leaving) return true;
+    final confirmed = await showDialog<bool>(
+      context: context,
+      builder: (dialogContext) => AlertDialog(
+        title: const Text('Przerwać trening?'),
+        content: const Text('Zapisane serie pozostaną na urządzeniu. Trening będzie można wznowić później.'),
+        actions: [
+          TextButton(onPressed: () => Navigator.pop(dialogContext, false), child: const Text('Zostań')),
+          FilledButton(onPressed: () => Navigator.pop(dialogContext, true), child: const Text('Wyjdź i zachowaj')),
+        ],
+      ),
+    );
+    return confirmed == true;
+  }
+
+  Future<void> leaveWorkout() async {
+    if (!await confirmLeave() || !mounted) return;
+    leaving = true;
+    Navigator.of(context).pop();
+  }
+
+  Future<void> saveSet(AppStore store) async {
+    final parsedWeight = double.tryParse(weight.text.trim().replaceAll(',', '.'));
+    final parsedRepetitions = int.tryParse(repetitions.text.trim());
+    if (parsedWeight == null || parsedWeight < 0 || parsedWeight > 9999) {
+      showError(context, 'Podaj poprawny ciężar.');
+      return;
+    }
+    if (parsedRepetitions == null || parsedRepetitions < 1 || parsedRepetitions > 999) {
+      showError(context, 'Powtórzenia muszą mieścić się w zakresie 1–999.');
+      return;
+    }
+    final saved = await store.saveActiveWorkoutSet(
+      weightKg: parsedWeight,
+      repetitions: parsedRepetitions,
+      rpe: rpe,
+    );
+    if (mounted && !saved) showError(context, 'Wszystkie zaplanowane serie są już zapisane.');
+  }
+
+  Future<void> finishWorkout(AppStore store) async {
+    final session = store.activeWorkoutSession;
+    if (session == null) return;
+    if (session.completedSetCount == 0) {
+      showError(context, 'Zapisz przynajmniej jedną serię przed zakończeniem treningu.');
+      return;
+    }
+    final confirmed = await showDialog<bool>(
+      context: context,
+      builder: (dialogContext) => AlertDialog(
+        title: const Text('Zakończyć trening?'),
+        content: Text('Zapiszesz ${session.completedSetCount} serii w historii treningów.'),
+        actions: [
+          TextButton(onPressed: () => Navigator.pop(dialogContext, false), child: const Text('Wróć')),
+          FilledButton(onPressed: () => Navigator.pop(dialogContext, true), child: const Text('Zakończ')),
+        ],
+      ),
+    );
+    if (confirmed != true) return;
+    final summary = await store.finishActiveWorkout();
+    if (!mounted || summary == null) return;
+    leaving = true;
+    await Navigator.of(context).pushReplacement(
+      MaterialPageRoute<void>(
+        builder: (_) => WorkoutSummaryPage(summary: summary),
+      ),
+    );
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final store = AppScope.of(context);
+    final session = store.activeWorkoutSession;
+    if (session == null || session.currentExercise == null) {
+      return const Scaffold(body: Center(child: Text('Brak aktywnego treningu')));
+    }
+    syncFields(session);
+    final activeExercise = session.currentExercise!;
+    final exercise = ExerciseRepo.byId(activeExercise.exerciseId, store.customExercises);
+    final elapsed = DateTime.now().difference(session.startedAt);
+    final setLimitReached = activeExercise.completedSets.length >= activeExercise.plannedSets;
+    final isLastExercise = session.currentExerciseIndex >= session.exercises.length - 1;
+
+    return PopScope(
+      canPop: leaving,
+      onPopInvokedWithResult: (didPop, _) async {
+        if (!didPop) await leaveWorkout();
+      },
+      child: Scaffold(
+        appBar: AppBar(
+          title: const Text('Aktywny trening'),
+          leading: IconButton(
+            tooltip: 'Wyjdź',
+            onPressed: leaveWorkout,
+            icon: const Icon(Icons.close_rounded),
+          ),
+        ),
+        body: SafeArea(
+          child: ListView(
+            padding: const EdgeInsets.fromLTRB(16, 8, 16, 28),
+            children: [
+              _ActiveWorkoutHeader(session: session, elapsed: elapsed),
+              const SizedBox(height: 12),
+              _CurrentExerciseCard(
+                exercise: exercise,
+                activeExercise: activeExercise,
+                position: session.currentExerciseIndex + 1,
+                total: session.exercises.length,
+              ),
+              const SizedBox(height: 12),
+              if (activeExercise.completedSets.isNotEmpty) ...[
+                _CompletedSetsCard(sets: activeExercise.completedSets),
+                const SizedBox(height: 12),
+              ],
+              Card(
+                child: Padding(
+                  padding: const EdgeInsets.all(16),
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.stretch,
+                    children: [
+                      Text('Nowa seria', style: Theme.of(context).textTheme.titleMedium?.copyWith(fontWeight: FontWeight.w900)),
+                      const SizedBox(height: 12),
+                      Row(
+                        children: [
+                          Expanded(
+                            child: TextField(
+                              controller: weight,
+                              keyboardType: const TextInputType.numberWithOptions(decimal: true),
+                              decoration: const InputDecoration(labelText: 'Ciężar (kg)'),
+                            ),
+                          ),
+                          const SizedBox(width: 10),
+                          Expanded(
+                            child: TextField(
+                              controller: repetitions,
+                              keyboardType: TextInputType.number,
+                              decoration: const InputDecoration(labelText: 'Powtórzenia'),
+                            ),
+                          ),
+                        ],
+                      ),
+                      const SizedBox(height: 10),
+                      DropdownButtonFormField<int>(
+                        key: ValueKey('${activeExercise.exerciseId}_${session.currentExerciseIndex}'),
+                        initialValue: rpe,
+                        decoration: const InputDecoration(labelText: 'RPE'),
+                        items: [
+                          for (var value = 1; value <= 10; value++) DropdownMenuItem(value: value, child: Text('$value / 10')),
+                        ],
+                        onChanged: (value) => setState(() => rpe = value ?? rpe),
+                      ),
+                      const SizedBox(height: 14),
+                      FilledButton.icon(
+                        onPressed: setLimitReached ? null : () => saveSet(store),
+                        icon: const Icon(Icons.check_rounded),
+                        label: Text(setLimitReached ? 'Wszystkie serie zapisane' : 'Zapisz serię'),
+                      ),
+                    ],
+                  ),
+                ),
+              ),
+              const SizedBox(height: 12),
+              LayoutBuilder(
+                builder: (context, constraints) {
+                  final next = FilledButton.tonalIcon(
+                    onPressed: isLastExercise
+                        ? null
+                        : () async {
+                            await store.moveToNextActiveExercise();
+                            final nextSession = store.activeWorkoutSession;
+                            if (nextSession != null) syncFields(nextSession);
+                          },
+                    icon: const Icon(Icons.arrow_forward_rounded),
+                    label: const Text('Następne ćwiczenie'),
+                  );
+                  final skip = OutlinedButton.icon(
+                    onPressed: activeExercise.isSkipped
+                        ? null
+                        : () async {
+                            await store.moveToNextActiveExercise(skipCurrent: true);
+                            final nextSession = store.activeWorkoutSession;
+                            if (nextSession != null) syncFields(nextSession);
+                          },
+                    icon: const Icon(Icons.skip_next_rounded),
+                    label: Text(activeExercise.isSkipped ? 'Ćwiczenie pominięte' : 'Pomiń ćwiczenie'),
+                  );
+                  if (constraints.maxWidth < 430) {
+                    return Column(
+                      crossAxisAlignment: CrossAxisAlignment.stretch,
+                      children: [next, const SizedBox(height: 8), skip],
+                    );
+                  }
+                  return Row(
+                    children: [
+                      Expanded(child: next),
+                      const SizedBox(width: 10),
+                      Expanded(child: skip),
+                    ],
+                  );
+                },
+              ),
+              const SizedBox(height: 18),
+              Text('Wszystkie ćwiczenia', style: Theme.of(context).textTheme.titleLarge?.copyWith(fontWeight: FontWeight.w900)),
+              const SizedBox(height: 10),
+              for (var index = 0; index < session.exercises.length; index++)
+                _ActiveWorkoutExerciseTile(
+                  activeExercise: session.exercises[index],
+                  exercise: ExerciseRepo.byId(session.exercises[index].exerciseId, store.customExercises),
+                  selected: index == session.currentExerciseIndex,
+                  onTap: () async {
+                    await store.selectActiveWorkoutExercise(index);
+                    final nextSession = store.activeWorkoutSession;
+                    if (nextSession != null) syncFields(nextSession);
+                  },
+                ),
+              const SizedBox(height: 12),
+              FilledButton.icon(
+                style: FilledButton.styleFrom(
+                  backgroundColor: Theme.of(context).colorScheme.error,
+                  foregroundColor: Theme.of(context).colorScheme.onError,
+                ),
+                onPressed: () => finishWorkout(store),
+                icon: const Icon(Icons.flag_rounded),
+                label: const Text('Zakończ trening'),
+              ),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+class _ActiveWorkoutHeader extends StatelessWidget {
+  const _ActiveWorkoutHeader({required this.session, required this.elapsed});
+
+  final ActiveWorkoutSession session;
+  final Duration elapsed;
+
+  @override
+  Widget build(BuildContext context) {
+    final theme = Theme.of(context);
+    final plannedSets = session.exercises.fold<int>(0, (sum, exercise) => sum + exercise.plannedSets);
+    final progress = plannedSets == 0 ? 0.0 : session.completedSetCount / plannedSets;
+    return Card(
+      color: theme.colorScheme.primaryContainer.withValues(alpha: 0.45),
+      child: Padding(
+        padding: const EdgeInsets.all(18),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.stretch,
+          children: [
+            Text(session.planName, maxLines: 2, overflow: TextOverflow.ellipsis, style: theme.textTheme.titleLarge?.copyWith(fontWeight: FontWeight.w900)),
+            const SizedBox(height: 4),
+            Text('${weekdayName(session.weekday)} · ${session.dayTitle}', style: theme.textTheme.bodyMedium?.copyWith(color: theme.colorScheme.onSurfaceVariant)),
+            const SizedBox(height: 14),
+            Row(
+              children: [
+                Expanded(child: Text('Czas ${formatWorkoutDuration(elapsed)}', style: theme.textTheme.labelLarge?.copyWith(fontWeight: FontWeight.w800))),
+                Text('${session.completedSetCount}/$plannedSets serii', style: theme.textTheme.labelLarge?.copyWith(fontWeight: FontWeight.w800)),
+              ],
+            ),
+            const SizedBox(height: 8),
+            LinearProgressIndicator(value: progress.clamp(0, 1)),
+          ],
+        ),
+      ),
+    );
+  }
+}
+
+class _CurrentExerciseCard extends StatelessWidget {
+  const _CurrentExerciseCard({
+    required this.exercise,
+    required this.activeExercise,
+    required this.position,
+    required this.total,
+  });
+
+  final Exercise exercise;
+  final ActiveWorkoutExercise activeExercise;
+  final int position;
+  final int total;
+
+  @override
+  Widget build(BuildContext context) {
+    final theme = Theme.of(context);
+    return Card(
+      child: Padding(
+        padding: const EdgeInsets.all(16),
         child: Row(
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
-            CircleAvatar(
-              backgroundColor: theme.colorScheme.primary,
-              foregroundColor: theme.colorScheme.onPrimary,
-              child: const Icon(Icons.bolt_rounded),
-            ),
+            SizedBox(width: 82, height: 82, child: ExerciseVisual(exercise: exercise)),
             const SizedBox(width: 12),
             Expanded(
               child: Column(
                 crossAxisAlignment: CrossAxisAlignment.start,
                 children: [
-                  Text('Aktywny plan', style: theme.textTheme.labelLarge?.copyWith(color: theme.colorScheme.primary, fontWeight: FontWeight.w900)),
+                  Text('Ćwiczenie $position z $total', style: theme.textTheme.labelMedium?.copyWith(color: theme.colorScheme.primary, fontWeight: FontWeight.w900)),
                   const SizedBox(height: 3),
-                  Text(plan.name, maxLines: 2, overflow: TextOverflow.ellipsis, style: theme.textTheme.titleLarge?.copyWith(fontWeight: FontWeight.w900)),
-                  const SizedBox(height: 4),
-                  Text('${plan.goal} · ${plan.days.length} dni · $exerciseCount ćwiczeń', style: theme.textTheme.bodyMedium?.copyWith(color: theme.colorScheme.onSurfaceVariant)),
+                  Text(exercise.name, maxLines: 2, overflow: TextOverflow.ellipsis, style: theme.textTheme.titleLarge?.copyWith(fontWeight: FontWeight.w900)),
+                  const SizedBox(height: 6),
+                  Text('${activeExercise.plannedSets} serie × ${activeExercise.plannedReps} powt. · ${activeExercise.restSeconds} s przerwy',
+                      style: theme.textTheme.bodySmall?.copyWith(color: theme.colorScheme.onSurfaceVariant)),
                 ],
               ),
             ),
@@ -4483,6 +5286,193 @@ class _ActivePlanSummary extends StatelessWidget {
       ),
     );
   }
+}
+
+class _CompletedSetsCard extends StatelessWidget {
+  const _CompletedSetsCard({required this.sets});
+
+  final List<WorkoutSet> sets;
+
+  @override
+  Widget build(BuildContext context) {
+    final theme = Theme.of(context);
+    return Card(
+      child: Padding(
+        padding: const EdgeInsets.all(16),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.stretch,
+          children: [
+            Text('Wykonane serie', style: theme.textTheme.titleMedium?.copyWith(fontWeight: FontWeight.w900)),
+            const SizedBox(height: 8),
+            for (final set in sets)
+              Padding(
+                padding: const EdgeInsets.symmetric(vertical: 5),
+                child: Row(
+                  children: [
+                    CircleAvatar(radius: 15, child: Text('${set.order}')),
+                    const SizedBox(width: 10),
+                    Expanded(child: Text('${_formatPlanWeight(set.weightKg)} kg × ${set.repetitions} powt.')),
+                    Text('RPE ${set.rpe}', style: theme.textTheme.labelLarge?.copyWith(fontWeight: FontWeight.w800)),
+                  ],
+                ),
+              ),
+          ],
+        ),
+      ),
+    );
+  }
+}
+
+class _ActiveWorkoutExerciseTile extends StatelessWidget {
+  const _ActiveWorkoutExerciseTile({
+    required this.activeExercise,
+    required this.exercise,
+    required this.selected,
+    required this.onTap,
+  });
+
+  final ActiveWorkoutExercise activeExercise;
+  final Exercise exercise;
+  final bool selected;
+  final VoidCallback onTap;
+
+  @override
+  Widget build(BuildContext context) {
+    final theme = Theme.of(context);
+    final complete = activeExercise.completedSets.length >= activeExercise.plannedSets;
+    return Card(
+      color: selected ? theme.colorScheme.primaryContainer.withValues(alpha: 0.5) : null,
+      margin: const EdgeInsets.only(bottom: 8),
+      child: ListTile(
+        onTap: onTap,
+        leading: Icon(
+          complete
+              ? Icons.check_circle_rounded
+              : activeExercise.isSkipped
+                  ? Icons.skip_next_rounded
+                  : Icons.radio_button_unchecked_rounded,
+          color: complete || selected ? theme.colorScheme.primary : theme.colorScheme.onSurfaceVariant,
+        ),
+        title: Text(exercise.name, maxLines: 2, overflow: TextOverflow.ellipsis),
+        subtitle: Text('${activeExercise.completedSets.length}/${activeExercise.plannedSets} serii', maxLines: 1),
+        trailing: selected ? const Icon(Icons.chevron_right_rounded) : null,
+      ),
+    );
+  }
+}
+
+class WorkoutSummaryPage extends StatelessWidget {
+  const WorkoutSummaryPage({super.key, required this.summary});
+
+  final CompletedWorkoutSummary summary;
+
+  @override
+  Widget build(BuildContext context) {
+    return Scaffold(
+      appBar: AppBar(
+        automaticallyImplyLeading: false,
+        title: const Text('Podsumowanie treningu'),
+      ),
+      body: SafeArea(
+        child: ListView(
+          padding: const EdgeInsets.fromLTRB(16, 16, 16, 28),
+          children: [
+            Icon(Icons.emoji_events_rounded, size: 72, color: Theme.of(context).colorScheme.primary),
+            const SizedBox(height: 12),
+            Text('Trening zakończony', textAlign: TextAlign.center, style: Theme.of(context).textTheme.headlineMedium?.copyWith(fontWeight: FontWeight.w900)),
+            const SizedBox(height: 6),
+            Text(summary.name, textAlign: TextAlign.center, style: Theme.of(context).textTheme.bodyLarge?.copyWith(color: Theme.of(context).colorScheme.onSurfaceVariant)),
+            const SizedBox(height: 20),
+            GridView.count(
+              crossAxisCount: 2,
+              shrinkWrap: true,
+              physics: const NeverScrollableScrollPhysics(),
+              mainAxisSpacing: 10,
+              crossAxisSpacing: 10,
+              childAspectRatio: 1.12,
+              children: [
+                _WorkoutSummaryStat(label: 'Czas', value: formatWorkoutDuration(summary.duration), icon: Icons.timer_outlined),
+                _WorkoutSummaryStat(label: 'Ćwiczenia', value: '${summary.exerciseCount}', icon: Icons.fitness_center_rounded),
+                _WorkoutSummaryStat(label: 'Serie', value: '${summary.setCount}', icon: Icons.repeat_rounded),
+                _WorkoutSummaryStat(label: 'Objętość', value: '${summary.volume.round()} kg', icon: Icons.monitor_weight_outlined),
+              ],
+            ),
+            const SizedBox(height: 10),
+            Card(
+              child: ListTile(
+                leading: const Icon(Icons.speed_rounded),
+                title: const Text('Średnie RPE'),
+                trailing: Text(summary.averageRpe == 0 ? '—' : summary.averageRpe.toStringAsFixed(1), style: Theme.of(context).textTheme.titleLarge?.copyWith(fontWeight: FontWeight.w900)),
+              ),
+            ),
+            const SizedBox(height: 18),
+            FilledButton.icon(
+              onPressed: () => Navigator.of(context).pop(),
+              icon: const Icon(Icons.check_rounded),
+              label: const Text('Gotowe'),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+}
+
+class _WorkoutSummaryStat extends StatelessWidget {
+  const _WorkoutSummaryStat({
+    required this.label,
+    required this.value,
+    required this.icon,
+  });
+
+  final String label;
+  final String value;
+  final IconData icon;
+
+  @override
+  Widget build(BuildContext context) {
+    final theme = Theme.of(context);
+    return Card(
+      child: Padding(
+        padding: const EdgeInsets.all(12),
+        child: Column(
+          mainAxisAlignment: MainAxisAlignment.center,
+          children: [
+            Icon(icon, color: theme.colorScheme.primary),
+            const SizedBox(height: 6),
+            Text(
+              value,
+              maxLines: 1,
+              overflow: TextOverflow.ellipsis,
+              style: theme.textTheme.titleLarge?.copyWith(
+                fontWeight: FontWeight.w900,
+              ),
+            ),
+            const SizedBox(height: 2),
+            Text(
+              label,
+              maxLines: 1,
+              overflow: TextOverflow.ellipsis,
+              style: theme.textTheme.bodySmall?.copyWith(
+                color: theme.colorScheme.onSurfaceVariant,
+              ),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+}
+
+String formatWorkoutDuration(Duration duration) {
+  final safeSeconds = math.max(0, duration.inSeconds);
+  final hours = safeSeconds ~/ 3600;
+  final minutes = (safeSeconds % 3600) ~/ 60;
+  final seconds = safeSeconds % 60;
+  if (hours > 0) {
+    return '${hours.toString().padLeft(2, '0')}:${minutes.toString().padLeft(2, '0')}:${seconds.toString().padLeft(2, '0')}';
+  }
+  return '${minutes.toString().padLeft(2, '0')}:${seconds.toString().padLeft(2, '0')}';
 }
 
 class WorkoutPlanCard extends StatelessWidget {
@@ -4659,6 +5649,12 @@ class WorkoutPlanDayCard extends StatelessWidget {
             onPressed: () => showPlanExercisePicker(context, plan: plan, day: day),
             icon: const Icon(Icons.playlist_add_rounded),
             label: const Text('Dodaj ćwiczenie'),
+          ),
+          const SizedBox(height: 8),
+          FilledButton.icon(
+            onPressed: day.items.isEmpty ? null : () => startWorkoutForDay(context, plan: plan, day: day),
+            icon: const Icon(Icons.play_arrow_rounded),
+            label: const Text('Rozpocznij trening'),
           ),
         ],
       ),

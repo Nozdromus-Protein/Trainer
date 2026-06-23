@@ -10,12 +10,14 @@ class TrainerLocalData {
     required this.plans,
     required this.customExercises,
     required this.exerciseLibraryPreferences,
+    required this.activeWorkoutSession,
   });
 
   final List<WorkoutLog> sessions;
   final List<WorkoutPlan> plans;
   final List<Exercise> customExercises;
   final ExerciseLibraryPreferences exerciseLibraryPreferences;
+  final ActiveWorkoutSession? activeWorkoutSession;
 }
 
 class TrainerLocalRepository {
@@ -27,6 +29,7 @@ class TrainerLocalRepository {
   static const customExercisesKey = 'workout_custom_exercises_v1';
   static const exerciseLibraryPreferencesKey =
       'exercise_library_preferences_v1';
+  static const activeWorkoutSessionKey = 'active_workout_session_v1';
 
   final SharedPreferences? _preferences;
 
@@ -52,6 +55,10 @@ class TrainerLocalRepository {
         preferences.getString(exerciseLibraryPreferencesKey),
         ExerciseLibraryPreferences.fromJson,
         const ExerciseLibraryPreferences(),
+      ),
+      activeWorkoutSession: _decodeNullableObject(
+        preferences.getString(activeWorkoutSessionKey),
+        ActiveWorkoutSession.fromJson,
       ),
     );
   }
@@ -90,6 +97,20 @@ class TrainerLocalRepository {
     );
   }
 
+  Future<void> saveActiveWorkoutSession(
+    ActiveWorkoutSession? activeWorkoutSession,
+  ) async {
+    final preferences = await _prefs;
+    if (activeWorkoutSession == null) {
+      await preferences.remove(activeWorkoutSessionKey);
+      return;
+    }
+    await preferences.setString(
+      activeWorkoutSessionKey,
+      jsonEncode(activeWorkoutSession.toJson()),
+    );
+  }
+
   List<T> _decodeList<T>(
     String? rawValue,
     T Function(Map<String, dynamic> json) fromJson,
@@ -124,6 +145,20 @@ class TrainerLocalRepository {
       return fromJson(Map<String, dynamic>.from(decoded));
     } on Object {
       return fallback;
+    }
+  }
+
+  T? _decodeNullableObject<T>(
+    String? rawValue,
+    T Function(Map<String, dynamic> json) fromJson,
+  ) {
+    if (rawValue == null || rawValue.trim().isEmpty) return null;
+    try {
+      final decoded = jsonDecode(rawValue);
+      if (decoded is! Map) return null;
+      return fromJson(Map<String, dynamic>.from(decoded));
+    } on Object {
+      return null;
     }
   }
 }
