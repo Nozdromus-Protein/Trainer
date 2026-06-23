@@ -566,7 +566,7 @@ class AppStore extends ChangeNotifier {
     if (exercise.completedSets.length >= exercise.plannedSets) return false;
     final exercises = [...session.exercises];
     final index = session.currentExerciseIndex;
-    exercises[index] = exercise.copyWith(
+    final updatedExercise = exercise.copyWith(
       completedSets: [
         ...exercise.completedSets,
         WorkoutSet(
@@ -581,10 +581,137 @@ class AppStore extends ChangeNotifier {
       ],
       isSkipped: false,
     );
-    activeWorkoutSession = session.copyWith(exercises: exercises);
+    exercises[index] = updatedExercise;
+    final exerciseDefinition = ExerciseRepo.byId(
+      updatedExercise.exerciseId,
+      customExercises,
+    );
+    final recommendation = workoutRestRecommendation(
+      exerciseDefinition,
+      updatedExercise,
+    );
+    activeWorkoutSession = session.copyWith(
+      exercises: exercises,
+      restTimerEndsAt: DateTime.now().add(Duration(seconds: recommendation.seconds)),
+      restTimerRemainingSeconds: recommendation.seconds,
+      restTimerTotalSeconds: recommendation.seconds,
+      isRestTimerPaused: false,
+    );
     await saveActiveWorkoutSession();
     notifyListeners();
     return true;
+  }
+
+  Future<void> pauseActiveRestTimer() async {
+    final session = activeWorkoutSession;
+    if (session == null || session.isRestTimerPaused) return;
+    final remaining = session.restSecondsRemaining();
+    activeWorkoutSession = session.copyWith(
+      restTimerRemainingSeconds: remaining,
+      isRestTimerPaused: true,
+      clearRestTimerEndsAt: true,
+    );
+    await saveActiveWorkoutSession();
+    notifyListeners();
+  }
+
+  Future<void> resumeActiveRestTimer() async {
+    final session = activeWorkoutSession;
+    if (session == null || !session.isRestTimerPaused) return;
+    final remaining = session.restTimerRemainingSeconds.clamp(0, 3600);
+    if (remaining == 0) {
+      await skipActiveRestTimer();
+      return;
+    }
+    activeWorkoutSession = session.copyWith(
+      restTimerEndsAt: DateTime.now().add(Duration(seconds: remaining)),
+      restTimerRemainingSeconds: remaining,
+      isRestTimerPaused: false,
+    );
+    await saveActiveWorkoutSession();
+    notifyListeners();
+  }
+
+  Future<void> adjustActiveRestTimer(int deltaSeconds) async {
+    final session = activeWorkoutSession;
+    if (session == null) return;
+    final remaining = (session.restSecondsRemaining() + deltaSeconds).clamp(0, 3600);
+    if (remaining == 0) {
+      await skipActiveRestTimer();
+      return;
+    }
+    activeWorkoutSession = session.copyWith(
+      restTimerEndsAt: session.isRestTimerPaused ? null : DateTime.now().add(Duration(seconds: remaining)),
+      restTimerRemainingSeconds: remaining,
+      restTimerTotalSeconds: math.max(
+        remaining,
+        session.restTimerTotalSeconds + deltaSeconds,
+      ),
+      isRestTimerPaused: session.isRestTimerPaused,
+      clearRestTimerEndsAt: session.isRestTimerPaused,
+    );
+    await saveActiveWorkoutSession();
+    notifyListeners();
+  }
+
+  Future<void> skipActiveRestTimer() async {
+    final session = activeWorkoutSession;
+    if (session == null) return;
+    activeWorkoutSession = session.copyWith(
+      restTimerRemainingSeconds: 0,
+      restTimerTotalSeconds: 0,
+      isRestTimerPaused: false,
+      clearRestTimerEndsAt: true,
+    );
+    await saveActiveWorkoutSession();
+    notifyListeners();
+  }
+
+  Future<void> updateActiveExerciseNote(String note) async {
+    final session = activeWorkoutSession;
+    final exercise = session?.currentExercise;
+    if (session == null || exercise == null) return;
+    final exercises = [...session.exercises];
+    exercises[session.currentExerciseIndex] = exercise.copyWith(note: note.trim());
+    activeWorkoutSession = session.copyWith(exercises: exercises);
+    await saveActiveWorkoutSession();
+    notifyListeners();
+  }
+
+  Future<void> updateActiveSessionNote(String note) async {
+    final session = activeWorkoutSession;
+    if (session == null) return;
+    activeWorkoutSession = session.copyWith(note: note.trim());
+    await saveActiveWorkoutSession();
+    notifyListeners();
+  }
+
+  Future<void> replaceActiveWorkoutExercise(Exercise replacement) async {
+    final session = activeWorkoutSession;
+    final current = session?.currentExercise;
+    if (session == null || current == null) return;
+    final exercises = [...session.exercises];
+    final completedSets = current.completedSets;
+    var replacementExercise = current.copyWith(
+      exerciseId: replacement.id,
+      plannedSets: math.max(replacement.defaultSets, completedSets.length),
+      plannedReps: replacement.defaultReps > 0 ? replacement.defaultReps : current.plannedReps,
+      suggestedWeightKg: completedSets.isEmpty ? 0 : completedSets.last.weightKg,
+      restSeconds: 90,
+      completedSets: completedSets,
+      isSkipped: false,
+    );
+    final recommendation = workoutRestRecommendation(
+      replacement,
+      replacementExercise,
+    );
+    replacementExercise = replacementExercise.copyWith(
+      restSeconds: recommendation.seconds,
+    );
+    exercises[session.currentExerciseIndex] = replacementExercise;
+    activeWorkoutSession = session.copyWith(exercises: exercises);
+    await saveActiveWorkoutSession();
+    notifyListeners();
   }
 
   Future<void> moveToNextActiveExercise({bool skipCurrent = false}) async {
@@ -661,6 +788,7 @@ class AppStore extends ChangeNotifier {
           sessionName: sessionName,
           sessionStartedAt: session.startedAt,
           sessionEndedAt: endedAt,
+          sessionNote: session.note,
         ),
       );
     }
@@ -767,6 +895,79 @@ class AppStore extends ChangeNotifier {
 bool sameDay(DateTime a, DateTime b) => a.year == b.year && a.month == b.month && a.day == b.day;
 
 String idNow() => DateTime.now().microsecondsSinceEpoch.toString();
+
+class WorkoutRestRecommendation {
+  const WorkoutRestRecommendation({
+    required this.seconds,
+    required this.label,
+  });
+
+  final int seconds;
+  final String label;
+}
+
+WorkoutRestRecommendation workoutRestRecommendation(
+  Exercise exercise,
+  ActiveWorkoutExercise activeExercise,
+) {
+  if (activeExercise.restSeconds != 90) {
+    return WorkoutRestRecommendation(
+      seconds: activeExercise.restSeconds.clamp(30, 600),
+      label: 'Przerwa ustawiona w planie',
+    );
+  }
+  final name = exercise.name.toLowerCase();
+  final isStrength = activeExercise.plannedReps <= 6 || name.contains('martwy ciąg') || name.contains('deadlift');
+  if (isStrength) {
+    return const WorkoutRestRecommendation(
+      seconds: 180,
+      label: 'Ćwiczenie siłowe',
+    );
+  }
+  const isolatedKeywords = [
+    'uginanie',
+    'curl',
+    'prostowanie',
+    'unoszenie bokiem',
+    'lateral raise',
+    'rozpięt',
+    'wspięcia',
+    'łydk',
+    'triceps',
+  ];
+  if (isolatedKeywords.any(name.contains)) {
+    return const WorkoutRestRecommendation(
+      seconds: 60,
+      label: 'Ćwiczenie izolowane',
+    );
+  }
+  const compoundKeywords = [
+    'przysiad',
+    'squat',
+    'wycisk',
+    'bench',
+    'podciąg',
+    'pullup',
+    'wiosł',
+    'row',
+    'wykrok',
+    'lunge',
+    'pomp',
+    'dip',
+    'hip thrust',
+    'overhead',
+  ];
+  if (compoundKeywords.any(name.contains) || exercise.supportingMuscles.length >= 2) {
+    return const WorkoutRestRecommendation(
+      seconds: 120,
+      label: 'Ćwiczenie wielostawowe',
+    );
+  }
+  return const WorkoutRestRecommendation(
+    seconds: 75,
+    label: 'Ćwiczenie pomocnicze',
+  );
+}
 
 String prettyJson(Object? value) {
   const encoder = JsonEncoder.withIndent('  ');
@@ -2399,6 +2600,10 @@ class WorkoutHistorySessionCard extends StatelessWidget {
                           maxLines: 2, overflow: TextOverflow.ellipsis, style: theme.textTheme.titleMedium?.copyWith(fontWeight: FontWeight.w900)),
                       const SizedBox(height: 4),
                       Text(exerciseNames.join(' · '), maxLines: 2, overflow: TextOverflow.ellipsis, style: theme.textTheme.bodySmall?.copyWith(color: theme.colorScheme.onSurfaceVariant)),
+                      if (first.sessionNote.isNotEmpty) ...[
+                        const SizedBox(height: 6),
+                        Text(first.sessionNote, maxLines: 3, overflow: TextOverflow.ellipsis),
+                      ],
                     ],
                   ),
                 ),
@@ -5075,7 +5280,11 @@ class _ActiveWorkoutPageState extends State<ActiveWorkoutPage> {
           child: ListView(
             padding: const EdgeInsets.fromLTRB(16, 8, 16, 28),
             children: [
-              _ActiveWorkoutHeader(session: session, elapsed: elapsed),
+              _ActiveWorkoutHeader(
+                session: session,
+                elapsed: elapsed,
+                onEditNote: () => showActiveSessionNoteSheet(context),
+              ),
               const SizedBox(height: 12),
               _CurrentExerciseCard(
                 exercise: exercise,
@@ -5083,6 +5292,51 @@ class _ActiveWorkoutPageState extends State<ActiveWorkoutPage> {
                 position: session.currentExerciseIndex + 1,
                 total: session.exercises.length,
               ),
+              const SizedBox(height: 12),
+              LayoutBuilder(
+                builder: (context, constraints) {
+                  final replace = OutlinedButton.icon(
+                    onPressed: () => showReplaceActiveExerciseSheet(context),
+                    icon: const Icon(Icons.swap_horiz_rounded),
+                    label: const Text('Zamień ćwiczenie'),
+                  );
+                  final note = OutlinedButton.icon(
+                    onPressed: () => showActiveExerciseNoteSheet(context),
+                    icon: const Icon(Icons.note_alt_outlined),
+                    label: Text(activeExercise.note.isEmpty ? 'Dodaj notatkę' : 'Edytuj notatkę'),
+                  );
+                  if (constraints.maxWidth < 430) {
+                    return Column(
+                      crossAxisAlignment: CrossAxisAlignment.stretch,
+                      children: [replace, const SizedBox(height: 8), note],
+                    );
+                  }
+                  return Row(
+                    children: [
+                      Expanded(child: replace),
+                      const SizedBox(width: 10),
+                      Expanded(child: note),
+                    ],
+                  );
+                },
+              ),
+              if (activeExercise.note.isNotEmpty) ...[
+                const SizedBox(height: 10),
+                Card(
+                  child: ListTile(
+                    leading: const Icon(Icons.sticky_note_2_outlined),
+                    title: const Text('Notatka do ćwiczenia'),
+                    subtitle: Text(activeExercise.note),
+                  ),
+                ),
+              ],
+              if (session.hasActiveRestTimer) ...[
+                const SizedBox(height: 12),
+                _ActiveRestTimerCard(
+                  session: session,
+                  recommendation: workoutRestRecommendation(exercise, activeExercise),
+                ),
+              ],
               const SizedBox(height: 12),
               if (activeExercise.completedSets.isNotEmpty) ...[
                 _CompletedSetsCard(sets: activeExercise.completedSets),
@@ -5208,10 +5462,15 @@ class _ActiveWorkoutPageState extends State<ActiveWorkoutPage> {
 }
 
 class _ActiveWorkoutHeader extends StatelessWidget {
-  const _ActiveWorkoutHeader({required this.session, required this.elapsed});
+  const _ActiveWorkoutHeader({
+    required this.session,
+    required this.elapsed,
+    required this.onEditNote,
+  });
 
   final ActiveWorkoutSession session;
   final Duration elapsed;
+  final VoidCallback onEditNote;
 
   @override
   Widget build(BuildContext context) {
@@ -5225,9 +5484,25 @@ class _ActiveWorkoutHeader extends StatelessWidget {
         child: Column(
           crossAxisAlignment: CrossAxisAlignment.stretch,
           children: [
-            Text(session.planName, maxLines: 2, overflow: TextOverflow.ellipsis, style: theme.textTheme.titleLarge?.copyWith(fontWeight: FontWeight.w900)),
+            Row(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Expanded(
+                  child: Text(session.planName, maxLines: 2, overflow: TextOverflow.ellipsis, style: theme.textTheme.titleLarge?.copyWith(fontWeight: FontWeight.w900)),
+                ),
+                IconButton(
+                  tooltip: 'Notatka do sesji',
+                  onPressed: onEditNote,
+                  icon: Icon(session.note.isEmpty ? Icons.note_add_outlined : Icons.sticky_note_2_rounded),
+                ),
+              ],
+            ),
             const SizedBox(height: 4),
             Text('${weekdayName(session.weekday)} · ${session.dayTitle}', style: theme.textTheme.bodyMedium?.copyWith(color: theme.colorScheme.onSurfaceVariant)),
+            if (session.note.isNotEmpty) ...[
+              const SizedBox(height: 8),
+              Text(session.note, maxLines: 3, overflow: TextOverflow.ellipsis, style: theme.textTheme.bodyMedium),
+            ],
             const SizedBox(height: 14),
             Row(
               children: [
@@ -5242,6 +5517,223 @@ class _ActiveWorkoutHeader extends StatelessWidget {
       ),
     );
   }
+}
+
+class _ActiveRestTimerCard extends StatelessWidget {
+  const _ActiveRestTimerCard({
+    required this.session,
+    required this.recommendation,
+  });
+
+  final ActiveWorkoutSession session;
+  final WorkoutRestRecommendation recommendation;
+
+  @override
+  Widget build(BuildContext context) {
+    final store = AppScope.of(context);
+    final theme = Theme.of(context);
+    final remaining = session.restSecondsRemaining();
+    final total = math.max(session.restTimerTotalSeconds, 1);
+    final progress = remaining / total;
+    return Card(
+      color: theme.colorScheme.secondaryContainer.withValues(alpha: 0.55),
+      child: Padding(
+        padding: const EdgeInsets.all(16),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.stretch,
+          children: [
+            Row(
+              children: [
+                Icon(Icons.timer_outlined, color: theme.colorScheme.secondary),
+                const SizedBox(width: 8),
+                Expanded(child: Text('Przerwa między seriami', style: theme.textTheme.titleMedium?.copyWith(fontWeight: FontWeight.w900))),
+                Text(formatWorkoutDuration(Duration(seconds: remaining)), style: theme.textTheme.headlineSmall?.copyWith(fontWeight: FontWeight.w900)),
+              ],
+            ),
+            const SizedBox(height: 4),
+            Text(recommendation.label, style: theme.textTheme.bodySmall?.copyWith(color: theme.colorScheme.onSurfaceVariant)),
+            const SizedBox(height: 10),
+            LinearProgressIndicator(value: progress.clamp(0, 1)),
+            const SizedBox(height: 12),
+            Wrap(
+              spacing: 8,
+              runSpacing: 8,
+              children: [
+                FilledButton.tonalIcon(
+                  onPressed: session.isRestTimerPaused ? store.resumeActiveRestTimer : store.pauseActiveRestTimer,
+                  icon: Icon(session.isRestTimerPaused ? Icons.play_arrow_rounded : Icons.pause_rounded),
+                  label: Text(session.isRestTimerPaused ? 'Wznów' : 'Pauza'),
+                ),
+                OutlinedButton(
+                  onPressed: () => store.adjustActiveRestTimer(-30),
+                  child: const Text('−30 s'),
+                ),
+                OutlinedButton(
+                  onPressed: () => store.adjustActiveRestTimer(30),
+                  child: const Text('+30 s'),
+                ),
+                TextButton.icon(
+                  onPressed: store.skipActiveRestTimer,
+                  icon: const Icon(Icons.skip_next_rounded),
+                  label: const Text('Pomiń'),
+                ),
+              ],
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+}
+
+Future<void> showActiveExerciseNoteSheet(BuildContext context) async {
+  final store = AppScope.read(context);
+  var note = store.activeWorkoutSession?.currentExercise?.note ?? '';
+  await showModalBottomSheet<void>(
+    context: context,
+    isScrollControlled: true,
+    useSafeArea: true,
+    showDragHandle: true,
+    builder: (sheetContext) => Padding(
+      padding: EdgeInsets.fromLTRB(16, 0, 16, 16 + MediaQuery.of(sheetContext).viewInsets.bottom + MediaQuery.of(sheetContext).viewPadding.bottom),
+      child: Column(
+        mainAxisSize: MainAxisSize.min,
+        crossAxisAlignment: CrossAxisAlignment.stretch,
+        children: [
+          Text('Notatka do ćwiczenia', style: Theme.of(sheetContext).textTheme.titleLarge?.copyWith(fontWeight: FontWeight.w900)),
+          const SizedBox(height: 12),
+          TextFormField(
+            initialValue: note,
+            autofocus: true,
+            maxLines: 4,
+            textCapitalization: TextCapitalization.sentences,
+            decoration: const InputDecoration(hintText: 'Np. kontroluj tempo, ustaw ławkę wyżej…'),
+            onChanged: (value) => note = value,
+          ),
+          const SizedBox(height: 14),
+          FilledButton.icon(
+            onPressed: () async {
+              await store.updateActiveExerciseNote(note);
+              if (sheetContext.mounted) Navigator.pop(sheetContext);
+            },
+            icon: const Icon(Icons.save_outlined),
+            label: const Text('Zapisz notatkę'),
+          ),
+        ],
+      ),
+    ),
+  );
+}
+
+Future<void> showActiveSessionNoteSheet(BuildContext context) async {
+  final store = AppScope.read(context);
+  var note = store.activeWorkoutSession?.note ?? '';
+  await showModalBottomSheet<void>(
+    context: context,
+    isScrollControlled: true,
+    useSafeArea: true,
+    showDragHandle: true,
+    builder: (sheetContext) => Padding(
+      padding: EdgeInsets.fromLTRB(16, 0, 16, 16 + MediaQuery.of(sheetContext).viewInsets.bottom + MediaQuery.of(sheetContext).viewPadding.bottom),
+      child: Column(
+        mainAxisSize: MainAxisSize.min,
+        crossAxisAlignment: CrossAxisAlignment.stretch,
+        children: [
+          Text('Notatka do całej sesji', style: Theme.of(sheetContext).textTheme.titleLarge?.copyWith(fontWeight: FontWeight.w900)),
+          const SizedBox(height: 12),
+          TextFormField(
+            initialValue: note,
+            autofocus: true,
+            maxLines: 4,
+            textCapitalization: TextCapitalization.sentences,
+            decoration: const InputDecoration(hintText: 'Np. słabszy sen, dobra energia, ból barku…'),
+            onChanged: (value) => note = value,
+          ),
+          const SizedBox(height: 14),
+          FilledButton.icon(
+            onPressed: () async {
+              await store.updateActiveSessionNote(note);
+              if (sheetContext.mounted) Navigator.pop(sheetContext);
+            },
+            icon: const Icon(Icons.save_outlined),
+            label: const Text('Zapisz notatkę'),
+          ),
+        ],
+      ),
+    ),
+  );
+}
+
+Future<void> showReplaceActiveExerciseSheet(BuildContext context) async {
+  final store = AppScope.read(context);
+  final session = store.activeWorkoutSession;
+  final current = session?.currentExercise;
+  if (current == null) return;
+  final usedExerciseIds = session!.exercises.where((exercise) => exercise != current).map((exercise) => exercise.exerciseId).toSet();
+  var query = '';
+  final replacement = await showModalBottomSheet<Exercise>(
+    context: context,
+    isScrollControlled: true,
+    useSafeArea: true,
+    showDragHandle: true,
+    builder: (sheetContext) => StatefulBuilder(
+      builder: (context, setSheetState) {
+        final exercises = ExerciseRepo.combined(store.customExercises).where((exercise) {
+          if (exercise.id == current.exerciseId || usedExerciseIds.contains(exercise.id) || store.isExerciseHidden(exercise.id)) return false;
+          return query.isEmpty || exercise.name.toLowerCase().contains(query);
+        }).toList();
+        return FractionallySizedBox(
+          heightFactor: 0.86,
+          child: Column(
+            children: [
+              Padding(
+                padding: const EdgeInsets.fromLTRB(16, 0, 16, 12),
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.stretch,
+                  children: [
+                    Text('Zamień ćwiczenie', style: Theme.of(context).textTheme.titleLarge?.copyWith(fontWeight: FontWeight.w900)),
+                    const SizedBox(height: 4),
+                    Text(
+                      current.completedSets.isEmpty ? 'Wybierz ćwiczenie zastępcze.' : 'Zapisane serie pozostaną bez zmian i zostaną przypisane do zamiennika.',
+                      style: Theme.of(context).textTheme.bodyMedium?.copyWith(color: Theme.of(context).colorScheme.onSurfaceVariant),
+                    ),
+                    const SizedBox(height: 12),
+                    TextField(
+                      autofocus: true,
+                      decoration: const InputDecoration(prefixIcon: Icon(Icons.search_rounded), labelText: 'Szukaj po nazwie'),
+                      onChanged: (value) => setSheetState(() => query = value.trim().toLowerCase()),
+                    ),
+                  ],
+                ),
+              ),
+              Expanded(
+                child: exercises.isEmpty
+                    ? const Center(child: Text('Brak pasujących ćwiczeń'))
+                    : ListView.builder(
+                        padding: const EdgeInsets.fromLTRB(16, 0, 16, 20),
+                        itemCount: exercises.length,
+                        itemBuilder: (context, index) {
+                          final exercise = exercises[index];
+                          return Card(
+                            margin: const EdgeInsets.only(bottom: 8),
+                            child: ListTile(
+                              leading: SizedBox(width: 48, height: 48, child: ExerciseVisual(exercise: exercise)),
+                              title: Text(exercise.name, maxLines: 2, overflow: TextOverflow.ellipsis),
+                              subtitle: Text('${exercise.primaryMuscle} · ${exercise.equipment}', maxLines: 2, overflow: TextOverflow.ellipsis),
+                              trailing: const Icon(Icons.swap_horiz_rounded),
+                              onTap: () => Navigator.pop(sheetContext, exercise),
+                            ),
+                          );
+                        },
+                      ),
+              ),
+            ],
+          ),
+        );
+      },
+    ),
+  );
+  if (replacement != null) await store.replaceActiveWorkoutExercise(replacement);
 }
 
 class _CurrentExerciseCard extends StatelessWidget {
@@ -5260,6 +5752,10 @@ class _CurrentExerciseCard extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final theme = Theme.of(context);
+    final recommendation = workoutRestRecommendation(
+      exercise,
+      activeExercise,
+    );
     return Card(
       child: Padding(
         padding: const EdgeInsets.all(16),
@@ -5276,7 +5772,7 @@ class _CurrentExerciseCard extends StatelessWidget {
                   const SizedBox(height: 3),
                   Text(exercise.name, maxLines: 2, overflow: TextOverflow.ellipsis, style: theme.textTheme.titleLarge?.copyWith(fontWeight: FontWeight.w900)),
                   const SizedBox(height: 6),
-                  Text('${activeExercise.plannedSets} serie × ${activeExercise.plannedReps} powt. · ${activeExercise.restSeconds} s przerwy',
+                  Text('${activeExercise.plannedSets} serie × ${activeExercise.plannedReps} powt. · ${recommendation.seconds} s przerwy',
                       style: theme.textTheme.bodySmall?.copyWith(color: theme.colorScheme.onSurfaceVariant)),
                 ],
               ),

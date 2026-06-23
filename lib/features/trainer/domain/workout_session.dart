@@ -18,6 +18,7 @@ class WorkoutSession {
     this.sessionName = '',
     this.sessionStartedAt,
     this.sessionEndedAt,
+    this.sessionNote = '',
   });
 
   final String id;
@@ -36,6 +37,7 @@ class WorkoutSession {
   final String sessionName;
   final DateTime? sessionStartedAt;
   final DateTime? sessionEndedAt;
+  final String sessionNote;
 
   double get volume => workoutSets.isEmpty
       ? sets * reps * weightKg
@@ -61,6 +63,7 @@ class WorkoutSession {
         'sessionName': sessionName,
         'sessionStartedAt': sessionStartedAt?.toIso8601String(),
         'sessionEndedAt': sessionEndedAt?.toIso8601String(),
+        'sessionNote': sessionNote,
       };
 
   factory WorkoutSession.fromJson(Map<String, dynamic> json) => WorkoutSession(
@@ -89,6 +92,7 @@ class WorkoutSession {
             DateTime.tryParse(json['sessionStartedAt']?.toString() ?? ''),
         sessionEndedAt:
             DateTime.tryParse(json['sessionEndedAt']?.toString() ?? ''),
+        sessionNote: json['sessionNote']?.toString() ?? '',
       );
 }
 
@@ -110,6 +114,7 @@ class WorkoutLog extends WorkoutSession {
     super.sessionName,
     super.sessionStartedAt,
     super.sessionEndedAt,
+    super.sessionNote,
   });
 
   WorkoutLog copyWith({
@@ -129,6 +134,7 @@ class WorkoutLog extends WorkoutSession {
     String? sessionName,
     DateTime? sessionStartedAt,
     DateTime? sessionEndedAt,
+    String? sessionNote,
   }) {
     return WorkoutLog(
       id: id ?? this.id,
@@ -147,6 +153,7 @@ class WorkoutLog extends WorkoutSession {
       sessionName: sessionName ?? this.sessionName,
       sessionStartedAt: sessionStartedAt ?? this.sessionStartedAt,
       sessionEndedAt: sessionEndedAt ?? this.sessionEndedAt,
+      sessionNote: sessionNote ?? this.sessionNote,
     );
   }
 
@@ -169,6 +176,7 @@ class WorkoutLog extends WorkoutSession {
       sessionName: session.sessionName,
       sessionStartedAt: session.sessionStartedAt,
       sessionEndedAt: session.sessionEndedAt,
+      sessionNote: session.sessionNote,
     );
   }
 }

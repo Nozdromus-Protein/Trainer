@@ -82,6 +82,117 @@ void main() {
     expect(restoredHistory.logs.single.sessionName, 'Plan aktywny · Góra');
   });
 
+  test('rest timer, notes and exercise replacement preserve completed sets',
+      () async {
+    SharedPreferences.setMockInitialValues({});
+    final store = AppStore();
+    await store.load();
+    await store.startActiveWorkout(
+      plan: testPlan,
+      day: testPlan.days.single,
+    );
+    await store.saveActiveWorkoutSet(
+      weightKg: 10,
+      repetitions: 12,
+      rpe: 8,
+    );
+
+    expect(store.activeWorkoutSession?.restTimerTotalSeconds, 120);
+    expect(store.activeWorkoutSession?.hasActiveRestTimer, isTrue);
+    await store.pauseActiveRestTimer();
+    final pausedSeconds = store.activeWorkoutSession!.restTimerRemainingSeconds;
+    expect(store.activeWorkoutSession?.isRestTimerPaused, isTrue);
+    expect(pausedSeconds, inInclusiveRange(118, 120));
+
+    await store.adjustActiveRestTimer(30);
+    expect(
+      store.activeWorkoutSession?.restTimerRemainingSeconds,
+      pausedSeconds + 30,
+    );
+    await store.updateActiveExerciseNote('Pilnuj łopatek');
+    await store.updateActiveSessionNote('Dobra energia');
+    await store.replaceActiveWorkoutExercise(
+      ExerciseRepo.byId('squat'),
+    );
+
+    expect(
+      store.activeWorkoutSession?.currentExercise?.exerciseId,
+      'squat',
+    );
+    expect(
+      store.activeWorkoutSession?.currentExercise?.completedSets,
+      hasLength(1),
+    );
+    expect(
+      store.activeWorkoutSession?.currentExercise?.completedSets.single.volume,
+      120,
+    );
+    expect(
+      store.activeWorkoutSession?.currentExercise?.note,
+      'Pilnuj łopatek',
+    );
+
+    final restored = AppStore();
+    await restored.load();
+    expect(restored.activeWorkoutSession?.note, 'Dobra energia');
+    expect(restored.activeWorkoutSession?.isRestTimerPaused, isTrue);
+    expect(
+      restored.activeWorkoutSession?.currentExercise?.completedSets,
+      hasLength(1),
+    );
+
+    await restored.resumeActiveRestTimer();
+    expect(restored.activeWorkoutSession?.isRestTimerPaused, isFalse);
+    await restored.skipActiveRestTimer();
+    expect(restored.activeWorkoutSession?.hasActiveRestTimer, isFalse);
+
+    final summary = await restored.finishActiveWorkout();
+    expect(summary, isNotNull);
+    expect(restored.logs.single.exerciseId, 'squat');
+    expect(restored.logs.single.note, 'Pilnuj łopatek');
+    expect(restored.logs.single.sessionNote, 'Dobra energia');
+  });
+
+  test('rest suggestions distinguish isolated, compound and strength work', () {
+    final isolated = workoutRestRecommendation(
+      ExerciseRepo.byId('bicep_curl'),
+      const ActiveWorkoutExercise(
+        exerciseId: 'bicep_curl',
+        plannedSets: 3,
+        plannedReps: 12,
+        suggestedWeightKg: 0,
+        restSeconds: 90,
+        note: '',
+      ),
+    );
+    final compound = workoutRestRecommendation(
+      ExerciseRepo.byId('pushup'),
+      const ActiveWorkoutExercise(
+        exerciseId: 'pushup',
+        plannedSets: 3,
+        plannedReps: 10,
+        suggestedWeightKg: 0,
+        restSeconds: 90,
+        note: '',
+      ),
+    );
+    final strength = workoutRestRecommendation(
+      ExerciseRepo.byId('deadlift'),
+      const ActiveWorkoutExercise(
+        exerciseId: 'deadlift',
+        plannedSets: 5,
+        plannedReps: 5,
+        suggestedWeightKg: 0,
+        restSeconds: 90,
+        note: '',
+      ),
+    );
+
+    expect(isolated.seconds, 60);
+    expect(compound.seconds, 120);
+    expect(strength.seconds, 180);
+  });
+
   testWidgets('active workout and summary do not overflow on a narrow screen',
       (tester) async {
     SharedPreferences.setMockInitialValues({});
@@ -112,13 +223,24 @@ void main() {
     expect(find.text('Pomiń ćwiczenie', skipOffstage: false), findsOneWidget);
     expect(tester.takeException(), isNull);
 
-    await tester.enterText(find.byType(TextField).at(0), '10');
-    await tester.enterText(find.byType(TextField).at(1), '12');
-    await tester.tap(find.text('Zapisz serię'));
+    await store.saveActiveWorkoutSet(
+      weightKg: 10,
+      repetitions: 12,
+      rpe: 7,
+    );
+    await tester.pump();
+    await tester.drag(
+      find.byType(ListView).first,
+      const Offset(0, -500),
+    );
     await tester.pump();
 
     expect(find.text('Wykonane serie'), findsOneWidget);
     expect(find.text('10 kg × 12 powt.'), findsOneWidget);
+    expect(find.text('Przerwa między seriami'), findsOneWidget);
+    expect(find.text('Pauza'), findsOneWidget);
+    expect(find.text('−30 s'), findsOneWidget);
+    expect(find.text('+30 s'), findsOneWidget);
     expect(tester.takeException(), isNull);
 
     await tester.scrollUntilVisible(

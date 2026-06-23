@@ -10,6 +10,11 @@ class ActiveWorkoutSession {
     required this.startedAt,
     required this.currentExerciseIndex,
     required this.exercises,
+    this.note = '',
+    this.restTimerEndsAt,
+    this.restTimerRemainingSeconds = 0,
+    this.restTimerTotalSeconds = 0,
+    this.isRestTimerPaused = false,
   });
 
   final String id;
@@ -20,6 +25,11 @@ class ActiveWorkoutSession {
   final DateTime startedAt;
   final int currentExerciseIndex;
   final List<ActiveWorkoutExercise> exercises;
+  final String note;
+  final DateTime? restTimerEndsAt;
+  final int restTimerRemainingSeconds;
+  final int restTimerTotalSeconds;
+  final bool isRestTimerPaused;
 
   ActiveWorkoutExercise? get currentExercise {
     if (exercises.isEmpty) return null;
@@ -49,6 +59,16 @@ class ActiveWorkoutSession {
     return sets.fold<int>(0, (sum, set) => sum + set.rpe) / sets.length;
   }
 
+  int restSecondsRemaining([DateTime? now]) {
+    if (isRestTimerPaused) return restTimerRemainingSeconds;
+    final endsAt = restTimerEndsAt;
+    if (endsAt == null) return restTimerRemainingSeconds;
+    final seconds = endsAt.difference(now ?? DateTime.now()).inSeconds;
+    return seconds.clamp(0, 3600);
+  }
+
+  bool get hasActiveRestTimer => restSecondsRemaining() > 0;
+
   ActiveWorkoutSession copyWith({
     String? id,
     String? planId,
@@ -58,6 +78,12 @@ class ActiveWorkoutSession {
     DateTime? startedAt,
     int? currentExerciseIndex,
     List<ActiveWorkoutExercise>? exercises,
+    String? note,
+    DateTime? restTimerEndsAt,
+    int? restTimerRemainingSeconds,
+    int? restTimerTotalSeconds,
+    bool? isRestTimerPaused,
+    bool clearRestTimerEndsAt = false,
   }) {
     return ActiveWorkoutSession(
       id: id ?? this.id,
@@ -68,6 +94,14 @@ class ActiveWorkoutSession {
       startedAt: startedAt ?? this.startedAt,
       currentExerciseIndex: currentExerciseIndex ?? this.currentExerciseIndex,
       exercises: exercises ?? this.exercises,
+      note: note ?? this.note,
+      restTimerEndsAt:
+          clearRestTimerEndsAt ? null : restTimerEndsAt ?? this.restTimerEndsAt,
+      restTimerRemainingSeconds:
+          restTimerRemainingSeconds ?? this.restTimerRemainingSeconds,
+      restTimerTotalSeconds:
+          restTimerTotalSeconds ?? this.restTimerTotalSeconds,
+      isRestTimerPaused: isRestTimerPaused ?? this.isRestTimerPaused,
     );
   }
 
@@ -80,6 +114,11 @@ class ActiveWorkoutSession {
         'startedAt': startedAt.toIso8601String(),
         'currentExerciseIndex': currentExerciseIndex,
         'exercises': exercises.map((exercise) => exercise.toJson()).toList(),
+        'note': note,
+        'restTimerEndsAt': restTimerEndsAt?.toIso8601String(),
+        'restTimerRemainingSeconds': restTimerRemainingSeconds,
+        'restTimerTotalSeconds': restTimerTotalSeconds,
+        'isRestTimerPaused': isRestTimerPaused,
       };
 
   factory ActiveWorkoutSession.fromJson(Map<String, dynamic> json) {
@@ -103,6 +142,14 @@ class ActiveWorkoutSession {
       currentExerciseIndex:
           exercises.isEmpty ? 0 : rawIndex.clamp(0, exercises.length - 1),
       exercises: exercises,
+      note: json['note']?.toString() ?? '',
+      restTimerEndsAt:
+          DateTime.tryParse(json['restTimerEndsAt']?.toString() ?? ''),
+      restTimerRemainingSeconds:
+          (json['restTimerRemainingSeconds'] as num?)?.toInt() ?? 0,
+      restTimerTotalSeconds:
+          (json['restTimerTotalSeconds'] as num?)?.toInt() ?? 0,
+      isRestTimerPaused: json['isRestTimerPaused'] as bool? ?? false,
     );
   }
 }

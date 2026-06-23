@@ -66,6 +66,10 @@ void main() {
         dayTitle: 'Góra',
         startedAt: DateTime(2026, 6, 23, 18),
         currentExerciseIndex: 0,
+        note: 'Notatka sesji',
+        restTimerRemainingSeconds: 75,
+        restTimerTotalSeconds: 120,
+        isRestTimerPaused: true,
         exercises: const [
           ActiveWorkoutExercise(
             exerciseId: 'squat',
@@ -96,5 +100,7 @@ void main() {
       restored.activeWorkoutSession?.exercises.single.suggestedWeightKg,
       40,
     );
+    expect(restored.activeWorkoutSession?.note, 'Notatka sesji');
+    expect(restored.activeWorkoutSession?.restTimerRemainingSeconds, 75);
   });
 }

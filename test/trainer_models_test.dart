@@ -134,6 +134,10 @@ void main() {
         dayTitle: 'Góra',
         startedAt: DateTime(2026, 6, 23, 18),
         currentExerciseIndex: 0,
+        note: 'Dobra energia',
+        restTimerRemainingSeconds: 90,
+        restTimerTotalSeconds: 120,
+        isRestTimerPaused: true,
         exercises: const [
           ActiveWorkoutExercise(
             exerciseId: 'pushup',
@@ -163,6 +167,10 @@ void main() {
       expect(restored.completedExerciseCount, 1);
       expect(restored.volume, 120);
       expect(restored.averageRpe, 8);
+      expect(restored.note, 'Dobra energia');
+      expect(restored.restTimerRemainingSeconds, 90);
+      expect(restored.restTimerTotalSeconds, 120);
+      expect(restored.isRestTimerPaused, isTrue);
     });
   });
 }
