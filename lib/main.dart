@@ -514,6 +514,67 @@ class AppStore extends ChangeNotifier {
     notifyListeners();
   }
 
+  Future<void> deleteHistoryEntry(String entryKey) async {
+    if (entryKey.startsWith('session_')) {
+      await deleteLogsBySession(entryKey.substring('session_'.length));
+      return;
+    }
+    if (entryKey.startsWith('log_')) {
+      await deleteLog(entryKey.substring('log_'.length));
+    }
+  }
+
+  Future<void> updateWorkoutLogSet({
+    required String logId,
+    required String setId,
+    required double weightKg,
+    required int repetitions,
+    required int rpe,
+    required String note,
+  }) async {
+    final logIndex = logs.indexWhere((log) => log.id == logId);
+    if (logIndex < 0) return;
+
+    final log = logs[logIndex];
+    if (log.workoutSets.isEmpty) {
+      logs[logIndex] = log.copyWith(
+        weightKg: math.max(0, weightKg).toDouble(),
+        reps: math.max(0, repetitions),
+        rpe: rpe.clamp(1, 10).toInt(),
+        note: note.trim().isEmpty ? log.note : note.trim(),
+      );
+      await saveLogs();
+      notifyListeners();
+      return;
+    }
+
+    final setIndex = log.workoutSets.indexWhere((set) => set.id == setId);
+    if (setIndex < 0) return;
+    final updatedSets = [...log.workoutSets];
+    updatedSets[setIndex] = updatedSets[setIndex].copyWith(
+      weightKg: math.max(0, weightKg).toDouble(),
+      repetitions: math.max(0, repetitions),
+      rpe: rpe.clamp(1, 10).toInt(),
+      note: note.trim(),
+      isCompleted: true,
+    );
+    final completedSets = updatedSets.where((set) => set.isCompleted).toList();
+    final aggregateSets = completedSets.isEmpty ? updatedSets : completedSets;
+    final averageReps = (aggregateSets.fold<int>(0, (sum, set) => sum + set.repetitions) / aggregateSets.length).round();
+    final averageWeight = aggregateSets.fold<double>(0, (sum, set) => sum + set.weightKg) / aggregateSets.length;
+    final averageRpe = (aggregateSets.fold<int>(0, (sum, set) => sum + set.rpe) / aggregateSets.length).round();
+
+    logs[logIndex] = log.copyWith(
+      workoutSets: updatedSets,
+      sets: completedSets.length,
+      reps: averageReps,
+      weightKg: averageWeight,
+      rpe: averageRpe.clamp(1, 10).toInt(),
+    );
+    await saveLogs();
+    notifyListeners();
+  }
+
   Future<bool> startActiveWorkout({
     required WorkoutPlan plan,
     required WorkoutDay day,
@@ -2468,6 +2529,988 @@ class PageFrame extends StatelessWidget {
 
 class HistoryPage extends StatelessWidget {
   const HistoryPage({super.key});
+
+  @override
+  Widget build(BuildContext context) {
+    return const WorkoutHistoryPageContent();
+  }
+}
+
+class WorkoutHistoryPageContent extends StatefulWidget {
+  const WorkoutHistoryPageContent({super.key});
+
+  @override
+  State<WorkoutHistoryPageContent> createState() => _WorkoutHistoryPageContentState();
+}
+
+class _WorkoutHistoryPageContentState extends State<WorkoutHistoryPageContent> {
+  final TextEditingController _planFilter = TextEditingController();
+  DateTimeRange? _dateRange;
+
+  @override
+  void dispose() {
+    _planFilter.dispose();
+    super.dispose();
+  }
+
+  Future<void> _pickDateRange(AppStore store) async {
+    final now = DateTime.now();
+    final oldestLogDate = store.logs.isEmpty ? DateTime(now.year - 5) : store.logs.map((log) => log.date).reduce((oldest, next) => next.isBefore(oldest) ? next : oldest);
+    final picked = await showDateRangePicker(
+      context: context,
+      initialDateRange: _dateRange,
+      firstDate: DateTime(oldestLogDate.year, 1, 1),
+      lastDate: DateTime(now.year + 1, 12, 31),
+      helpText: 'Wybierz zakres historii',
+      saveText: 'Zastosuj',
+    );
+    if (picked == null || !mounted) return;
+    setState(() => _dateRange = picked);
+  }
+
+  void _clearFilters() {
+    setState(() {
+      _planFilter.clear();
+      _dateRange = null;
+    });
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final store = AppScope.of(context);
+    final logs = [...store.logs]..sort((a, b) => b.date.compareTo(a.date));
+    final allEntries = _groupTrainerWorkoutHistory(logs);
+    final query = _planFilter.text.trim().toLowerCase();
+    final entries = allEntries.where((entry) {
+      final searchableText = '${entry.title(store.customExercises)} ${entry.subtitle(store.customExercises)}'.toLowerCase();
+      final matchesName = query.isEmpty || searchableText.contains(query);
+      return matchesName && _trainerHistoryEntryMatchesDateRange(entry, _dateRange);
+    }).toList();
+
+    return PageFrame(
+      title: 'Historia treningów',
+      subtitle: 'Wykonane sesje, szczegóły serii i lokalny zapis treningów',
+      actions: [
+        IconButton.filledTonal(
+          tooltip: 'Dodaj trening',
+          onPressed: () => showAddWorkoutSheet(context),
+          icon: const Icon(Icons.add_rounded),
+        ),
+      ],
+      child: logs.isEmpty
+          ? const _EmptyTrainerWorkoutHistoryCard()
+          : Column(
+              crossAxisAlignment: CrossAxisAlignment.stretch,
+              children: [
+                _TrainerWorkoutHistoryFiltersCard(
+                  controller: _planFilter,
+                  dateRange: _dateRange,
+                  totalCount: allEntries.length,
+                  visibleCount: entries.length,
+                  onChanged: (_) => setState(() {}),
+                  onPickDateRange: () => _pickDateRange(store),
+                  onClear: _clearFilters,
+                ),
+                const SizedBox(height: 14),
+                if (entries.isEmpty)
+                  _NoTrainerWorkoutHistoryResultsCard(onClear: _clearFilters)
+                else
+                  for (var index = 0; index < entries.length; index++) ...[
+                    if (index == 0 || !sameDay(entries[index - 1].date, entries[index].date)) ...[
+                      if (index > 0) const SizedBox(height: 8),
+                      Padding(
+                        padding: const EdgeInsets.fromLTRB(4, 8, 4, 8),
+                        child: Text(
+                          '${weekdayName(entries[index].date.weekday)} · ${trainerHistoryFullDate(entries[index].date)}',
+                          style: Theme.of(context).textTheme.titleSmall?.copyWith(fontWeight: FontWeight.w900),
+                        ),
+                      ),
+                    ],
+                    _TrainerWorkoutHistoryEntryCard(
+                      key: ValueKey('trainer_history_card_${entries[index].key}'),
+                      entry: entries[index],
+                    ),
+                    const SizedBox(height: 10),
+                  ],
+              ],
+            ),
+    );
+  }
+}
+
+class _TrainerWorkoutHistoryFiltersCard extends StatelessWidget {
+  const _TrainerWorkoutHistoryFiltersCard({
+    required this.controller,
+    required this.dateRange,
+    required this.totalCount,
+    required this.visibleCount,
+    required this.onChanged,
+    required this.onPickDateRange,
+    required this.onClear,
+  });
+
+  final TextEditingController controller;
+  final DateTimeRange? dateRange;
+  final int totalCount;
+  final int visibleCount;
+  final ValueChanged<String> onChanged;
+  final VoidCallback onPickDateRange;
+  final VoidCallback onClear;
+
+  bool get hasFilters => controller.text.trim().isNotEmpty || dateRange != null;
+
+  @override
+  Widget build(BuildContext context) {
+    final theme = Theme.of(context);
+    return Card(
+      child: Padding(
+        padding: const EdgeInsets.all(16),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.stretch,
+          children: [
+            Row(
+              children: [
+                Icon(Icons.tune_rounded, color: theme.colorScheme.primary),
+                const SizedBox(width: 8),
+                Expanded(
+                  child: Text(
+                    'Filtry historii',
+                    style: theme.textTheme.titleMedium?.copyWith(fontWeight: FontWeight.w900),
+                  ),
+                ),
+                MiniTag(text: '$visibleCount/$totalCount'),
+              ],
+            ),
+            const SizedBox(height: 12),
+            TextField(
+              key: const Key('history_plan_filter'),
+              controller: controller,
+              onChanged: onChanged,
+              decoration: const InputDecoration(
+                labelText: 'Nazwa planu lub dnia',
+                hintText: 'Np. góra, push, redukcja',
+                prefixIcon: Icon(Icons.search_rounded),
+              ),
+            ),
+            const SizedBox(height: 12),
+            Wrap(
+              spacing: 8,
+              runSpacing: 8,
+              crossAxisAlignment: WrapCrossAlignment.center,
+              children: [
+                OutlinedButton.icon(
+                  key: const Key('history_date_filter'),
+                  onPressed: onPickDateRange,
+                  icon: const Icon(Icons.date_range_rounded),
+                  label: Text(_trainerHistoryDateRangeLabel(dateRange)),
+                ),
+                if (hasFilters)
+                  TextButton.icon(
+                    onPressed: onClear,
+                    icon: const Icon(Icons.close_rounded),
+                    label: const Text('Wyczyść filtry'),
+                  ),
+              ],
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+}
+
+class _EmptyTrainerWorkoutHistoryCard extends StatelessWidget {
+  const _EmptyTrainerWorkoutHistoryCard();
+
+  @override
+  Widget build(BuildContext context) {
+    final theme = Theme.of(context);
+    return Card(
+      child: Padding(
+        padding: const EdgeInsets.all(24),
+        child: Column(
+          children: [
+            Icon(
+              Icons.history_toggle_off_rounded,
+              size: 48,
+              color: theme.colorScheme.primary,
+            ),
+            const SizedBox(height: 12),
+            Text(
+              'Historia jest jeszcze pusta',
+              textAlign: TextAlign.center,
+              style: theme.textTheme.titleMedium?.copyWith(fontWeight: FontWeight.w900),
+            ),
+            const SizedBox(height: 6),
+            Text(
+              'Po zakończeniu aktywnego treningu albo ręcznym dodaniu wpisu zobaczysz tutaj pełną historię.',
+              textAlign: TextAlign.center,
+              style: theme.textTheme.bodyMedium?.copyWith(
+                color: theme.colorScheme.onSurfaceVariant,
+              ),
+            ),
+            const SizedBox(height: 16),
+            FilledButton.icon(
+              onPressed: () => showAddWorkoutSheet(context),
+              icon: const Icon(Icons.add_rounded),
+              label: const Text('Dodaj trening'),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+}
+
+class _NoTrainerWorkoutHistoryResultsCard extends StatelessWidget {
+  const _NoTrainerWorkoutHistoryResultsCard({required this.onClear});
+
+  final VoidCallback onClear;
+
+  @override
+  Widget build(BuildContext context) {
+    final theme = Theme.of(context);
+    return Card(
+      child: Padding(
+        padding: const EdgeInsets.all(20),
+        child: Column(
+          children: [
+            Icon(Icons.filter_alt_off_rounded, size: 42, color: theme.colorScheme.primary),
+            const SizedBox(height: 10),
+            Text(
+              'Brak treningów dla tych filtrów',
+              textAlign: TextAlign.center,
+              style: theme.textTheme.titleMedium?.copyWith(fontWeight: FontWeight.w900),
+            ),
+            const SizedBox(height: 6),
+            Text(
+              'Zmień zakres dat albo nazwę planu/dnia.',
+              textAlign: TextAlign.center,
+              style: theme.textTheme.bodyMedium?.copyWith(color: theme.colorScheme.onSurfaceVariant),
+            ),
+            const SizedBox(height: 12),
+            TextButton.icon(
+              onPressed: onClear,
+              icon: const Icon(Icons.close_rounded),
+              label: const Text('Wyczyść filtry'),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+}
+
+class _TrainerWorkoutHistoryEntry {
+  const _TrainerWorkoutHistoryEntry({
+    required this.key,
+    required this.logs,
+  });
+
+  final String key;
+  final List<WorkoutLog> logs;
+
+  DateTime get date => logs.first.date;
+  bool get isPlannedSession => logs.first.sessionId.isNotEmpty;
+
+  String title(List<Exercise> customExercises) {
+    final first = logs.first;
+    if (first.sessionName.trim().isNotEmpty) return first.sessionName;
+    return first.exerciseFrom(customExercises).name;
+  }
+
+  String subtitle(List<Exercise> customExercises) {
+    if (logs.length == 1 && !isPlannedSession) return 'Wpis ręczny';
+    return logs.map((log) => log.exerciseFrom(customExercises).name).join(' · ');
+  }
+}
+
+List<_TrainerWorkoutHistoryEntry> _groupTrainerWorkoutHistory(List<WorkoutLog> sortedLogs) {
+  final groups = <String, List<WorkoutLog>>{};
+  for (final log in sortedLogs) {
+    groups.putIfAbsent(_trainerHistoryEntryKeyForLog(log), () => <WorkoutLog>[]).add(log);
+  }
+  final entries = groups.entries
+      .map(
+        (entry) => _TrainerWorkoutHistoryEntry(
+          key: entry.key,
+          logs: entry.value,
+        ),
+      )
+      .toList();
+  entries.sort((left, right) => right.date.compareTo(left.date));
+  return entries;
+}
+
+String _trainerHistoryEntryKeyForLog(WorkoutLog log) => log.sessionId.isEmpty ? 'log_${log.id}' : 'session_${log.sessionId}';
+
+_TrainerWorkoutHistoryEntry? _findTrainerWorkoutHistoryEntry(AppStore store, String entryKey) {
+  final logs = [...store.logs]..sort((a, b) => b.date.compareTo(a.date));
+  for (final entry in _groupTrainerWorkoutHistory(logs)) {
+    if (entry.key == entryKey) return entry;
+  }
+  return null;
+}
+
+bool _trainerHistoryEntryMatchesDateRange(_TrainerWorkoutHistoryEntry entry, DateTimeRange? range) {
+  if (range == null) return true;
+  final day = DateTime(entry.date.year, entry.date.month, entry.date.day);
+  final start = DateTime(range.start.year, range.start.month, range.start.day);
+  final end = DateTime(range.end.year, range.end.month, range.end.day);
+  return !day.isBefore(start) && !day.isAfter(end);
+}
+
+String trainerHistoryFullDate(DateTime date) => '${shortDate(date)}.${date.year}';
+
+String _trainerHistoryDateRangeLabel(DateTimeRange? range) {
+  if (range == null) return 'Wszystkie daty';
+  return '${trainerHistoryFullDate(range.start)} – ${trainerHistoryFullDate(range.end)}';
+}
+
+class _TrainerWorkoutHistoryStats {
+  const _TrainerWorkoutHistoryStats({
+    required this.duration,
+    required this.exerciseCount,
+    required this.setCount,
+    required this.volume,
+    required this.averageRpe,
+  });
+
+  final Duration duration;
+  final int exerciseCount;
+  final int setCount;
+  final double volume;
+  final double averageRpe;
+
+  factory _TrainerWorkoutHistoryStats.fromLogs(List<WorkoutLog> logs) {
+    final first = logs.first;
+    final duration = first.sessionStartedAt != null && first.sessionEndedAt != null
+        ? first.sessionEndedAt!.difference(first.sessionStartedAt!)
+        : Duration(seconds: logs.fold<int>(0, (sum, log) => sum + log.durationSec));
+    final setCount = logs.fold<int>(
+      0,
+      (sum, log) => sum + (log.workoutSets.isEmpty ? log.sets : log.workoutSets.where((set) => set.isCompleted).length),
+    );
+    final rpeSets = logs.expand((log) => log.workoutSets).where((set) => set.isCompleted && set.rpe > 0).toList();
+    var aggregateRpe = 0;
+    var aggregateRpeCount = 0;
+    for (final log in logs) {
+      final count = math.max(1, log.sets);
+      aggregateRpe += log.rpe * count;
+      aggregateRpeCount += count;
+    }
+    final averageRpe = rpeSets.isNotEmpty
+        ? rpeSets.fold<int>(0, (sum, set) => sum + set.rpe) / rpeSets.length
+        : aggregateRpeCount == 0
+            ? 0.0
+            : aggregateRpe / aggregateRpeCount;
+    return _TrainerWorkoutHistoryStats(
+      duration: duration,
+      exerciseCount: logs.length,
+      setCount: setCount,
+      volume: logs.fold<double>(0, (sum, log) => sum + log.volume),
+      averageRpe: averageRpe,
+    );
+  }
+}
+
+class _TrainerWorkoutHistoryEntryCard extends StatelessWidget {
+  const _TrainerWorkoutHistoryEntryCard({
+    super.key,
+    required this.entry,
+  });
+
+  final _TrainerWorkoutHistoryEntry entry;
+
+  @override
+  Widget build(BuildContext context) {
+    final store = AppScope.of(context);
+    final theme = Theme.of(context);
+    final stats = _TrainerWorkoutHistoryStats.fromLogs(entry.logs);
+    final title = entry.title(store.customExercises);
+    final subtitle = entry.subtitle(store.customExercises);
+    final first = entry.logs.first;
+    return Card(
+      key: Key('history_entry_${entry.key}'),
+      child: InkWell(
+        borderRadius: BorderRadius.circular(24),
+        onTap: () => Navigator.of(context).push(
+          MaterialPageRoute(
+            builder: (_) => WorkoutHistoryDetailsPage(entryKey: entry.key),
+          ),
+        ),
+        child: Padding(
+          padding: const EdgeInsets.all(16),
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.stretch,
+            children: [
+              Row(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  CircleAvatar(
+                    backgroundColor: theme.colorScheme.primaryContainer,
+                    child: Icon(
+                      entry.isPlannedSession ? Icons.flag_rounded : Icons.fitness_center_rounded,
+                      color: theme.colorScheme.primary,
+                    ),
+                  ),
+                  const SizedBox(width: 12),
+                  Expanded(
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        Text(
+                          title,
+                          maxLines: 2,
+                          overflow: TextOverflow.ellipsis,
+                          style: theme.textTheme.titleMedium?.copyWith(fontWeight: FontWeight.w900),
+                        ),
+                        const SizedBox(height: 4),
+                        Text(
+                          subtitle,
+                          maxLines: 2,
+                          overflow: TextOverflow.ellipsis,
+                          style: theme.textTheme.bodySmall?.copyWith(color: theme.colorScheme.onSurfaceVariant),
+                        ),
+                        const SizedBox(height: 4),
+                        Text(
+                          '${trainerHistoryFullDate(entry.date)} · ${formatWorkoutDuration(stats.duration)}',
+                          style: theme.textTheme.bodySmall?.copyWith(color: theme.colorScheme.onSurfaceVariant),
+                        ),
+                        if (first.sessionNote.isNotEmpty) ...[
+                          const SizedBox(height: 6),
+                          Text(first.sessionNote, maxLines: 3, overflow: TextOverflow.ellipsis),
+                        ],
+                      ],
+                    ),
+                  ),
+                  PopupMenuButton<String>(
+                    onSelected: (value) async {
+                      if (value == 'details') {
+                        Navigator.of(context).push(
+                          MaterialPageRoute(
+                            builder: (_) => WorkoutHistoryDetailsPage(entryKey: entry.key),
+                          ),
+                        );
+                      }
+                      if (value == 'delete') {
+                        final deleted = await _confirmAndDeleteTrainerWorkoutHistoryEntry(context, entry);
+                        if (context.mounted && deleted) showError(context, 'Usunięto trening z historii.');
+                      }
+                    },
+                    itemBuilder: (_) => const [
+                      PopupMenuItem(value: 'details', child: Text('Szczegóły')),
+                      PopupMenuItem(value: 'delete', child: Text('Usuń trening')),
+                    ],
+                  ),
+                ],
+              ),
+              const SizedBox(height: 14),
+              Wrap(
+                spacing: 8,
+                runSpacing: 8,
+                children: [
+                  MiniTag(text: formatWorkoutDuration(stats.duration)),
+                  MiniTag(text: '${stats.exerciseCount} ćwiczeń'),
+                  MiniTag(text: '${stats.setCount} serii'),
+                  MiniTag(text: '${stats.volume.round()} kg'),
+                  MiniTag(text: stats.averageRpe == 0 ? 'RPE —' : 'RPE ${stats.averageRpe.toStringAsFixed(1)}'),
+                ],
+              ),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+Future<bool> _confirmAndDeleteTrainerWorkoutHistoryEntry(BuildContext context, _TrainerWorkoutHistoryEntry entry) async {
+  final store = AppScope.read(context);
+  final confirmed = await showDialog<bool>(
+    context: context,
+    builder: (dialogContext) => AlertDialog(
+      title: const Text('Usunąć trening?'),
+      content: Text(
+        entry.isPlannedSession ? 'Cała sesja, ćwiczenia i serie zostaną usunięte z historii.' : 'Ten wpis treningowy zostanie usunięty z historii.',
+      ),
+      actions: [
+        TextButton(
+          onPressed: () => Navigator.pop(dialogContext, false),
+          child: const Text('Anuluj'),
+        ),
+        FilledButton(
+          onPressed: () => Navigator.pop(dialogContext, true),
+          child: const Text('Usuń'),
+        ),
+      ],
+    ),
+  );
+  if (confirmed != true) return false;
+  await store.deleteHistoryEntry(entry.key);
+  return true;
+}
+
+class WorkoutHistoryDetailsPage extends StatelessWidget {
+  const WorkoutHistoryDetailsPage({super.key, required this.entryKey});
+
+  final String entryKey;
+
+  @override
+  Widget build(BuildContext context) {
+    final store = AppScope.of(context);
+    final entry = _findTrainerWorkoutHistoryEntry(store, entryKey);
+    if (entry == null) {
+      return Scaffold(
+        appBar: AppBar(title: const Text('Szczegóły treningu')),
+        body: const Center(
+          child: Padding(
+            padding: EdgeInsets.all(24),
+            child: Text('Ten trening nie jest już dostępny w historii.'),
+          ),
+        ),
+      );
+    }
+
+    final stats = _TrainerWorkoutHistoryStats.fromLogs(entry.logs);
+    return Scaffold(
+      appBar: AppBar(
+        title: const Text('Szczegóły treningu'),
+        actions: [
+          IconButton(
+            tooltip: 'Usuń trening',
+            onPressed: () async {
+              final deleted = await _confirmAndDeleteTrainerWorkoutHistoryEntry(context, entry);
+              if (context.mounted && deleted) Navigator.of(context).pop();
+            },
+            icon: const Icon(Icons.delete_outline_rounded),
+          ),
+        ],
+      ),
+      body: ListView(
+        padding: const EdgeInsets.fromLTRB(16, 8, 16, 24),
+        children: [
+          _TrainerWorkoutHistoryDetailsHeader(entry: entry, stats: stats),
+          const SizedBox(height: 12),
+          for (final log in entry.logs) ...[
+            _TrainerWorkoutExerciseHistoryCard(log: log),
+            const SizedBox(height: 12),
+          ],
+        ],
+      ),
+    );
+  }
+}
+
+class _TrainerWorkoutHistoryDetailsHeader extends StatelessWidget {
+  const _TrainerWorkoutHistoryDetailsHeader({
+    required this.entry,
+    required this.stats,
+  });
+
+  final _TrainerWorkoutHistoryEntry entry;
+  final _TrainerWorkoutHistoryStats stats;
+
+  @override
+  Widget build(BuildContext context) {
+    final store = AppScope.of(context);
+    final theme = Theme.of(context);
+    final first = entry.logs.first;
+    return Card(
+      child: Padding(
+        padding: const EdgeInsets.all(18),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.stretch,
+          children: [
+            Text(
+              entry.title(store.customExercises),
+              style: theme.textTheme.headlineSmall?.copyWith(fontWeight: FontWeight.w900),
+            ),
+            const SizedBox(height: 4),
+            Text(
+              '${weekdayName(entry.date.weekday)} · ${trainerHistoryFullDate(entry.date)}',
+              style: theme.textTheme.bodyMedium?.copyWith(color: theme.colorScheme.onSurfaceVariant),
+            ),
+            const SizedBox(height: 14),
+            Wrap(
+              spacing: 8,
+              runSpacing: 8,
+              children: [
+                MiniTag(text: 'Czas ${formatWorkoutDuration(stats.duration)}'),
+                MiniTag(text: '${stats.exerciseCount} ćwiczeń'),
+                MiniTag(text: '${stats.setCount} serii'),
+                MiniTag(text: 'Objętość ${stats.volume.round()} kg'),
+                MiniTag(text: stats.averageRpe == 0 ? 'RPE —' : 'Śr. RPE ${stats.averageRpe.toStringAsFixed(1)}'),
+              ],
+            ),
+            if (first.sessionNote.isNotEmpty) ...[
+              const SizedBox(height: 14),
+              _TrainerWorkoutHistoryNoteBox(
+                title: 'Notatka sesji',
+                note: first.sessionNote,
+              ),
+            ],
+          ],
+        ),
+      ),
+    );
+  }
+}
+
+class _TrainerWorkoutExerciseHistoryCard extends StatelessWidget {
+  const _TrainerWorkoutExerciseHistoryCard({required this.log});
+
+  final WorkoutLog log;
+
+  @override
+  Widget build(BuildContext context) {
+    final store = AppScope.of(context);
+    final theme = Theme.of(context);
+    final exercise = log.exerciseFrom(store.customExercises);
+    final sets = [...log.workoutSets]..sort((left, right) => left.order.compareTo(right.order));
+    return Card(
+      child: Padding(
+        padding: const EdgeInsets.all(16),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.stretch,
+          children: [
+            Row(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                SizedBox(width: 58, height: 58, child: ExerciseVisual(exercise: exercise)),
+                const SizedBox(width: 12),
+                Expanded(
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Text(
+                        exercise.name,
+                        maxLines: 2,
+                        overflow: TextOverflow.ellipsis,
+                        style: theme.textTheme.titleMedium?.copyWith(fontWeight: FontWeight.w900),
+                      ),
+                      const SizedBox(height: 4),
+                      Wrap(
+                        spacing: 6,
+                        runSpacing: 6,
+                        children: [
+                          MiniTag(text: '${sets.isEmpty ? log.sets : sets.where((set) => set.isCompleted).length} serii'),
+                          MiniTag(text: '${log.volume.round()} kg'),
+                          MiniTag(text: 'RPE ${log.rpe}'),
+                        ],
+                      ),
+                    ],
+                  ),
+                ),
+              ],
+            ),
+            if (log.note.isNotEmpty) ...[
+              const SizedBox(height: 12),
+              _TrainerWorkoutHistoryNoteBox(title: 'Notatka ćwiczenia', note: log.note),
+            ],
+            const SizedBox(height: 14),
+            Text('Serie', style: theme.textTheme.titleSmall?.copyWith(fontWeight: FontWeight.w900)),
+            const SizedBox(height: 8),
+            if (sets.isEmpty)
+              _TrainerAggregateWorkoutLogRow(log: log)
+            else
+              for (final set in sets) ...[
+                _TrainerWorkoutSetHistoryRow(log: log, set: set),
+                const SizedBox(height: 8),
+              ],
+          ],
+        ),
+      ),
+    );
+  }
+}
+
+class _TrainerAggregateWorkoutLogRow extends StatelessWidget {
+  const _TrainerAggregateWorkoutLogRow({required this.log});
+
+  final WorkoutLog log;
+
+  @override
+  Widget build(BuildContext context) {
+    final theme = Theme.of(context);
+    return Container(
+      padding: const EdgeInsets.all(12),
+      decoration: BoxDecoration(
+        color: theme.colorScheme.surfaceContainerHighest.withValues(alpha: 0.55),
+        borderRadius: BorderRadius.circular(18),
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.stretch,
+        children: [
+          Text('Wpis zbiorczy', style: theme.textTheme.labelLarge?.copyWith(fontWeight: FontWeight.w900)),
+          const SizedBox(height: 8),
+          Wrap(
+            spacing: 8,
+            runSpacing: 8,
+            children: [
+              MiniTag(text: '${log.sets} serii'),
+              MiniTag(text: '${log.reps} powt.'),
+              MiniTag(text: '${log.weightKg.toStringAsFixed(1)} kg'),
+              MiniTag(text: 'RPE ${log.rpe}'),
+            ],
+          ),
+          const SizedBox(height: 10),
+          Align(
+            alignment: Alignment.centerLeft,
+            child: OutlinedButton.icon(
+              onPressed: () => showAddWorkoutSheet(context, existing: log),
+              icon: const Icon(Icons.edit_outlined),
+              label: const Text('Edytuj wpis'),
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+class _TrainerWorkoutSetHistoryRow extends StatelessWidget {
+  const _TrainerWorkoutSetHistoryRow({
+    required this.log,
+    required this.set,
+  });
+
+  final WorkoutLog log;
+  final WorkoutSet set;
+
+  @override
+  Widget build(BuildContext context) {
+    final theme = Theme.of(context);
+    return Container(
+      padding: const EdgeInsets.all(12),
+      decoration: BoxDecoration(
+        color: theme.colorScheme.surfaceContainerHighest.withValues(alpha: 0.55),
+        borderRadius: BorderRadius.circular(18),
+      ),
+      child: Row(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          CircleAvatar(
+            radius: 17,
+            backgroundColor: theme.colorScheme.primaryContainer,
+            child: Text('${set.order}', style: theme.textTheme.labelLarge?.copyWith(fontWeight: FontWeight.w900)),
+          ),
+          const SizedBox(width: 10),
+          Expanded(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Text('Seria ${set.order}', style: theme.textTheme.labelLarge?.copyWith(fontWeight: FontWeight.w900)),
+                const SizedBox(height: 6),
+                Wrap(
+                  spacing: 8,
+                  runSpacing: 8,
+                  children: [
+                    MiniTag(text: '${set.weightKg.toStringAsFixed(1)} kg'),
+                    MiniTag(text: '${set.repetitions} powt.'),
+                    MiniTag(text: 'RPE ${set.rpe}'),
+                  ],
+                ),
+                if (set.note.isNotEmpty) ...[
+                  const SizedBox(height: 8),
+                  Text(set.note, style: theme.textTheme.bodySmall?.copyWith(color: theme.colorScheme.onSurfaceVariant)),
+                ],
+              ],
+            ),
+          ),
+          IconButton(
+            key: Key('edit_set_${log.id}_${set.id}'),
+            tooltip: 'Edytuj serię',
+            onPressed: () => showEditWorkoutSetSheet(context, log: log, set: set),
+            icon: const Icon(Icons.edit_outlined),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+class _TrainerWorkoutHistoryNoteBox extends StatelessWidget {
+  const _TrainerWorkoutHistoryNoteBox({
+    required this.title,
+    required this.note,
+  });
+
+  final String title;
+  final String note;
+
+  @override
+  Widget build(BuildContext context) {
+    final theme = Theme.of(context);
+    return Container(
+      padding: const EdgeInsets.all(12),
+      decoration: BoxDecoration(
+        color: theme.colorScheme.primaryContainer.withValues(alpha: 0.35),
+        borderRadius: BorderRadius.circular(18),
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Text(title, style: theme.textTheme.labelLarge?.copyWith(fontWeight: FontWeight.w900)),
+          const SizedBox(height: 4),
+          Text(note),
+        ],
+      ),
+    );
+  }
+}
+
+Future<void> showEditWorkoutSetSheet(
+  BuildContext context, {
+  required WorkoutLog log,
+  required WorkoutSet set,
+}) async {
+  final store = AppScope.read(context);
+  await showModalBottomSheet(
+    context: context,
+    isScrollControlled: true,
+    useSafeArea: true,
+    showDragHandle: true,
+    builder: (_) => EditWorkoutSetSheetContent(store: store, log: log, set: set),
+  );
+}
+
+class EditWorkoutSetSheetContent extends StatefulWidget {
+  const EditWorkoutSetSheetContent({
+    super.key,
+    required this.store,
+    required this.log,
+    required this.set,
+  });
+
+  final AppStore store;
+  final WorkoutLog log;
+  final WorkoutSet set;
+
+  @override
+  State<EditWorkoutSetSheetContent> createState() => _EditWorkoutSetSheetContentState();
+}
+
+class _EditWorkoutSetSheetContentState extends State<EditWorkoutSetSheetContent> {
+  late final TextEditingController weight;
+  late final TextEditingController repetitions;
+  late final TextEditingController note;
+  late int rpe;
+
+  @override
+  void initState() {
+    super.initState();
+    weight = TextEditingController(text: widget.set.weightKg.toStringAsFixed(1));
+    repetitions = TextEditingController(text: '${widget.set.repetitions}');
+    note = TextEditingController(text: widget.set.note);
+    rpe = widget.set.rpe.clamp(1, 10).toInt();
+  }
+
+  @override
+  void dispose() {
+    weight.dispose();
+    repetitions.dispose();
+    note.dispose();
+    super.dispose();
+  }
+
+  Future<void> _save() async {
+    final parsedWeight = double.tryParse(weight.text.replaceAll(',', '.'));
+    final parsedRepetitions = int.tryParse(repetitions.text);
+    if (parsedWeight == null || parsedWeight < 0) {
+      showError(context, 'Podaj poprawny ciężar.');
+      return;
+    }
+    if (parsedRepetitions == null || parsedRepetitions < 0 || parsedRepetitions > 999) {
+      showError(context, 'Powtórzenia muszą mieścić się w zakresie 0–999.');
+      return;
+    }
+    await widget.store.updateWorkoutLogSet(
+      logId: widget.log.id,
+      setId: widget.set.id,
+      weightKg: parsedWeight,
+      repetitions: parsedRepetitions,
+      rpe: rpe,
+      note: note.text,
+    );
+    if (!mounted) return;
+    Navigator.of(context).pop();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return Padding(
+      padding: EdgeInsets.fromLTRB(
+        16,
+        0,
+        16,
+        16 + MediaQuery.of(context).viewInsets.bottom + MediaQuery.of(context).viewPadding.bottom,
+      ),
+      child: SingleChildScrollView(
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          crossAxisAlignment: CrossAxisAlignment.stretch,
+          children: [
+            Text('Edytuj serię ${widget.set.order}', style: Theme.of(context).textTheme.titleLarge?.copyWith(fontWeight: FontWeight.w900)),
+            const SizedBox(height: 12),
+            Row(
+              children: [
+                Expanded(
+                  child: TextField(
+                    key: const Key('edit_set_weight'),
+                    controller: weight,
+                    keyboardType: const TextInputType.numberWithOptions(decimal: true),
+                    decoration: const InputDecoration(labelText: 'Ciężar kg'),
+                  ),
+                ),
+                const SizedBox(width: 10),
+                Expanded(
+                  child: TextField(
+                    key: const Key('edit_set_repetitions'),
+                    controller: repetitions,
+                    keyboardType: TextInputType.number,
+                    decoration: const InputDecoration(labelText: 'Powtórzenia'),
+                  ),
+                ),
+              ],
+            ),
+            const SizedBox(height: 10),
+            InputDecorator(
+              decoration: const InputDecoration(labelText: 'RPE'),
+              child: DropdownButtonHideUnderline(
+                child: DropdownButton<int>(
+                  key: const Key('edit_set_rpe'),
+                  value: rpe,
+                  isExpanded: true,
+                  items: List.generate(10, (index) => index + 1).map((value) => DropdownMenuItem(value: value, child: Text('$value/10'))).toList(),
+                  onChanged: (value) => setState(() => rpe = value ?? rpe),
+                ),
+              ),
+            ),
+            const SizedBox(height: 10),
+            TextField(
+              key: const Key('edit_set_note'),
+              controller: note,
+              maxLines: 3,
+              decoration: const InputDecoration(labelText: 'Notatka do serii'),
+            ),
+            const SizedBox(height: 14),
+            FilledButton.icon(
+              key: const Key('save_edited_set'),
+              onPressed: _save,
+              icon: const Icon(Icons.save_outlined),
+              label: const Text('Zapisz serię'),
+            ),
+            const SizedBox(height: 8),
+          ],
+        ),
+      ),
+    );
+  }
+}
+
+class LegacyHistoryPage extends StatelessWidget {
+  const LegacyHistoryPage({super.key});
 
   @override
   Widget build(BuildContext context) {
