@@ -47,10 +47,24 @@ void main() {
       met: 4,
       source: 'custom',
     );
+    final bodyMeasurement = BodyMeasurement(
+      id: 'measurement-1',
+      date: DateTime(2026, 6, 24),
+      weightKg: 98.4,
+      waistCm: 92,
+      chestCm: 112,
+      armCm: 39,
+      thighCm: 64,
+      hipsCm: 105,
+      calfCm: 41,
+      shouldersCm: 128,
+      note: 'Pomiar kontrolny',
+    );
 
     await repository.saveSessions([session]);
     await repository.savePlans([plan]);
     await repository.saveCustomExercises([exercise]);
+    await repository.saveBodyMeasurements([bodyMeasurement]);
     await repository.saveExerciseLibraryPreferences(
       const ExerciseLibraryPreferences(
         favoriteExerciseIds: {'custom-1'},
@@ -102,5 +116,7 @@ void main() {
     );
     expect(restored.activeWorkoutSession?.note, 'Notatka sesji');
     expect(restored.activeWorkoutSession?.restTimerRemainingSeconds, 75);
+    expect(restored.bodyMeasurements.single.weightKg, 98.4);
+    expect(restored.bodyMeasurements.single.note, 'Pomiar kontrolny');
   });
 }

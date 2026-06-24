@@ -172,5 +172,36 @@ void main() {
       expect(restored.restTimerTotalSeconds, 120);
       expect(restored.isRestTimerPaused, isTrue);
     });
+
+    test('BodyMeasurement preserves body metrics and progress photo placeholders', () {
+      final measurement = BodyMeasurement(
+        id: 'measurement-1',
+        date: DateTime(2026, 6, 24),
+        weightKg: 98.4,
+        waistCm: 92,
+        chestCm: 112,
+        armCm: 39.5,
+        thighCm: 64,
+        hipsCm: 105,
+        calfCm: 41,
+        shouldersCm: 128,
+        note: 'Pomiar rano',
+        progressPhotoPaths: const ['front-placeholder.jpg'],
+      );
+
+      final restored = BodyMeasurement.fromJson(measurement.toJson());
+
+      expect(restored.hasAnyMeasurement, isTrue);
+      expect(restored.weightKg, 98.4);
+      expect(restored.waistCm, 92);
+      expect(restored.chestCm, 112);
+      expect(restored.armCm, 39.5);
+      expect(restored.thighCm, 64);
+      expect(restored.hipsCm, 105);
+      expect(restored.calfCm, 41);
+      expect(restored.shouldersCm, 128);
+      expect(restored.note, 'Pomiar rano');
+      expect(restored.progressPhotoPaths, contains('front-placeholder.jpg'));
+    });
   });
 }

@@ -11,6 +11,7 @@ class TrainerLocalData {
     required this.customExercises,
     required this.exerciseLibraryPreferences,
     required this.activeWorkoutSession,
+    required this.bodyMeasurements,
   });
 
   final List<WorkoutLog> sessions;
@@ -18,23 +19,22 @@ class TrainerLocalData {
   final List<Exercise> customExercises;
   final ExerciseLibraryPreferences exerciseLibraryPreferences;
   final ActiveWorkoutSession? activeWorkoutSession;
+  final List<BodyMeasurement> bodyMeasurements;
 }
 
 class TrainerLocalRepository {
-  TrainerLocalRepository({SharedPreferences? preferences})
-      : _preferences = preferences;
+  TrainerLocalRepository({SharedPreferences? preferences}) : _preferences = preferences;
 
   static const logsKey = 'workout_logs_v1';
   static const plansKey = 'workout_plans_v1';
   static const customExercisesKey = 'workout_custom_exercises_v1';
-  static const exerciseLibraryPreferencesKey =
-      'exercise_library_preferences_v1';
+  static const exerciseLibraryPreferencesKey = 'exercise_library_preferences_v1';
   static const activeWorkoutSessionKey = 'active_workout_session_v1';
+  static const bodyMeasurementsKey = 'body_measurements_v1';
 
   final SharedPreferences? _preferences;
 
-  Future<SharedPreferences> get _prefs async =>
-      _preferences ?? SharedPreferences.getInstance();
+  Future<SharedPreferences> get _prefs async => _preferences ?? SharedPreferences.getInstance();
 
   Future<TrainerLocalData> load() async {
     final preferences = await _prefs;
@@ -59,6 +59,10 @@ class TrainerLocalRepository {
       activeWorkoutSession: _decodeNullableObject(
         preferences.getString(activeWorkoutSessionKey),
         ActiveWorkoutSession.fromJson,
+      ),
+      bodyMeasurements: _decodeList(
+        preferences.getString(bodyMeasurementsKey),
+        BodyMeasurement.fromJson,
       ),
     );
   }
@@ -108,6 +112,18 @@ class TrainerLocalRepository {
     await preferences.setString(
       activeWorkoutSessionKey,
       jsonEncode(activeWorkoutSession.toJson()),
+    );
+  }
+
+  Future<void> saveBodyMeasurements(
+    Iterable<BodyMeasurement> bodyMeasurements,
+  ) async {
+    final preferences = await _prefs;
+    await preferences.setString(
+      bodyMeasurementsKey,
+      jsonEncode(
+        bodyMeasurements.map((measurement) => measurement.toJson()).toList(),
+      ),
     );
   }
 

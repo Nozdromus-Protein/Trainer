@@ -150,6 +150,7 @@ class AppStore extends ChangeNotifier {
   final List<WorkoutLog> logs = [];
   final List<WorkoutPlan> plans = [];
   final List<Exercise> customExercises = [];
+  final List<BodyMeasurement> bodyMeasurements = [];
   ExerciseLibraryPreferences exerciseLibraryPreferences = const ExerciseLibraryPreferences();
   ActiveWorkoutSession? activeWorkoutSession;
   AppSettings settings = AppSettings.defaults();
@@ -170,6 +171,10 @@ class AppStore extends ChangeNotifier {
     customExercises
       ..clear()
       ..addAll(trainerData.customExercises);
+    bodyMeasurements
+      ..clear()
+      ..addAll(trainerData.bodyMeasurements);
+    bodyMeasurements.sort((left, right) => right.date.compareTo(left.date));
     exerciseLibraryPreferences = trainerData.exerciseLibraryPreferences;
     activeWorkoutSession = trainerData.activeWorkoutSession;
     if (activeWorkoutSession?.exercises.isEmpty ?? false) {
@@ -211,6 +216,7 @@ class AppStore extends ChangeNotifier {
     await saveCustomExercises();
     await saveExerciseLibraryPreferences();
     await saveActiveWorkoutSession();
+    await saveBodyMeasurements();
   }
 
   Future<void> saveLogs() async {
@@ -382,6 +388,10 @@ class AppStore extends ChangeNotifier {
     await _trainerRepository.saveCustomExercises(customExercises);
   }
 
+  Future<void> saveBodyMeasurements() async {
+    await _trainerRepository.saveBodyMeasurements(bodyMeasurements);
+  }
+
   Future<void> saveExerciseLibraryPreferences() async {
     await _trainerRepository.saveExerciseLibraryPreferences(
       exerciseLibraryPreferences,
@@ -407,6 +417,16 @@ class AppStore extends ChangeNotifier {
   Future<void> deleteCustomExercise(String id) async {
     customExercises.removeWhere((e) => e.id == id);
     await saveCustomExercises();
+    notifyListeners();
+  }
+
+  Future<void> addBodyMeasurement(BodyMeasurement measurement) async {
+    if (!measurement.hasAnyMeasurement && measurement.note.trim().isEmpty) {
+      return;
+    }
+    bodyMeasurements.insert(0, measurement);
+    bodyMeasurements.sort((left, right) => right.date.compareTo(left.date));
+    await saveBodyMeasurements();
     notifyListeners();
   }
 
@@ -8351,6 +8371,424 @@ class MuscleDistributionCard extends StatelessWidget {
   }
 }
 
+class BodyMeasurementsPage extends StatelessWidget {
+  const BodyMeasurementsPage({super.key});
+
+  @override
+  Widget build(BuildContext context) {
+    final store = AppScope.of(context);
+    final measurements = [...store.bodyMeasurements]..sort((left, right) => right.date.compareTo(left.date));
+    return PageFrame(
+      title: 'Pomiary sylwetki',
+      subtitle: 'Waga, obwody, notatki i lokalna historia zmian',
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.stretch,
+        children: [
+          BodyMeasurementFormCard(store: store),
+          const SizedBox(height: 12),
+          const ProgressPhotoPlaceholderCard(),
+          const SizedBox(height: 12),
+          if (measurements.isNotEmpty) ...[
+            BodyMeasurementChartsCard(measurements: measurements),
+            const SizedBox(height: 12),
+          ],
+          BodyMeasurementHistoryCard(measurements: measurements),
+        ],
+      ),
+    );
+  }
+}
+
+class BodyMeasurementFormCard extends StatefulWidget {
+  const BodyMeasurementFormCard({super.key, required this.store});
+
+  final AppStore store;
+
+  @override
+  State<BodyMeasurementFormCard> createState() => _BodyMeasurementFormCardState();
+}
+
+class _BodyMeasurementFormCardState extends State<BodyMeasurementFormCard> {
+  late DateTime selectedDate;
+  late final TextEditingController weight;
+  late final TextEditingController waist;
+  late final TextEditingController chest;
+  late final TextEditingController arm;
+  late final TextEditingController thigh;
+  late final TextEditingController hips;
+  late final TextEditingController calf;
+  late final TextEditingController shoulders;
+  late final TextEditingController note;
+
+  @override
+  void initState() {
+    super.initState();
+    selectedDate = DateTime.now();
+    weight = TextEditingController();
+    waist = TextEditingController();
+    chest = TextEditingController();
+    arm = TextEditingController();
+    thigh = TextEditingController();
+    hips = TextEditingController();
+    calf = TextEditingController();
+    shoulders = TextEditingController();
+    note = TextEditingController();
+  }
+
+  @override
+  void dispose() {
+    weight.dispose();
+    waist.dispose();
+    chest.dispose();
+    arm.dispose();
+    thigh.dispose();
+    hips.dispose();
+    calf.dispose();
+    shoulders.dispose();
+    note.dispose();
+    super.dispose();
+  }
+
+  Future<void> pickDate() async {
+    final picked = await showDatePicker(
+      context: context,
+      initialDate: selectedDate,
+      firstDate: DateTime(2020),
+      lastDate: DateTime.now().add(const Duration(days: 1)),
+      helpText: 'Data pomiaru',
+    );
+    if (picked == null || !mounted) return;
+    setState(() => selectedDate = picked);
+  }
+
+  Future<void> save() async {
+    final now = DateTime.now();
+    final measurement = BodyMeasurement(
+      id: 'measurement_${idNow()}',
+      date: DateTime(selectedDate.year, selectedDate.month, selectedDate.day, now.hour, now.minute),
+      weightKg: parseBodyMeasurementValue(weight.text),
+      waistCm: parseBodyMeasurementValue(waist.text),
+      chestCm: parseBodyMeasurementValue(chest.text),
+      armCm: parseBodyMeasurementValue(arm.text),
+      thighCm: parseBodyMeasurementValue(thigh.text),
+      hipsCm: parseBodyMeasurementValue(hips.text),
+      calfCm: parseBodyMeasurementValue(calf.text),
+      shouldersCm: parseBodyMeasurementValue(shoulders.text),
+      note: note.text.trim(),
+    );
+    if (!measurement.hasAnyMeasurement && measurement.note.isEmpty) {
+      showError(context, 'Dodaj przynajmniej jeden pomiar albo notatkę.');
+      return;
+    }
+    await widget.store.addBodyMeasurement(measurement);
+    if (!mounted) return;
+    weight.clear();
+    waist.clear();
+    chest.clear();
+    arm.clear();
+    thigh.clear();
+    hips.clear();
+    calf.clear();
+    shoulders.clear();
+    note.clear();
+    setState(() => selectedDate = DateTime.now());
+    showError(context, 'Zapisano pomiar sylwetki.');
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final theme = Theme.of(context);
+    final fields = [
+      _BodyMeasurementField(controller: weight, label: 'Waga kg', keyValue: 'measurement_weight'),
+      _BodyMeasurementField(controller: waist, label: 'Pas cm', keyValue: 'measurement_waist'),
+      _BodyMeasurementField(controller: chest, label: 'Klatka cm', keyValue: 'measurement_chest'),
+      _BodyMeasurementField(controller: arm, label: 'Ramię cm', keyValue: 'measurement_arm'),
+      _BodyMeasurementField(controller: thigh, label: 'Udo cm', keyValue: 'measurement_thigh'),
+      _BodyMeasurementField(controller: hips, label: 'Biodra cm', keyValue: 'measurement_hips'),
+      _BodyMeasurementField(controller: calf, label: 'Łydka cm', keyValue: 'measurement_calf'),
+      _BodyMeasurementField(controller: shoulders, label: 'Barki cm', keyValue: 'measurement_shoulders'),
+    ];
+    return Card(
+      child: Padding(
+        padding: const EdgeInsets.all(18),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.stretch,
+          children: [
+            Row(
+              children: [
+                Icon(Icons.straighten_rounded, color: theme.colorScheme.primary),
+                const SizedBox(width: 8),
+                Expanded(child: Text('Dodaj pomiar', style: theme.textTheme.titleMedium?.copyWith(fontWeight: FontWeight.w900))),
+              ],
+            ),
+            const SizedBox(height: 12),
+            OutlinedButton.icon(
+              key: const Key('measurement_date_button'),
+              onPressed: pickDate,
+              icon: const Icon(Icons.event_rounded),
+              label: Text('Data: ${trainerHistoryFullDate(selectedDate)}'),
+            ),
+            const SizedBox(height: 12),
+            LayoutBuilder(
+              builder: (context, constraints) {
+                final fieldWidth = constraints.maxWidth >= 660
+                    ? (constraints.maxWidth - 20) / 3
+                    : constraints.maxWidth >= 430
+                        ? (constraints.maxWidth - 10) / 2
+                        : constraints.maxWidth;
+                return Wrap(
+                  spacing: 10,
+                  runSpacing: 10,
+                  children: [
+                    for (final field in fields) SizedBox(width: fieldWidth, child: field),
+                  ],
+                );
+              },
+            ),
+            const SizedBox(height: 10),
+            TextField(
+              key: const Key('measurement_note'),
+              controller: note,
+              minLines: 2,
+              maxLines: 4,
+              decoration: const InputDecoration(labelText: 'Notatka do pomiaru'),
+            ),
+            const SizedBox(height: 12),
+            FilledButton.icon(
+              key: const Key('save_body_measurement'),
+              onPressed: save,
+              icon: const Icon(Icons.save_outlined),
+              label: const Text('Zapisz pomiar'),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+}
+
+class _BodyMeasurementField extends StatelessWidget {
+  const _BodyMeasurementField({
+    required this.controller,
+    required this.label,
+    required this.keyValue,
+  });
+
+  final TextEditingController controller;
+  final String label;
+  final String keyValue;
+
+  @override
+  Widget build(BuildContext context) {
+    return TextField(
+      key: Key(keyValue),
+      controller: controller,
+      keyboardType: const TextInputType.numberWithOptions(decimal: true),
+      decoration: InputDecoration(labelText: label),
+    );
+  }
+}
+
+class ProgressPhotoPlaceholderCard extends StatelessWidget {
+  const ProgressPhotoPlaceholderCard({super.key});
+
+  @override
+  Widget build(BuildContext context) {
+    final theme = Theme.of(context);
+    return Card(
+      child: Padding(
+        padding: const EdgeInsets.all(18),
+        child: Row(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            CircleAvatar(
+              backgroundColor: theme.colorScheme.primaryContainer,
+              foregroundColor: theme.colorScheme.onPrimaryContainer,
+              child: const Icon(Icons.photo_camera_outlined),
+            ),
+            const SizedBox(width: 12),
+            Expanded(
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Text('Zdjęcia progresu', style: theme.textTheme.titleMedium?.copyWith(fontWeight: FontWeight.w900)),
+                  const SizedBox(height: 4),
+                  Text(
+                    'Miejsce przygotowane pod przyszłe zdjęcia sylwetki. Na tym etapie zapisujemy strukturę w modelu, ale nie dodajemy wyboru plików ani analizy AI.',
+                    style: theme.textTheme.bodyMedium?.copyWith(color: theme.colorScheme.onSurfaceVariant),
+                  ),
+                ],
+              ),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+}
+
+class BodyMeasurementChartsCard extends StatelessWidget {
+  const BodyMeasurementChartsCard({super.key, required this.measurements});
+
+  final List<BodyMeasurement> measurements;
+
+  @override
+  Widget build(BuildContext context) {
+    final chartMeasurements = measurements.reversed.take(8).toList();
+    final labels = chartMeasurements.map((measurement) => shortDate(measurement.date)).toList();
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.stretch,
+      children: [
+        SimpleProgressBarChartCard(
+          title: 'Waga',
+          subtitle: 'Zmiana masy ciała w czasie',
+          values: chartMeasurements.map((measurement) => measurement.weightKg).toList(),
+          labels: labels,
+          suffix: 'kg',
+          icon: Icons.monitor_weight_outlined,
+        ),
+        const SizedBox(height: 12),
+        SimpleProgressBarChartCard(
+          title: 'Pas',
+          subtitle: 'Zmiana obwodu pasa',
+          values: chartMeasurements.map((measurement) => measurement.waistCm).toList(),
+          labels: labels,
+          suffix: 'cm',
+          icon: Icons.straighten_rounded,
+        ),
+        const SizedBox(height: 12),
+        SimpleProgressBarChartCard(
+          title: 'Ramię',
+          subtitle: 'Zmiana obwodu ramienia',
+          values: chartMeasurements.map((measurement) => measurement.armCm).toList(),
+          labels: labels,
+          suffix: 'cm',
+          icon: Icons.fitness_center_outlined,
+        ),
+        const SizedBox(height: 12),
+        SimpleProgressBarChartCard(
+          title: 'Klatka',
+          subtitle: 'Zmiana obwodu klatki piersiowej',
+          values: chartMeasurements.map((measurement) => measurement.chestCm).toList(),
+          labels: labels,
+          suffix: 'cm',
+          icon: Icons.accessibility_new_rounded,
+        ),
+        const SizedBox(height: 12),
+        SimpleProgressBarChartCard(
+          title: 'Udo',
+          subtitle: 'Zmiana obwodu uda',
+          values: chartMeasurements.map((measurement) => measurement.thighCm).toList(),
+          labels: labels,
+          suffix: 'cm',
+          icon: Icons.directions_run_rounded,
+        ),
+      ],
+    );
+  }
+}
+
+class BodyMeasurementHistoryCard extends StatelessWidget {
+  const BodyMeasurementHistoryCard({super.key, required this.measurements});
+
+  final List<BodyMeasurement> measurements;
+
+  @override
+  Widget build(BuildContext context) {
+    final theme = Theme.of(context);
+    return Card(
+      child: Padding(
+        padding: const EdgeInsets.all(18),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.stretch,
+          children: [
+            Row(
+              children: [
+                Icon(Icons.history_rounded, color: theme.colorScheme.primary),
+                const SizedBox(width: 8),
+                Expanded(child: Text('Historia pomiarów', style: theme.textTheme.titleMedium?.copyWith(fontWeight: FontWeight.w900))),
+              ],
+            ),
+            const SizedBox(height: 12),
+            if (measurements.isEmpty)
+              Text('Nie masz jeszcze zapisanych pomiarów sylwetki.', style: theme.textTheme.bodyMedium?.copyWith(color: theme.colorScheme.onSurfaceVariant))
+            else
+              ...measurements.map(
+                (measurement) => Padding(
+                  padding: const EdgeInsets.only(bottom: 12),
+                  child: BodyMeasurementHistoryTile(measurement: measurement),
+                ),
+              ),
+          ],
+        ),
+      ),
+    );
+  }
+}
+
+class BodyMeasurementHistoryTile extends StatelessWidget {
+  const BodyMeasurementHistoryTile({super.key, required this.measurement});
+
+  final BodyMeasurement measurement;
+
+  @override
+  Widget build(BuildContext context) {
+    final theme = Theme.of(context);
+    return Container(
+      padding: const EdgeInsets.all(14),
+      decoration: BoxDecoration(
+        color: theme.colorScheme.surfaceContainerHighest.withValues(alpha: 0.5),
+        borderRadius: BorderRadius.circular(20),
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Text(trainerHistoryFullDate(measurement.date), style: theme.textTheme.titleSmall?.copyWith(fontWeight: FontWeight.w900)),
+          const SizedBox(height: 8),
+          Wrap(
+            spacing: 6,
+            runSpacing: 6,
+            children: bodyMeasurementTags(measurement).map((tag) => MiniTag(text: tag)).toList(),
+          ),
+          if (measurement.note.isNotEmpty) ...[
+            const SizedBox(height: 8),
+            Text(measurement.note, style: theme.textTheme.bodyMedium),
+          ],
+          const SizedBox(height: 8),
+          Text(
+            measurement.progressPhotoPaths.isEmpty ? 'Zdjęcia progresu: placeholder' : 'Zdjęcia progresu: ${measurement.progressPhotoPaths.length}',
+            style: theme.textTheme.bodySmall?.copyWith(color: theme.colorScheme.onSurfaceVariant),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+double parseBodyMeasurementValue(String value) {
+  return math.max(0, double.tryParse(value.replaceAll(',', '.')) ?? 0).toDouble();
+}
+
+String formatBodyMeasurementValue(double value, String suffix) {
+  if (value <= 0) return '—';
+  if (value == value.roundToDouble()) return '${value.round()} $suffix';
+  return '${value.toStringAsFixed(1)} $suffix';
+}
+
+List<String> bodyMeasurementTags(BodyMeasurement measurement) {
+  final tags = <String>[
+    if (measurement.weightKg > 0) 'Waga ${formatBodyMeasurementValue(measurement.weightKg, 'kg')}',
+    if (measurement.waistCm > 0) 'Pas ${formatBodyMeasurementValue(measurement.waistCm, 'cm')}',
+    if (measurement.chestCm > 0) 'Klatka ${formatBodyMeasurementValue(measurement.chestCm, 'cm')}',
+    if (measurement.armCm > 0) 'Ramię ${formatBodyMeasurementValue(measurement.armCm, 'cm')}',
+    if (measurement.thighCm > 0) 'Udo ${formatBodyMeasurementValue(measurement.thighCm, 'cm')}',
+    if (measurement.hipsCm > 0) 'Biodra ${formatBodyMeasurementValue(measurement.hipsCm, 'cm')}',
+    if (measurement.calfCm > 0) 'Łydka ${formatBodyMeasurementValue(measurement.calfCm, 'cm')}',
+    if (measurement.shouldersCm > 0) 'Barki ${formatBodyMeasurementValue(measurement.shouldersCm, 'cm')}',
+  ];
+  return tags.isEmpty ? ['Brak obwodów'] : tags;
+}
+
 class MorePage extends StatelessWidget {
   const MorePage({super.key});
 
@@ -8653,6 +9091,13 @@ class TrainerFeaturesHub extends StatelessWidget {
                         SizedBox(
                             width: width,
                             child: FeatureActionTile(icon: Icons.add_circle_outline, title: 'Dodaj trening', subtitle: 'Szybki wpis do dziennika', onTap: () => showAddWorkoutSheet(context))),
+                        SizedBox(
+                            width: width,
+                            child: FeatureActionTile(
+                                icon: Icons.straighten_rounded,
+                                title: 'Pomiary sylwetki',
+                                subtitle: 'Waga, obwody, historia i wykresy',
+                                onTap: () => Navigator.of(context).push(MaterialPageRoute(builder: (_) => const BodyMeasurementsPage())))),
                         SizedBox(
                             width: width,
                             child: FeatureActionTile(icon: Icons.public, title: 'Import z bazy ćwiczeń', subtitle: 'Szukaj w wger i zapisuj lokalnie', onTap: () => showWgerSearchSheet(context))),
@@ -9266,6 +9711,7 @@ Map<String, dynamic> buildFullExport(AppStore store) => {
       'logs': store.logs.map((e) => e.toJson()).toList(),
       'plans': store.plans.map((e) => e.toJson()).toList(),
       'customExercises': store.customExercises.map((e) => e.toJson()).toList(),
+      'bodyMeasurements': store.bodyMeasurements.map((e) => e.toJson()).toList(),
       'sharedCalorieProfile': buildSharedCalorieProfile(store),
     };
 
