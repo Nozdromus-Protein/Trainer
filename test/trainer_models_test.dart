@@ -322,5 +322,39 @@ void main() {
       expect(decisions.where((decision) => decision.includedInCalories), hasLength(1));
       expect(decisions.where((decision) => decision.skippedAsDuplicate), hasLength(1));
     });
+
+    test('Health Connect snapshot preserves diagnostics in JSON', () {
+      final snapshot = TrainerHealthConnectSnapshot(
+        id: 'health_connect_2026_6_24',
+        date: DateTime(2026, 6, 24),
+        checkedAt: DateTime(2026, 6, 24, 12, 30),
+        sdkStatus: 'sdkAvailable',
+        isAvailable: true,
+        permissionsGranted: false,
+        grantedPermissions: const ['Kroki', 'Dystans'],
+        missingPermissions: const ['Tętno', 'Sen'],
+        steps: 8420,
+        distanceKm: 5.7,
+        activeKcal: 320,
+        workoutSessions: 1,
+        workoutMinutes: 46,
+        averageHeartRate: 122,
+        heartRateSamples: 18,
+        sleepMinutes: 420,
+        availableData: const ['Kroki', 'Dystans', 'Aktywne kcal'],
+        missingData: const ['Sen'],
+        errorMessage: 'Częściowy brak uprawnień',
+      );
+
+      final restored = TrainerHealthConnectSnapshot.fromJson(snapshot.toJson());
+
+      expect(snapshot.toJson()['schema'], TrainerHealthConnectSnapshot.schema);
+      expect(restored.dateKey, '2026-06-24');
+      expect(restored.steps, 8420);
+      expect(restored.distanceKm, 5.7);
+      expect(restored.hasAnyDailyData, isTrue);
+      expect(restored.missingPermissions, contains('Sen'));
+      expect(restored.errorMessage, contains('uprawnień'));
+    });
   });
 }

@@ -14,6 +14,7 @@ class TrainerLocalData {
     required this.bodyMeasurements,
     required this.trainingImpacts,
     required this.activityEntries,
+    required this.healthConnectSnapshots,
   });
 
   final List<WorkoutLog> sessions;
@@ -24,6 +25,7 @@ class TrainerLocalData {
   final List<BodyMeasurement> bodyMeasurements;
   final List<TrainingImpact> trainingImpacts;
   final List<TrainerActivityEntry> activityEntries;
+  final List<TrainerHealthConnectSnapshot> healthConnectSnapshots;
 }
 
 class TrainerLocalRepository {
@@ -37,6 +39,7 @@ class TrainerLocalRepository {
   static const bodyMeasurementsKey = 'body_measurements_v1';
   static const trainingImpactsKey = 'training_impacts_v1';
   static const activityEntriesKey = 'activity_entries_v1';
+  static const healthConnectSnapshotsKey = 'health_connect_snapshots_v1';
 
   final SharedPreferences? _preferences;
 
@@ -77,6 +80,10 @@ class TrainerLocalRepository {
       activityEntries: _decodeList(
         preferences.getString(activityEntriesKey),
         TrainerActivityEntry.fromJson,
+      ),
+      healthConnectSnapshots: _decodeList(
+        preferences.getString(healthConnectSnapshotsKey),
+        TrainerHealthConnectSnapshot.fromJson,
       ),
     );
   }
@@ -161,6 +168,18 @@ class TrainerLocalRepository {
       activityEntriesKey,
       jsonEncode(
         activityEntries.map((entry) => entry.toJson()).toList(),
+      ),
+    );
+  }
+
+  Future<void> saveHealthConnectSnapshots(
+    Iterable<TrainerHealthConnectSnapshot> snapshots,
+  ) async {
+    final preferences = await _prefs;
+    await preferences.setString(
+      healthConnectSnapshotsKey,
+      jsonEncode(
+        snapshots.map((snapshot) => snapshot.toJson()).toList(),
       ),
     );
   }

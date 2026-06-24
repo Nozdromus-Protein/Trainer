@@ -9,6 +9,7 @@ import 'package:shared_preferences/shared_preferences.dart';
 import 'features/trainer/application/exercise_library_filter.dart';
 import 'features/trainer/application/workout_plan_factory.dart';
 import 'features/trainer/data/trainer_calorie_adapter.dart';
+import 'features/trainer/data/trainer_health_connect_service.dart';
 import 'features/trainer/data/trainer_local_repository.dart';
 import 'features/trainer/domain/trainer_models.dart';
 
@@ -145,24 +146,31 @@ class AppScope extends InheritedNotifier<AppStore> {
 }
 
 class AppStore extends ChangeNotifier {
-  AppStore({TrainerLocalRepository? trainerRepository, TrainerCalorieLocalAdapter? calorieAdapter})
-      : _trainerRepository = trainerRepository ?? TrainerLocalRepository(),
-        _calorieAdapter = calorieAdapter ?? const TrainerCalorieLocalAdapter();
+  AppStore({
+    TrainerLocalRepository? trainerRepository,
+    TrainerCalorieLocalAdapter? calorieAdapter,
+    TrainerHealthConnectService? healthConnectService,
+  })  : _trainerRepository = trainerRepository ?? TrainerLocalRepository(),
+        _calorieAdapter = calorieAdapter ?? const TrainerCalorieLocalAdapter(),
+        _healthConnectService = healthConnectService ?? createTrainerHealthConnectService();
 
   final TrainerLocalRepository _trainerRepository;
   final TrainerCalorieLocalAdapter _calorieAdapter;
+  final TrainerHealthConnectService _healthConnectService;
   final List<WorkoutLog> logs = [];
   final List<WorkoutPlan> plans = [];
   final List<Exercise> customExercises = [];
   final List<BodyMeasurement> bodyMeasurements = [];
   final List<TrainingImpact> trainingImpacts = [];
   final List<TrainerActivityEntry> activityEntries = [];
+  final List<TrainerHealthConnectSnapshot> healthConnectSnapshots = [];
   ExerciseLibraryPreferences exerciseLibraryPreferences = const ExerciseLibraryPreferences();
   ActiveWorkoutSession? activeWorkoutSession;
   AppSettings settings = AppSettings.defaults();
   DateTime selectedDate = DateTime.now();
   String? lastAiMessage;
   bool aiBusy = false;
+  bool healthConnectBusy = false;
 
   static const _settingsKey = 'workout_settings_v1';
 
@@ -189,6 +197,10 @@ class AppStore extends ChangeNotifier {
       ..clear()
       ..addAll(trainerData.activityEntries);
     activityEntries.sort((left, right) => right.date.compareTo(left.date));
+    healthConnectSnapshots
+      ..clear()
+      ..addAll(trainerData.healthConnectSnapshots);
+    healthConnectSnapshots.sort((left, right) => right.checkedAt.compareTo(left.checkedAt));
     exerciseLibraryPreferences = trainerData.exerciseLibraryPreferences;
     activeWorkoutSession = trainerData.activeWorkoutSession;
     if (activeWorkoutSession?.exercises.isEmpty ?? false) {
@@ -233,6 +245,7 @@ class AppStore extends ChangeNotifier {
     await saveBodyMeasurements();
     await saveTrainingImpacts();
     await saveActivityEntries();
+    await saveHealthConnectSnapshots();
   }
 
   Future<void> saveLogs() async {
@@ -417,6 +430,10 @@ class AppStore extends ChangeNotifier {
     await _trainerRepository.saveActivityEntries(activityEntries);
   }
 
+  Future<void> saveHealthConnectSnapshots() async {
+    await _trainerRepository.saveHealthConnectSnapshots(healthConnectSnapshots);
+  }
+
   Future<void> saveExerciseLibraryPreferences() async {
     await _trainerRepository.saveExerciseLibraryPreferences(
       exerciseLibraryPreferences,
@@ -476,6 +493,62 @@ class AppStore extends ChangeNotifier {
     activityEntries.sort((left, right) => right.date.compareTo(left.date));
     await saveActivityEntries();
     notifyListeners();
+  }
+
+  TrainerHealthConnectSnapshot? get latestHealthConnectSnapshot {
+    if (healthConnectSnapshots.isEmpty) return null;
+    final sorted = [...healthConnectSnapshots]..sort((left, right) => right.checkedAt.compareTo(left.checkedAt));
+    return sorted.first;
+  }
+
+  Future<TrainerHealthConnectSnapshot> checkHealthConnectStatus() async {
+    return _runHealthConnectAction(
+      () => _healthConnectService.checkStatus(date: selectedDate),
+    );
+  }
+
+  Future<TrainerHealthConnectSnapshot> requestHealthConnectPermissions() async {
+    return _runHealthConnectAction(
+      () => _healthConnectService.requestPermissions(date: selectedDate),
+    );
+  }
+
+  Future<TrainerHealthConnectSnapshot> readHealthConnectDailyData() async {
+    return _runHealthConnectAction(
+      () => _healthConnectService.readDailyData(date: selectedDate),
+    );
+  }
+
+  Future<TrainerHealthConnectSnapshot> _runHealthConnectAction(
+    Future<TrainerHealthConnectSnapshot> Function() action,
+  ) async {
+    healthConnectBusy = true;
+    notifyListeners();
+    try {
+      final snapshot = await action();
+      await upsertHealthConnectSnapshot(snapshot, notify: false);
+      return snapshot;
+    } finally {
+      healthConnectBusy = false;
+      notifyListeners();
+    }
+  }
+
+  Future<void> upsertHealthConnectSnapshot(
+    TrainerHealthConnectSnapshot snapshot, {
+    bool notify = true,
+  }) async {
+    final index = healthConnectSnapshots.indexWhere(
+      (item) => item.id == snapshot.id || item.dateKey == snapshot.dateKey,
+    );
+    if (index >= 0) {
+      healthConnectSnapshots[index] = snapshot;
+    } else {
+      healthConnectSnapshots.insert(0, snapshot);
+    }
+    healthConnectSnapshots.sort((left, right) => right.checkedAt.compareTo(left.checkedAt));
+    await saveHealthConnectSnapshots();
+    if (notify) notifyListeners();
   }
 
   List<TrainerActivityEntry> activityInputsForDay(DateTime day) {
@@ -2970,9 +3043,7 @@ class _TrainerWorkoutHistoryStats {
 
   factory _TrainerWorkoutHistoryStats.fromLogs(List<WorkoutLog> logs) {
     final first = logs.first;
-    final duration = first.sessionStartedAt != null && first.sessionEndedAt != null
-        ? first.sessionEndedAt!.difference(first.sessionStartedAt!)
-        : Duration(seconds: logs.fold<int>(0, (sum, log) => sum + log.durationSec));
+    final duration = first.sessionStartedAt != null && first.sessionEndedAt != null ? first.sessionEndedAt!.difference(first.sessionStartedAt!) : Duration(seconds: logs.fold<int>(0, (sum, log) => sum + log.durationSec));
     final setCount = logs.fold<int>(
       0,
       (sum, log) => sum + (log.workoutSets.isEmpty ? log.sets : log.workoutSets.where((set) => set.isCompleted).length),
@@ -3704,9 +3775,7 @@ class WorkoutHistorySessionCard extends StatelessWidget {
     final volume = logs.fold<double>(0, (sum, log) => sum + log.volume);
     final rpeSets = logs.expand((log) => log.workoutSets).where((set) => set.rpe > 0).toList();
     final averageRpe = rpeSets.isEmpty ? 0.0 : rpeSets.fold<int>(0, (sum, set) => sum + set.rpe) / rpeSets.length;
-    final duration = first.sessionStartedAt != null && first.sessionEndedAt != null
-        ? first.sessionEndedAt!.difference(first.sessionStartedAt!)
-        : Duration(seconds: logs.fold<int>(0, (sum, log) => sum + log.durationSec));
+    final duration = first.sessionStartedAt != null && first.sessionEndedAt != null ? first.sessionEndedAt!.difference(first.sessionStartedAt!) : Duration(seconds: logs.fold<int>(0, (sum, log) => sum + log.durationSec));
     return Card(
       child: Padding(
         padding: const EdgeInsets.all(16),
@@ -3725,8 +3794,7 @@ class WorkoutHistorySessionCard extends StatelessWidget {
                   child: Column(
                     crossAxisAlignment: CrossAxisAlignment.start,
                     children: [
-                      Text(first.sessionName.isEmpty ? 'Trening z planu' : first.sessionName,
-                          maxLines: 2, overflow: TextOverflow.ellipsis, style: theme.textTheme.titleMedium?.copyWith(fontWeight: FontWeight.w900)),
+                      Text(first.sessionName.isEmpty ? 'Trening z planu' : first.sessionName, maxLines: 2, overflow: TextOverflow.ellipsis, style: theme.textTheme.titleMedium?.copyWith(fontWeight: FontWeight.w900)),
                       const SizedBox(height: 4),
                       Text(exerciseNames.join(' · '), maxLines: 2, overflow: TextOverflow.ellipsis, style: theme.textTheme.bodySmall?.copyWith(color: theme.colorScheme.onSurfaceVariant)),
                       if (first.sessionNote.isNotEmpty) ...[
@@ -3808,8 +3876,7 @@ class TodayPage extends StatelessWidget {
                   children: [
                     Text('Trening w toku', style: Theme.of(context).textTheme.labelLarge?.copyWith(color: Theme.of(context).colorScheme.primary, fontWeight: FontWeight.w900)),
                     const SizedBox(height: 4),
-                    Text('${store.activeWorkoutSession!.planName} · ${store.activeWorkoutSession!.dayTitle}',
-                        maxLines: 2, overflow: TextOverflow.ellipsis, style: Theme.of(context).textTheme.titleMedium?.copyWith(fontWeight: FontWeight.w900)),
+                    Text('${store.activeWorkoutSession!.planName} · ${store.activeWorkoutSession!.dayTitle}', maxLines: 2, overflow: TextOverflow.ellipsis, style: Theme.of(context).textTheme.titleMedium?.copyWith(fontWeight: FontWeight.w900)),
                     const SizedBox(height: 10),
                     FilledButton.icon(
                       onPressed: () => openActiveWorkoutPage(context),
@@ -3984,8 +4051,7 @@ class TrainingInsightCard extends StatelessWidget {
               Expanded(child: _MiniMetric(label: 'Śr. RPE', value: avgRpe == 0 ? '-' : avgRpe.toStringAsFixed(1), icon: Icons.speed)),
             ]),
             const SizedBox(height: 10),
-            Text(top.isEmpty ? 'Dodaj kilka treningów, a pokażę najczęstsze ćwiczenie i kierunek progresu.' : 'Najczęściej ostatnio: $top',
-                style: theme.textTheme.bodySmall?.copyWith(color: theme.colorScheme.onSurfaceVariant)),
+            Text(top.isEmpty ? 'Dodaj kilka treningów, a pokażę najczęstsze ćwiczenie i kierunek progresu.' : 'Najczęściej ostatnio: $top', style: theme.textTheme.bodySmall?.copyWith(color: theme.colorScheme.onSurfaceVariant)),
           ],
         ),
       ),
@@ -4254,11 +4320,9 @@ class WorkoutLogCard extends StatelessWidget {
                   children: [
                     Text(e.name, style: theme.textTheme.titleMedium?.copyWith(fontWeight: FontWeight.w900)),
                     const SizedBox(height: 4),
-                    Text('${log.sets} serie × ${log.reps == 0 ? '-' : log.reps} powt. · ${log.weightKg.toStringAsFixed(1)} kg',
-                        style: theme.textTheme.bodySmall?.copyWith(color: theme.colorScheme.onSurfaceVariant)),
+                    Text('${log.sets} serie × ${log.reps == 0 ? '-' : log.reps} powt. · ${log.weightKg.toStringAsFixed(1)} kg', style: theme.textTheme.bodySmall?.copyWith(color: theme.colorScheme.onSurfaceVariant)),
                     const SizedBox(height: 4),
-                    Text('${log.calories.round()} kcal · RPE ${log.rpe} · ${(log.durationSec / 60).round()} min',
-                        style: theme.textTheme.bodySmall?.copyWith(color: theme.colorScheme.onSurfaceVariant)),
+                    Text('${log.calories.round()} kcal · RPE ${log.rpe} · ${(log.durationSec / 60).round()} min', style: theme.textTheme.bodySmall?.copyWith(color: theme.colorScheme.onSurfaceVariant)),
                     if (log.aiConfidence > 0)
                       Padding(
                         padding: const EdgeInsets.only(top: 6),
@@ -4835,8 +4899,7 @@ class _ExercisesPageState extends State<ExercisesPage> {
     );
   }
 
-  bool get _hasActiveFilters =>
-      muscleGroup != 'Wszystkie' || equipmentType != 'Wszystkie' || level != 'Wszystkie' || trainingGoal != 'Wszystkie' || onlyFavorites || showHidden || onlyAvailableEquipment || avoidLimitations;
+  bool get _hasActiveFilters => muscleGroup != 'Wszystkie' || equipmentType != 'Wszystkie' || level != 'Wszystkie' || trainingGoal != 'Wszystkie' || onlyFavorites || showHidden || onlyAvailableEquipment || avoidLimitations;
 }
 
 class _ExerciseFilterDropdown extends StatelessWidget {
@@ -5020,8 +5083,7 @@ class _WgerSearchSheetContentState extends State<WgerSearchSheetContent> {
           children: [
             Text('Import ćwiczeń z wger', style: theme.textTheme.titleLarge?.copyWith(fontWeight: FontWeight.w900)),
             const SizedBox(height: 8),
-            Text('Najlepiej działa po angielsku: squat, push up, row, curl, deadlift. Po dodaniu ćwiczenie trafia do lokalnej bazy.',
-                style: theme.textTheme.bodySmall?.copyWith(color: theme.colorScheme.onSurfaceVariant)),
+            Text('Najlepiej działa po angielsku: squat, push up, row, curl, deadlift. Po dodaniu ćwiczenie trafia do lokalnej bazy.', style: theme.textTheme.bodySmall?.copyWith(color: theme.colorScheme.onSurfaceVariant)),
             const SizedBox(height: 12),
             TextField(
               controller: query,
@@ -5982,11 +6044,7 @@ class InfoListCard extends StatelessWidget {
         child: Column(
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
-            Row(children: [
-              Icon(icon, color: theme.colorScheme.primary),
-              const SizedBox(width: 8),
-              Expanded(child: Text(title, style: theme.textTheme.titleMedium?.copyWith(fontWeight: FontWeight.w900)))
-            ]),
+            Row(children: [Icon(icon, color: theme.colorScheme.primary), const SizedBox(width: 8), Expanded(child: Text(title, style: theme.textTheme.titleMedium?.copyWith(fontWeight: FontWeight.w900)))]),
             const SizedBox(height: 10),
             ...items.map((e) => Padding(
                   padding: const EdgeInsets.only(bottom: 8),
@@ -6015,8 +6073,7 @@ void analyzeFormDialog(BuildContext context, Exercise exercise) {
           children: [
             Text('Analiza techniki: ${exercise.name}', style: Theme.of(context).textTheme.titleLarge?.copyWith(fontWeight: FontWeight.w900)),
             const SizedBox(height: 10),
-            TextField(
-                controller: note, maxLines: 4, decoration: const InputDecoration(hintText: 'Opisz, co czujesz albo nagraj opis: np. przy przysiadzie czuję lędźwie, kolana uciekają do środka...')),
+            TextField(controller: note, maxLines: 4, decoration: const InputDecoration(hintText: 'Opisz, co czujesz albo nagraj opis: np. przy przysiadzie czuję lędźwie, kolana uciekają do środka...')),
             const SizedBox(height: 12),
             FilledButton.icon(
               onPressed: () async {
@@ -6906,8 +6963,7 @@ class _CurrentExerciseCard extends StatelessWidget {
                   const SizedBox(height: 3),
                   Text(exercise.name, maxLines: 2, overflow: TextOverflow.ellipsis, style: theme.textTheme.titleLarge?.copyWith(fontWeight: FontWeight.w900)),
                   const SizedBox(height: 6),
-                  Text('${activeExercise.plannedSets} serie × ${activeExercise.plannedReps} powt. · ${recommendation.seconds} s przerwy',
-                      style: theme.textTheme.bodySmall?.copyWith(color: theme.colorScheme.onSurfaceVariant)),
+                  Text('${activeExercise.plannedSets} serie × ${activeExercise.plannedReps} powt. · ${recommendation.seconds} s przerwy', style: theme.textTheme.bodySmall?.copyWith(color: theme.colorScheme.onSurfaceVariant)),
                 ],
               ),
             ),
@@ -7300,8 +7356,7 @@ class WorkoutPlanDayCard extends StatelessWidget {
                   crossAxisAlignment: CrossAxisAlignment.start,
                   children: [
                     Text(weekdayName(day.weekday), style: theme.textTheme.titleMedium?.copyWith(fontWeight: FontWeight.w900)),
-                    Text('${day.title} · ${day.items.length} ćwiczeń',
-                        maxLines: 2, overflow: TextOverflow.ellipsis, style: theme.textTheme.bodySmall?.copyWith(color: theme.colorScheme.onSurfaceVariant)),
+                    Text('${day.title} · ${day.items.length} ćwiczeń', maxLines: 2, overflow: TextOverflow.ellipsis, style: theme.textTheme.bodySmall?.copyWith(color: theme.colorScheme.onSurfaceVariant)),
                   ],
                 ),
               ),
@@ -7384,8 +7439,7 @@ class _PlanExerciseTile extends StatelessWidget {
               children: [
                 Text(exercise.name, maxLines: 2, overflow: TextOverflow.ellipsis, style: theme.textTheme.bodyLarge?.copyWith(fontWeight: FontWeight.w800)),
                 const SizedBox(height: 3),
-                Text('${item.sets} serie × ${item.reps} powt. · $weight · ${item.restSeconds} s przerwy',
-                    maxLines: 3, overflow: TextOverflow.ellipsis, style: theme.textTheme.bodySmall?.copyWith(color: theme.colorScheme.onSurfaceVariant)),
+                Text('${item.sets} serie × ${item.reps} powt. · $weight · ${item.restSeconds} s przerwy', maxLines: 3, overflow: TextOverflow.ellipsis, style: theme.textTheme.bodySmall?.copyWith(color: theme.colorScheme.onSurfaceVariant)),
               ],
             ),
           ),
@@ -7473,8 +7527,7 @@ Future<void> showWorkoutPlanEditor(BuildContext context, {WorkoutPlan? plan}) as
                 ],
               ),
               const SizedBox(height: 8),
-              Text('Usunięcie zaznaczenia dnia usunie go z planu razem z przypisanymi ćwiczeniami.',
-                  style: Theme.of(context).textTheme.bodySmall?.copyWith(color: Theme.of(context).colorScheme.onSurfaceVariant)),
+              Text('Usunięcie zaznaczenia dnia usunie go z planu razem z przypisanymi ćwiczeniami.', style: Theme.of(context).textTheme.bodySmall?.copyWith(color: Theme.of(context).colorScheme.onSurfaceVariant)),
               const SizedBox(height: 18),
               FilledButton.icon(
                 onPressed: () async {
@@ -7558,8 +7611,7 @@ Future<void> showCopyWorkoutDaySheet(BuildContext context, {required WorkoutPlan
         children: [
           Text('Kopiuj ${weekdayName(day.weekday)}', style: Theme.of(sheetContext).textTheme.titleLarge?.copyWith(fontWeight: FontWeight.w900)),
           const SizedBox(height: 4),
-          Text('Wybierz dzień docelowy. Jeśli już istnieje, jego zawartość zostanie zastąpiona.',
-              style: Theme.of(sheetContext).textTheme.bodyMedium?.copyWith(color: Theme.of(sheetContext).colorScheme.onSurfaceVariant)),
+          Text('Wybierz dzień docelowy. Jeśli już istnieje, jego zawartość zostanie zastąpiona.', style: Theme.of(sheetContext).textTheme.bodyMedium?.copyWith(color: Theme.of(sheetContext).colorScheme.onSurfaceVariant)),
           const SizedBox(height: 12),
           ConstrainedBox(
             constraints: BoxConstraints(maxHeight: MediaQuery.sizeOf(sheetContext).height * 0.62),
@@ -7613,8 +7665,7 @@ Future<void> showPlanExercisePicker(BuildContext context, {required WorkoutPlan 
                   children: [
                     Text('Dodaj ćwiczenie', style: Theme.of(context).textTheme.titleLarge?.copyWith(fontWeight: FontWeight.w900)),
                     const SizedBox(height: 4),
-                    Text('${plan.name} · ${weekdayName(day.weekday)}',
-                        maxLines: 2, overflow: TextOverflow.ellipsis, style: Theme.of(context).textTheme.bodyMedium?.copyWith(color: Theme.of(context).colorScheme.onSurfaceVariant)),
+                    Text('${plan.name} · ${weekdayName(day.weekday)}', maxLines: 2, overflow: TextOverflow.ellipsis, style: Theme.of(context).textTheme.bodyMedium?.copyWith(color: Theme.of(context).colorScheme.onSurfaceVariant)),
                     const SizedBox(height: 12),
                     TextField(
                       autofocus: true,
@@ -7691,8 +7742,7 @@ Future<void> showPlanItemEditor(
           children: [
             Text(existing == null ? 'Dodaj do dnia' : 'Edytuj ćwiczenie', style: Theme.of(sheetContext).textTheme.titleLarge?.copyWith(fontWeight: FontWeight.w900)),
             const SizedBox(height: 4),
-            Text('${exercise.name} · ${weekdayName(day.weekday)}',
-                maxLines: 2, overflow: TextOverflow.ellipsis, style: Theme.of(sheetContext).textTheme.bodyMedium?.copyWith(color: Theme.of(sheetContext).colorScheme.onSurfaceVariant)),
+            Text('${exercise.name} · ${weekdayName(day.weekday)}', maxLines: 2, overflow: TextOverflow.ellipsis, style: Theme.of(sheetContext).textTheme.bodyMedium?.copyWith(color: Theme.of(sheetContext).colorScheme.onSurfaceVariant)),
             const SizedBox(height: 14),
             Row(
               children: [
@@ -8882,6 +8932,416 @@ class BodyMeasurementHistoryTile extends StatelessWidget {
   }
 }
 
+class HealthConnectSettingsPage extends StatelessWidget {
+  const HealthConnectSettingsPage({super.key});
+
+  @override
+  Widget build(BuildContext context) {
+    final store = AppScope.of(context);
+    final snapshot = store.latestHealthConnectSnapshot;
+    return PageFrame(
+      title: 'Health Connect',
+      subtitle: 'Podstawowy odczyt, uprawnienia i diagnostyka bez automatycznego łączenia z kaloriami',
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.stretch,
+        children: [
+          HealthConnectActionsCard(store: store),
+          const SizedBox(height: 12),
+          HealthConnectStatusCard(snapshot: snapshot, busy: store.healthConnectBusy),
+          const SizedBox(height: 12),
+          HealthConnectDailyDataCard(snapshot: snapshot),
+          const SizedBox(height: 12),
+          HealthConnectDiagnosticsCard(snapshot: snapshot),
+          const SizedBox(height: 12),
+          HealthConnectLocalHistoryCard(snapshots: store.healthConnectSnapshots),
+        ],
+      ),
+    );
+  }
+}
+
+class HealthConnectActionsCard extends StatelessWidget {
+  const HealthConnectActionsCard({super.key, required this.store});
+
+  final AppStore store;
+
+  @override
+  Widget build(BuildContext context) {
+    final theme = Theme.of(context);
+    return Card(
+      child: Padding(
+        padding: const EdgeInsets.all(18),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Row(
+              children: [
+                Icon(Icons.health_and_safety_outlined, color: theme.colorScheme.primary),
+                const SizedBox(width: 8),
+                Expanded(child: Text('Ustawienia i odczyt', style: theme.textTheme.titleMedium?.copyWith(fontWeight: FontWeight.w900))),
+              ],
+            ),
+            const SizedBox(height: 8),
+            Text(
+              'Na tym etapie Trainer tylko pokazuje dane z Health Connect i zapisuje lokalny snapshot diagnostyczny. Nie dopisuje ich jeszcze do kalorii.',
+              style: theme.textTheme.bodyMedium?.copyWith(color: theme.colorScheme.onSurfaceVariant),
+            ),
+            const SizedBox(height: 12),
+            Wrap(
+              spacing: 8,
+              runSpacing: 8,
+              children: [
+                FilledButton.icon(
+                  onPressed: store.healthConnectBusy
+                      ? null
+                      : () => _runHealthConnectAction(
+                            context,
+                            store.checkHealthConnectStatus,
+                            'Sprawdzono dostępność Health Connect.',
+                          ),
+                  icon: const Icon(Icons.fact_check_outlined),
+                  label: const Text('Sprawdź dostępność'),
+                ),
+                OutlinedButton.icon(
+                  onPressed: store.healthConnectBusy
+                      ? null
+                      : () => _runHealthConnectAction(
+                            context,
+                            store.requestHealthConnectPermissions,
+                            'Zaktualizowano uprawnienia Health Connect.',
+                          ),
+                  icon: const Icon(Icons.verified_user_outlined),
+                  label: const Text('Poproś o uprawnienia'),
+                ),
+                OutlinedButton.icon(
+                  onPressed: store.healthConnectBusy
+                      ? null
+                      : () => _runHealthConnectAction(
+                            context,
+                            store.readHealthConnectDailyData,
+                            'Odczytano dzienne dane Health Connect.',
+                          ),
+                  icon: const Icon(Icons.sync_rounded),
+                  label: const Text('Odczytaj dzisiaj'),
+                ),
+              ],
+            ),
+            if (store.healthConnectBusy) ...[
+              const SizedBox(height: 12),
+              const LinearProgressIndicator(),
+            ],
+          ],
+        ),
+      ),
+    );
+  }
+
+  Future<void> _runHealthConnectAction(
+    BuildContext context,
+    Future<TrainerHealthConnectSnapshot> Function() action,
+    String successMessage,
+  ) async {
+    final snapshot = await action();
+    if (!context.mounted) return;
+    showError(
+      context,
+      snapshot.errorMessage.trim().isEmpty ? successMessage : snapshot.errorMessage,
+    );
+  }
+}
+
+class HealthConnectStatusCard extends StatelessWidget {
+  const HealthConnectStatusCard({super.key, required this.snapshot, required this.busy});
+
+  final TrainerHealthConnectSnapshot? snapshot;
+  final bool busy;
+
+  @override
+  Widget build(BuildContext context) {
+    final theme = Theme.of(context);
+    final current = snapshot;
+    return Card(
+      child: Padding(
+        padding: const EdgeInsets.all(18),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Row(
+              children: [
+                Icon(
+                  current?.isAvailable == true ? Icons.check_circle_outline : Icons.info_outline,
+                  color: current?.isAvailable == true ? Colors.greenAccent : theme.colorScheme.primary,
+                ),
+                const SizedBox(width: 8),
+                Expanded(child: Text('Status połączenia', style: theme.textTheme.titleMedium?.copyWith(fontWeight: FontWeight.w900))),
+              ],
+            ),
+            const SizedBox(height: 12),
+            if (current == null)
+              Text(
+                busy ? 'Sprawdzam Health Connect…' : 'Brak odczytu. Zacznij od sprawdzenia dostępności.',
+                style: theme.textTheme.bodyMedium?.copyWith(color: theme.colorScheme.onSurfaceVariant),
+              )
+            else ...[
+              Wrap(
+                spacing: 8,
+                runSpacing: 8,
+                children: [
+                  MiniTag(text: current.isAvailable ? 'Dostępny' : 'Niedostępny'),
+                  MiniTag(text: 'SDK: ${current.sdkStatus}'),
+                  MiniTag(text: current.permissionsGranted ? 'Uprawnienia OK' : 'Brak części uprawnień'),
+                  MiniTag(text: 'Dzień: ${trainerHistoryFullDate(current.date)}'),
+                  MiniTag(text: 'Sprawdzono: ${formatHealthConnectTimestamp(current.checkedAt)}'),
+                ],
+              ),
+              if (current.errorMessage.trim().isNotEmpty) ...[
+                const SizedBox(height: 10),
+                Text(
+                  current.errorMessage,
+                  style: theme.textTheme.bodySmall?.copyWith(color: theme.colorScheme.error),
+                ),
+              ],
+            ],
+          ],
+        ),
+      ),
+    );
+  }
+}
+
+class HealthConnectDailyDataCard extends StatelessWidget {
+  const HealthConnectDailyDataCard({super.key, required this.snapshot});
+
+  final TrainerHealthConnectSnapshot? snapshot;
+
+  @override
+  Widget build(BuildContext context) {
+    final current = snapshot;
+    final theme = Theme.of(context);
+    return Card(
+      child: Padding(
+        padding: const EdgeInsets.all(18),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Row(
+              children: [
+                Icon(Icons.today_outlined, color: theme.colorScheme.primary),
+                const SizedBox(width: 8),
+                Expanded(child: Text('Dane dzienne', style: theme.textTheme.titleMedium?.copyWith(fontWeight: FontWeight.w900))),
+              ],
+            ),
+            const SizedBox(height: 12),
+            if (current == null)
+              Text('Po odczycie pojawią się tutaj kroki, dystans, aktywne kcal, treningi, tętno i sen.', style: theme.textTheme.bodyMedium?.copyWith(color: theme.colorScheme.onSurfaceVariant))
+            else
+              HealthConnectMetricGrid(
+                metrics: [
+                  HealthConnectMetric('Kroki', '${current.steps}'),
+                  HealthConnectMetric('Dystans', formatHealthConnectDistance(current.distanceKm)),
+                  HealthConnectMetric('Aktywne kcal', current.activeKcal.toStringAsFixed(0)),
+                  HealthConnectMetric('Treningi', '${current.workoutSessions} · ${current.workoutMinutes} min'),
+                  HealthConnectMetric('Tętno', current.heartRateSamples == 0 ? '—' : '${current.averageHeartRate.toStringAsFixed(0)} bpm'),
+                  HealthConnectMetric('Sen', current.sleepMinutes == 0 ? '—' : formatHealthConnectMinutes(current.sleepMinutes)),
+                ],
+              ),
+          ],
+        ),
+      ),
+    );
+  }
+}
+
+class HealthConnectDiagnosticsCard extends StatelessWidget {
+  const HealthConnectDiagnosticsCard({super.key, required this.snapshot});
+
+  final TrainerHealthConnectSnapshot? snapshot;
+
+  @override
+  Widget build(BuildContext context) {
+    final current = snapshot;
+    final theme = Theme.of(context);
+    return Card(
+      child: Padding(
+        padding: const EdgeInsets.all(18),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Row(
+              children: [
+                Icon(Icons.bug_report_outlined, color: theme.colorScheme.primary),
+                const SizedBox(width: 8),
+                Expanded(child: Text('Diagnostyka', style: theme.textTheme.titleMedium?.copyWith(fontWeight: FontWeight.w900))),
+              ],
+            ),
+            const SizedBox(height: 12),
+            if (current == null)
+              Text('Brak lokalnego snapshotu diagnostycznego.', style: theme.textTheme.bodyMedium?.copyWith(color: theme.colorScheme.onSurfaceVariant))
+            else ...[
+              HealthConnectTagGroup(title: 'Dostępne dane', values: current.availableData, emptyText: 'Brak danych z wybranego dnia'),
+              const SizedBox(height: 10),
+              HealthConnectTagGroup(title: 'Brakujące dane', values: current.missingData, emptyText: 'Nic nie brakuje'),
+              const SizedBox(height: 10),
+              HealthConnectTagGroup(title: 'Uprawnienia przyznane', values: current.grantedPermissions, emptyText: 'Brak przyznanych uprawnień'),
+              const SizedBox(height: 10),
+              HealthConnectTagGroup(title: 'Uprawnienia brakujące', values: current.missingPermissions, emptyText: 'Wszystkie wymagane uprawnienia są przyznane'),
+            ],
+          ],
+        ),
+      ),
+    );
+  }
+}
+
+class HealthConnectLocalHistoryCard extends StatelessWidget {
+  const HealthConnectLocalHistoryCard({super.key, required this.snapshots});
+
+  final List<TrainerHealthConnectSnapshot> snapshots;
+
+  @override
+  Widget build(BuildContext context) {
+    final theme = Theme.of(context);
+    final visible = snapshots.take(5).toList();
+    return Card(
+      child: Padding(
+        padding: const EdgeInsets.all(18),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Row(
+              children: [
+                Icon(Icons.save_alt_outlined, color: theme.colorScheme.primary),
+                const SizedBox(width: 8),
+                Expanded(child: Text('Lokalny zapis odczytów', style: theme.textTheme.titleMedium?.copyWith(fontWeight: FontWeight.w900))),
+              ],
+            ),
+            const SizedBox(height: 12),
+            if (visible.isEmpty)
+              Text('Nie ma jeszcze zapisanego odczytu Health Connect.', style: theme.textTheme.bodyMedium?.copyWith(color: theme.colorScheme.onSurfaceVariant))
+            else
+              ...visible.map(
+                (snapshot) => Padding(
+                  padding: const EdgeInsets.only(bottom: 10),
+                  child: Container(
+                    padding: const EdgeInsets.all(12),
+                    decoration: BoxDecoration(
+                      color: theme.colorScheme.surfaceContainerHighest.withValues(alpha: 0.45),
+                      borderRadius: BorderRadius.circular(16),
+                    ),
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        Text('${trainerHistoryFullDate(snapshot.date)} · ${formatHealthConnectTimestamp(snapshot.checkedAt)}', style: theme.textTheme.titleSmall?.copyWith(fontWeight: FontWeight.w900)),
+                        const SizedBox(height: 6),
+                        Wrap(
+                          spacing: 6,
+                          runSpacing: 6,
+                          children: [
+                            MiniTag(text: '${snapshot.steps} kroków'),
+                            MiniTag(text: formatHealthConnectDistance(snapshot.distanceKm)),
+                            MiniTag(text: '${snapshot.activeKcal.toStringAsFixed(0)} kcal'),
+                            MiniTag(text: '${snapshot.workoutSessions} treningów'),
+                          ],
+                        ),
+                      ],
+                    ),
+                  ),
+                ),
+              ),
+          ],
+        ),
+      ),
+    );
+  }
+}
+
+class HealthConnectMetricGrid extends StatelessWidget {
+  const HealthConnectMetricGrid({super.key, required this.metrics});
+
+  final List<HealthConnectMetric> metrics;
+
+  @override
+  Widget build(BuildContext context) {
+    return LayoutBuilder(
+      builder: (context, constraints) {
+        final wide = constraints.maxWidth > 620;
+        final width = wide ? (constraints.maxWidth - 16) / 3 : (constraints.maxWidth - 8) / 2;
+        return Wrap(
+          spacing: 8,
+          runSpacing: 8,
+          children: metrics
+              .map(
+                (metric) => SizedBox(
+                  width: width.clamp(130, constraints.maxWidth),
+                  child: SmallMetric(label: metric.label, value: metric.value),
+                ),
+              )
+              .toList(),
+        );
+      },
+    );
+  }
+}
+
+class HealthConnectTagGroup extends StatelessWidget {
+  const HealthConnectTagGroup({
+    super.key,
+    required this.title,
+    required this.values,
+    required this.emptyText,
+  });
+
+  final String title;
+  final List<String> values;
+  final String emptyText;
+
+  @override
+  Widget build(BuildContext context) {
+    final theme = Theme.of(context);
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        Text(title, style: theme.textTheme.labelLarge?.copyWith(fontWeight: FontWeight.w900)),
+        const SizedBox(height: 6),
+        Wrap(
+          spacing: 6,
+          runSpacing: 6,
+          children: values.isEmpty ? [MiniTag(text: emptyText)] : values.map((value) => MiniTag(text: value)).toList(),
+        ),
+      ],
+    );
+  }
+}
+
+class HealthConnectMetric {
+  const HealthConnectMetric(this.label, this.value);
+
+  final String label;
+  final String value;
+}
+
+String formatHealthConnectDistance(double distanceKm) {
+  if (distanceKm <= 0) return '0 km';
+  if (distanceKm < 1) return '${(distanceKm * 1000).round()} m';
+  return '${distanceKm.toStringAsFixed(2)} km';
+}
+
+String formatHealthConnectMinutes(int minutes) {
+  if (minutes <= 0) return '—';
+  final hours = minutes ~/ 60;
+  final rest = minutes % 60;
+  if (hours <= 0) return '$minutes min';
+  if (rest == 0) return '$hours h';
+  return '$hours h $rest min';
+}
+
+String formatHealthConnectTimestamp(DateTime date) {
+  final local = date.toLocal();
+  final hour = local.hour.toString().padLeft(2, '0');
+  final minute = local.minute.toString().padLeft(2, '0');
+  return '${trainerHistoryFullDate(local)} $hour:$minute';
+}
+
 double parseBodyMeasurementValue(String value) {
   return math.max(0, double.tryParse(value.replaceAll(',', '.')) ?? 0).toDouble();
 }
@@ -9097,10 +9557,7 @@ class ActivityTypeCreditTile extends StatelessWidget {
               ],
             ),
             const SizedBox(height: 10),
-            if (visible.isEmpty)
-              Text('Brak danych wejściowych dla tego typu.', style: theme.textTheme.bodyMedium?.copyWith(color: theme.colorScheme.onSurfaceVariant))
-            else
-              ...visible.map((decision) => ActivityDecisionCompactRow(decision: decision)),
+            if (visible.isEmpty) Text('Brak danych wejściowych dla tego typu.', style: theme.textTheme.bodyMedium?.copyWith(color: theme.colorScheme.onSurfaceVariant)) else ...visible.map((decision) => ActivityDecisionCompactRow(decision: decision)),
           ],
         ),
       ),
@@ -9447,8 +9904,7 @@ class AboutCard extends StatelessWidget {
           children: [
             Text('Status modułów Trainer', style: theme.textTheme.titleMedium?.copyWith(fontWeight: FontWeight.w900)),
             const SizedBox(height: 8),
-            const Text(
-                '• Zdjęcia/wideo własnej techniki i analiza klatek.\n• Integracja z aplikacją kalorii: większe kcal w dni treningowe.\n• Baza własnych ćwiczeń z importem przez API wger i AI.\n• Timer interwałów i odpoczynku między seriami.\n• Plany PPL, FBW, góra/dół, brzuch z obciążeniem.'),
+            const Text('• Zdjęcia/wideo własnej techniki i analiza klatek.\n• Integracja z aplikacją kalorii: większe kcal w dni treningowe.\n• Baza własnych ćwiczeń z importem przez API wger i AI.\n• Timer interwałów i odpoczynku między seriami.\n• Plany PPL, FBW, góra/dół, brzuch z obciążeniem.'),
           ],
         ),
       ),
@@ -9519,28 +9975,12 @@ class TrainerFeaturesHub extends StatelessWidget {
                       spacing: 10,
                       runSpacing: 10,
                       children: [
-                        SizedBox(
-                            width: width,
-                            child: FeatureActionTile(icon: Icons.add_circle_outline, title: 'Dodaj trening', subtitle: 'Szybki wpis do dziennika', onTap: () => showAddWorkoutSheet(context))),
-                        SizedBox(
-                            width: width,
-                            child: FeatureActionTile(
-                                icon: Icons.straighten_rounded,
-                                title: 'Pomiary sylwetki',
-                                subtitle: 'Waga, obwody, historia i wykresy',
-                                onTap: () => Navigator.of(context).push(MaterialPageRoute(builder: (_) => const BodyMeasurementsPage())))),
-                        SizedBox(
-                            width: width,
-                            child: FeatureActionTile(
-                                icon: Icons.rule_rounded,
-                                title: 'Anty-dublowanie aktywności',
-                                subtitle: 'Kroki, chód, bieg i trening siłowy',
-                                onTap: () => Navigator.of(context).push(MaterialPageRoute(builder: (_) => const ActivityDeduplicationPage())))),
-                        SizedBox(
-                            width: width,
-                            child: FeatureActionTile(icon: Icons.public, title: 'Import z bazy ćwiczeń', subtitle: 'Szukaj w wger i zapisuj lokalnie', onTap: () => showWgerSearchSheet(context))),
-                        SizedBox(
-                            width: width, child: FeatureActionTile(icon: Icons.auto_awesome, title: 'Plan AI', subtitle: 'Poziom + sprzęt + ograniczenia', onTap: () => showPlanGenerator(context))),
+                        SizedBox(width: width, child: FeatureActionTile(icon: Icons.add_circle_outline, title: 'Dodaj trening', subtitle: 'Szybki wpis do dziennika', onTap: () => showAddWorkoutSheet(context))),
+                        SizedBox(width: width, child: FeatureActionTile(icon: Icons.straighten_rounded, title: 'Pomiary sylwetki', subtitle: 'Waga, obwody, historia i wykresy', onTap: () => Navigator.of(context).push(MaterialPageRoute(builder: (_) => const BodyMeasurementsPage())))),
+                        SizedBox(width: width, child: FeatureActionTile(icon: Icons.rule_rounded, title: 'Anty-dublowanie aktywności', subtitle: 'Kroki, chód, bieg i trening siłowy', onTap: () => Navigator.of(context).push(MaterialPageRoute(builder: (_) => const ActivityDeduplicationPage())))),
+                        SizedBox(width: width, child: FeatureActionTile(icon: Icons.health_and_safety_outlined, title: 'Health Connect', subtitle: 'Dostępność, uprawnienia i dzienny odczyt', onTap: () => Navigator.of(context).push(MaterialPageRoute(builder: (_) => const HealthConnectSettingsPage())))),
+                        SizedBox(width: width, child: FeatureActionTile(icon: Icons.public, title: 'Import z bazy ćwiczeń', subtitle: 'Szukaj w wger i zapisuj lokalnie', onTap: () => showWgerSearchSheet(context))),
+                        SizedBox(width: width, child: FeatureActionTile(icon: Icons.auto_awesome, title: 'Plan AI', subtitle: 'Poziom + sprzęt + ograniczenia', onTap: () => showPlanGenerator(context))),
                         SizedBox(
                             width: width,
                             child: FeatureActionTile(
@@ -9551,14 +9991,8 @@ class TrainerFeaturesHub extends StatelessWidget {
                                   await store.generateLocalPlan();
                                   if (context.mounted) showError(context, 'Wygenerowano plan lokalny.');
                                 })),
-                        SizedBox(
-                            width: width,
-                            child: FeatureActionTile(
-                                icon: Icons.download_outlined, title: 'Eksport CSV', subtitle: 'Dane treningowe do arkusza', onTap: () => showExportDialog(context, buildCsvExport(store)))),
-                        SizedBox(
-                            width: width,
-                            child:
-                                FeatureActionTile(icon: Icons.code, title: 'Eksport JSON', subtitle: 'Pełna kopia danych', onTap: () => showExportDialog(context, prettyJson(buildFullExport(store))))),
+                        SizedBox(width: width, child: FeatureActionTile(icon: Icons.download_outlined, title: 'Eksport CSV', subtitle: 'Dane treningowe do arkusza', onTap: () => showExportDialog(context, buildCsvExport(store)))),
+                        SizedBox(width: width, child: FeatureActionTile(icon: Icons.code, title: 'Eksport JSON', subtitle: 'Pełna kopia danych', onTap: () => showExportDialog(context, prettyJson(buildFullExport(store))))),
                       ],
                     );
                   },
@@ -9691,11 +10125,7 @@ class PersonalRecordsCard extends StatelessWidget {
         child: Column(
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
-            Row(children: [
-              Icon(Icons.emoji_events_outlined, color: theme.colorScheme.primary),
-              const SizedBox(width: 8),
-              Expanded(child: Text('Rekordy osobiste', style: theme.textTheme.titleMedium?.copyWith(fontWeight: FontWeight.w900)))
-            ]),
+            Row(children: [Icon(Icons.emoji_events_outlined, color: theme.colorScheme.primary), const SizedBox(width: 8), Expanded(child: Text('Rekordy osobiste', style: theme.textTheme.titleMedium?.copyWith(fontWeight: FontWeight.w900)))]),
             const SizedBox(height: 10),
             if (logs.isEmpty)
               Text('Dodaj kilka treningów, a Trainer pokaże rekordy ciężaru i objętości.', style: theme.textTheme.bodyMedium?.copyWith(color: theme.colorScheme.onSurfaceVariant))
@@ -9756,11 +10186,7 @@ class WeeklyBalanceCard extends StatelessWidget {
         child: Column(
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
-            Row(children: [
-              Icon(Icons.balance_outlined, color: theme.colorScheme.primary),
-              const SizedBox(width: 8),
-              Expanded(child: Text('Tygodniowy balans partii', style: theme.textTheme.titleMedium?.copyWith(fontWeight: FontWeight.w900)))
-            ]),
+            Row(children: [Icon(Icons.balance_outlined, color: theme.colorScheme.primary), const SizedBox(width: 8), Expanded(child: Text('Tygodniowy balans partii', style: theme.textTheme.titleMedium?.copyWith(fontWeight: FontWeight.w900)))]),
             const SizedBox(height: 10),
             Text(warning, style: theme.textTheme.bodyMedium?.copyWith(color: theme.colorScheme.onSurfaceVariant)),
             const SizedBox(height: 10),
@@ -9789,11 +10215,7 @@ class MonthlySummaryCard extends StatelessWidget {
         child: Column(
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
-            Row(children: [
-              Icon(Icons.calendar_view_month_outlined, color: theme.colorScheme.primary),
-              const SizedBox(width: 8),
-              Expanded(child: Text('Podsumowanie miesiąca', style: theme.textTheme.titleMedium?.copyWith(fontWeight: FontWeight.w900)))
-            ]),
+            Row(children: [Icon(Icons.calendar_view_month_outlined, color: theme.colorScheme.primary), const SizedBox(width: 8), Expanded(child: Text('Podsumowanie miesiąca', style: theme.textTheme.titleMedium?.copyWith(fontWeight: FontWeight.w900)))]),
             const SizedBox(height: 12),
             Row(children: [
               Expanded(child: SmallMetric(label: 'Dni', value: '$days')),
@@ -9906,11 +10328,7 @@ class _TrainingChecklistCardState extends State<TrainingChecklistCard> {
       child: Padding(
         padding: const EdgeInsets.all(16),
         child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
-          Row(children: [
-            Icon(Icons.checklist_outlined, color: theme.colorScheme.primary),
-            const SizedBox(width: 8),
-            Expanded(child: Text('Checklist treningowy', style: theme.textTheme.titleMedium?.copyWith(fontWeight: FontWeight.w900)))
-          ]),
+          Row(children: [Icon(Icons.checklist_outlined, color: theme.colorScheme.primary), const SizedBox(width: 8), Expanded(child: Text('Checklist treningowy', style: theme.textTheme.titleMedium?.copyWith(fontWeight: FontWeight.w900)))]),
           const SizedBox(height: 10),
           group('Przed treningiem', before),
           const Divider(),
@@ -9933,11 +10351,7 @@ class EquipmentAndLimitsCard extends StatelessWidget {
       child: Padding(
         padding: const EdgeInsets.all(16),
         child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
-          Row(children: [
-            Icon(Icons.build_outlined, color: theme.colorScheme.primary),
-            const SizedBox(width: 8),
-            Expanded(child: Text('Sprzęt i ograniczenia', style: theme.textTheme.titleMedium?.copyWith(fontWeight: FontWeight.w900)))
-          ]),
+          Row(children: [Icon(Icons.build_outlined, color: theme.colorScheme.primary), const SizedBox(width: 8), Expanded(child: Text('Sprzęt i ograniczenia', style: theme.textTheme.titleMedium?.copyWith(fontWeight: FontWeight.w900)))]),
           const SizedBox(height: 10),
           Text('Sprzęt: ${settings.equipment.isEmpty ? 'brak danych' : settings.equipment}'),
           const SizedBox(height: 6),
@@ -10152,6 +10566,7 @@ Map<String, dynamic> buildFullExport(AppStore store) => {
       'bodyMeasurements': store.bodyMeasurements.map((e) => e.toJson()).toList(),
       'trainingImpacts': store.trainingImpacts.map((e) => e.toJson()).toList(),
       'activityEntries': store.activityEntries.map((e) => e.toJson()).toList(),
+      'healthConnectSnapshots': store.healthConnectSnapshots.map((e) => e.toJson()).toList(),
       'activityCreditDiagnostics': store.activityCreditDecisionsForDay(store.selectedDate).map((decision) => decision.toJson()).toList(),
       'sharedCalorieProfile': buildSharedCalorieProfile(store),
     };
@@ -10210,8 +10625,7 @@ bool limitationSafe(Exercise exercise, String limitations) {
   final text = '${exercise.name} ${exercise.category} ${exercise.muscles.join(' ')}'.toLowerCase();
   if ((l.contains('kolan') || l.contains('knee')) && (text.contains('nogi') || text.contains('squat') || text.contains('przysiad') || text.contains('lunge') || text.contains('wykrok'))) return false;
   if ((l.contains('bark') || l.contains('shoulder')) && (text.contains('barki') || text.contains('press') || text.contains('dipy') || text.contains('pomp'))) return false;
-  if ((l.contains('plec') || l.contains('lędź') || l.contains('ledz') || l.contains('back')) &&
-      (text.contains('martwy') || text.contains('deadlift') || text.contains('row') || text.contains('wiosł'))) return false;
+  if ((l.contains('plec') || l.contains('lędź') || l.contains('ledz') || l.contains('back')) && (text.contains('martwy') || text.contains('deadlift') || text.contains('row') || text.contains('wiosł'))) return false;
   return true;
 }
 
@@ -10574,12 +10988,7 @@ class _RestTimerCardState extends State<RestTimerCard> {
   Widget build(BuildContext context) {
     final min = remaining ~/ 60;
     final sec = (remaining % 60).toString().padLeft(2, '0');
-    return Card(
-        child: ListTile(
-            leading: const Icon(Icons.timer_outlined),
-            title: const Text('Timer przerw zależny od celu'),
-            subtitle: Text('Rekomendowana przerwa: $recommendedSeconds s · aktywnie: $min:$sec'),
-            trailing: FilledButton(onPressed: start, child: const Text('Start'))));
+    return Card(child: ListTile(leading: const Icon(Icons.timer_outlined), title: const Text('Timer przerw zależny od celu'), subtitle: Text('Rekomendowana przerwa: $recommendedSeconds s · aktywnie: $min:$sec'), trailing: FilledButton(onPressed: start, child: const Text('Start'))));
   }
 }
 
@@ -10595,12 +11004,7 @@ class PlanTemplatesCard extends StatelessWidget {
         child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
           const Text('Gotowe plany', style: TextStyle(fontWeight: FontWeight.w900)),
           const SizedBox(height: 10),
-          Wrap(
-              spacing: 8,
-              runSpacing: 8,
-              children: ['FBW', 'PPL', 'Góra/Dół', 'Brzuch z obciążeniem']
-                  .map((t) => FilledButton.tonal(onPressed: () => showSmartTextDialog(context, t, buildTemplatePlan(t, settings)), child: Text(t)))
-                  .toList()),
+          Wrap(spacing: 8, runSpacing: 8, children: ['FBW', 'PPL', 'Góra/Dół', 'Brzuch z obciążeniem'].map((t) => FilledButton.tonal(onPressed: () => showSmartTextDialog(context, t, buildTemplatePlan(t, settings)), child: Text(t))).toList()),
         ]),
       ),
     );
@@ -10619,12 +11023,7 @@ class TargetedPlanGeneratorsCard extends StatelessWidget {
         child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
           const Text('Generatory planu', style: TextStyle(fontWeight: FontWeight.w900)),
           const SizedBox(height: 10),
-          Wrap(
-              spacing: 8,
-              runSpacing: 8,
-              children: ['Nogi', 'Plecy', 'Klatka', 'Barki', 'Brzuch i core']
-                  .map((t) => OutlinedButton(onPressed: () => showSmartTextDialog(context, 'Plan: $t', buildTargetPlan(t, settings)), child: Text(t)))
-                  .toList()),
+          Wrap(spacing: 8, runSpacing: 8, children: ['Nogi', 'Plecy', 'Klatka', 'Barki', 'Brzuch i core'].map((t) => OutlinedButton(onPressed: () => showSmartTextDialog(context, 'Plan: $t', buildTargetPlan(t, settings)), child: Text(t))).toList()),
         ]),
       ),
     );
@@ -10661,13 +11060,8 @@ class VolumeWarningsCard extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final totals = DayTotals.from(logs);
-    final warning =
-        totals.volume > 35000 || totals.durationSec > 420 * 60 ? 'Objętość tygodnia jest wysoka. Rozważ lżejszy dzień albo deload.' : 'Objętość tygodniowa wygląda bezpiecznie przy obecnych danych.';
-    return Card(
-        child: ListTile(
-            leading: const Icon(Icons.warning_amber_outlined),
-            title: const Text('Ostrzeżenia objętości'),
-            subtitle: Text('$warning Objętość: ${totals.volume.round()} kg, czas: ${(totals.durationSec / 60).round()} min.')));
+    final warning = totals.volume > 35000 || totals.durationSec > 420 * 60 ? 'Objętość tygodnia jest wysoka. Rozważ lżejszy dzień albo deload.' : 'Objętość tygodniowa wygląda bezpiecznie przy obecnych danych.';
+    return Card(child: ListTile(leading: const Icon(Icons.warning_amber_outlined), title: const Text('Ostrzeżenia objętości'), subtitle: Text('$warning Objętość: ${totals.volume.round()} kg, czas: ${(totals.durationSec / 60).round()} min.')));
   }
 }
 
@@ -10684,11 +11078,7 @@ class MuscleMapCard extends StatelessWidget {
       child: Padding(
         padding: const EdgeInsets.all(16),
         child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
-          Row(children: [
-            Icon(Icons.accessibility_new_outlined, color: theme.colorScheme.primary),
-            const SizedBox(width: 8),
-            const Expanded(child: Text('Mapa trenowanych partii', style: TextStyle(fontWeight: FontWeight.w900)))
-          ]),
+          Row(children: [Icon(Icons.accessibility_new_outlined, color: theme.colorScheme.primary), const SizedBox(width: 8), const Expanded(child: Text('Mapa trenowanych partii', style: TextStyle(fontWeight: FontWeight.w900)))]),
           const SizedBox(height: 12),
           SizedBox(height: 210, child: CustomPaint(painter: BodyHeatMapPainter(counts: counts, maxValue: maxV, color: theme.colorScheme.primary), child: const SizedBox.expand())),
         ]),
@@ -10730,14 +11120,7 @@ class SetsByMuscleChartCard extends StatelessWidget {
     final counts = muscleCounts(logs, customExercises);
     final entries = counts.entries.toList()..sort((a, b) => b.value.compareTo(a.value));
     final maxV = entries.isEmpty ? 1 : entries.first.value;
-    return Card(
-        child: Padding(
-            padding: const EdgeInsets.all(16),
-            child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
-              const Text('Wykres serii na partię', style: TextStyle(fontWeight: FontWeight.w900)),
-              const SizedBox(height: 10),
-              if (entries.isEmpty) const Text('Brak danych') else ...entries.take(8).map((e) => ProgressTextBar(label: e.key, value: e.value.toDouble(), max: maxV.toDouble(), suffix: '${e.value}x'))
-            ])));
+    return Card(child: Padding(padding: const EdgeInsets.all(16), child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [const Text('Wykres serii na partię', style: TextStyle(fontWeight: FontWeight.w900)), const SizedBox(height: 10), if (entries.isEmpty) const Text('Brak danych') else ...entries.take(8).map((e) => ProgressTextBar(label: e.key, value: e.value.toDouble(), max: maxV.toDouble(), suffix: '${e.value}x'))])));
   }
 }
 
@@ -10787,10 +11170,7 @@ class ProgressByExerciseCard extends StatelessWidget {
                 ...entries.take(5).map((e) {
                   final ex = ExerciseRepo.byId(e.key, customExercises);
                   final best = e.value.reduce((a, b) => a.volume >= b.volume ? a : b);
-                  return ListTile(
-                      contentPadding: EdgeInsets.zero,
-                      title: Text(ex.name),
-                      subtitle: Text('Najlepsza objętość: ${best.volume.round()} kg · ciężar ${best.weightKg.toStringAsFixed(1)} kg · powt. ${best.reps}'));
+                  return ListTile(contentPadding: EdgeInsets.zero, title: Text(ex.name), subtitle: Text('Najlepsza objętość: ${best.volume.round()} kg · ciężar ${best.weightKg.toStringAsFixed(1)} kg · powt. ${best.reps}'));
                 })
             ])));
   }
@@ -10814,11 +11194,7 @@ class PostWorkoutRecommendationCard extends StatelessWidget {
 class OfflineModeCard extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
-    return const Card(
-        child: ListTile(
-            leading: Icon(Icons.wifi_off_outlined),
-            title: Text('Tryb offline i lokalny fallback'),
-            subtitle: Text('Baza ćwiczeń, dziennik, wykresy, plan lokalny, timer, checklisty i eksport działają bez internetu. AI i wger wymagają sieci.')));
+    return const Card(child: ListTile(leading: Icon(Icons.wifi_off_outlined), title: Text('Tryb offline i lokalny fallback'), subtitle: Text('Baza ćwiczeń, dziennik, wykresy, plan lokalny, timer, checklisty i eksport działają bez internetu. AI i wger wymagają sieci.')));
   }
 }
 
@@ -10834,14 +11210,7 @@ class _TechniqueChecklistForExerciseState extends State<TechniqueChecklistForExe
   @override
   Widget build(BuildContext context) {
     final items = [...widget.exercise.commonMistakes, 'Zapisz notatkę techniczną po serii', 'Nagrywaj serię roboczą, gdy coś boli'];
-    return Card(
-        child: Padding(
-            padding: const EdgeInsets.all(16),
-            child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
-              const Text('Błędy techniczne do odhaczenia', style: TextStyle(fontWeight: FontWeight.w900)),
-              ...items.asMap().entries.map((e) =>
-                  CheckboxListTile(contentPadding: EdgeInsets.zero, dense: true, value: checked[e.key] ?? false, title: Text(e.value), onChanged: (v) => setState(() => checked[e.key] = v ?? false)))
-            ])));
+    return Card(child: Padding(padding: const EdgeInsets.all(16), child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [const Text('Błędy techniczne do odhaczenia', style: TextStyle(fontWeight: FontWeight.w900)), ...items.asMap().entries.map((e) => CheckboxListTile(contentPadding: EdgeInsets.zero, dense: true, value: checked[e.key] ?? false, title: Text(e.value), onChanged: (v) => setState(() => checked[e.key] = v ?? false)))])));
   }
 }
 
@@ -11441,11 +11810,7 @@ class ExerciseProgressionCard extends StatelessWidget {
   const ExerciseProgressionCard({super.key, required this.exercise});
   @override
   Widget build(BuildContext context) {
-    return Card(
-        child: ListTile(
-            leading: const Icon(Icons.stacked_line_chart_outlined),
-            title: const Text('Rekomendacja progresji tygodniowej'),
-            subtitle: Text('Dla ${exercise.name}: gdy wszystkie serie są techniczne przy RPE <=7, dodaj 1-2 powtórzenia albo najmniejszy dostępny ciężar. Gdy RPE >=9, utrzymaj lub odejmij 10%.')));
+    return Card(child: ListTile(leading: const Icon(Icons.stacked_line_chart_outlined), title: const Text('Rekomendacja progresji tygodniowej'), subtitle: Text('Dla ${exercise.name}: gdy wszystkie serie są techniczne przy RPE <=7, dodaj 1-2 powtórzenia albo najmniejszy dostępny ciężar. Gdy RPE >=9, utrzymaj lub odejmij 10%.')));
   }
 }
 
@@ -11967,11 +12332,7 @@ class _AddWorkoutSheetContentState extends State<AddWorkoutSheetContent> {
                 child: InputDecorator(
                   decoration: const InputDecoration(labelText: 'RPE'),
                   child: DropdownButtonHideUnderline(
-                    child: DropdownButton<int>(
-                        value: rpe,
-                        isExpanded: true,
-                        items: List.generate(10, (i) => i + 1).map((v) => DropdownMenuItem(value: v, child: Text('$v/10'))).toList(),
-                        onChanged: (v) => setState(() => rpe = v ?? rpe)),
+                    child: DropdownButton<int>(value: rpe, isExpanded: true, items: List.generate(10, (i) => i + 1).map((v) => DropdownMenuItem(value: v, child: Text('$v/10'))).toList(), onChanged: (v) => setState(() => rpe = v ?? rpe)),
                   ),
                 ),
               ),
@@ -12367,6 +12728,5 @@ class HumanExercisePainter extends CustomPainter {
   }
 
   @override
-  bool shouldRepaint(covariant HumanExercisePainter oldDelegate) =>
-      oldDelegate.type != type || oldDelegate.progress != progress || oldDelegate.bodyColor != bodyColor || oldDelegate.backgroundColor != backgroundColor || oldDelegate.accentColor != accentColor;
+  bool shouldRepaint(covariant HumanExercisePainter oldDelegate) => oldDelegate.type != type || oldDelegate.progress != progress || oldDelegate.bodyColor != bodyColor || oldDelegate.backgroundColor != backgroundColor || oldDelegate.accentColor != accentColor;
 }

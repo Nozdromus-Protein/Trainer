@@ -90,6 +90,26 @@ void main() {
       steps: 8200,
       note: 'Kroki z wejścia lokalnego',
     );
+    final healthConnectSnapshot = TrainerHealthConnectSnapshot(
+      id: 'health_connect_2026_6_24',
+      date: DateTime(2026, 6, 24),
+      checkedAt: DateTime(2026, 6, 24, 12, 30),
+      sdkStatus: 'sdkAvailable',
+      isAvailable: true,
+      permissionsGranted: true,
+      grantedPermissions: const ['Kroki', 'Dystans', 'Aktywne kcal'],
+      missingPermissions: const [],
+      steps: 8200,
+      distanceKm: 5.2,
+      activeKcal: 280,
+      workoutSessions: 1,
+      workoutMinutes: 42,
+      averageHeartRate: 118,
+      heartRateSamples: 10,
+      sleepMinutes: 410,
+      availableData: const ['Kroki', 'Dystans', 'Aktywne kcal', 'Sesje treningowe'],
+      missingData: const ['Tętno'],
+    );
 
     await repository.saveSessions([session]);
     await repository.savePlans([plan]);
@@ -97,6 +117,7 @@ void main() {
     await repository.saveBodyMeasurements([bodyMeasurement]);
     await repository.saveTrainingImpacts([impact]);
     await repository.saveActivityEntries([activityEntry]);
+    await repository.saveHealthConnectSnapshots([healthConnectSnapshot]);
     await repository.saveExerciseLibraryPreferences(
       const ExerciseLibraryPreferences(
         favoriteExerciseIds: {'custom-1'},
@@ -154,6 +175,9 @@ void main() {
     expect(restored.trainingImpacts.single.deduplicationKey, 'Trainer:session-1:2026-06-24');
     expect(restored.activityEntries.single.steps, 8200);
     expect(restored.activityEntries.single.source, TrainerActivitySource.steps);
+    expect(restored.healthConnectSnapshots.single.steps, 8200);
+    expect(restored.healthConnectSnapshots.single.sdkStatus, 'sdkAvailable');
+    expect(restored.healthConnectSnapshots.single.availableData, contains('Dystans'));
   });
 
   test('TrainerCalorieLocalAdapter publishes deduplicated bridge payload', () async {
