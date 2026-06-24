@@ -5285,6 +5285,11 @@ class ExerciseDetailsPage extends StatelessWidget {
           _ExerciseVariantsCard(exercise: exercise),
           const SizedBox(height: 12),
           ExerciseSubstitutionsCard(exercise: exercise),
+          const SizedBox(height: 12),
+          ExerciseProgressHistorySection(
+            exercise: exercise,
+            logs: store.logs,
+          ),
         ],
       ),
       bottomNavigationBar: _ExerciseDetailsActions(
@@ -9952,6 +9957,509 @@ class ExerciseSubstitutionsCard extends StatelessWidget {
         ),
       ),
     );
+  }
+}
+
+class ExerciseProgressHistorySection extends StatelessWidget {
+  const ExerciseProgressHistorySection({
+    super.key,
+    required this.exercise,
+    required this.logs,
+  });
+
+  final Exercise exercise;
+  final List<WorkoutLog> logs;
+
+  @override
+  Widget build(BuildContext context) {
+    final theme = Theme.of(context);
+    final progress = buildExerciseProgressData(exerciseId: exercise.id, logs: logs);
+    if (!progress.hasHistory) {
+      return Card(
+        child: Padding(
+          padding: const EdgeInsets.all(18),
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Row(
+                children: [
+                  Icon(Icons.show_chart_rounded, color: theme.colorScheme.primary),
+                  const SizedBox(width: 8),
+                  Expanded(child: Text('Historia progresu', style: theme.textTheme.titleMedium?.copyWith(fontWeight: FontWeight.w900))),
+                ],
+              ),
+              const SizedBox(height: 8),
+              Text(
+                'Brak zapisanych serii dla tego ćwiczenia. Po wykonaniu treningu zobaczysz tutaj ciężar, objętość, 1RM i sugestię progresji.',
+                style: theme.textTheme.bodyMedium?.copyWith(color: theme.colorScheme.onSurfaceVariant),
+              ),
+              const SizedBox(height: 12),
+              OneRepMaxCalculatorCard(initialWeight: 0, initialReps: math.max(1, exercise.defaultReps)),
+            ],
+          ),
+        ),
+      );
+    }
+
+    final points = progress.points.takeLast(8).toList();
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.stretch,
+      children: [
+        Card(
+          child: Padding(
+            padding: const EdgeInsets.all(18),
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.stretch,
+              children: [
+                Row(
+                  children: [
+                    Icon(Icons.show_chart_rounded, color: theme.colorScheme.primary),
+                    const SizedBox(width: 8),
+                    Expanded(child: Text('Historia progresu', style: theme.textTheme.titleMedium?.copyWith(fontWeight: FontWeight.w900))),
+                  ],
+                ),
+                const SizedBox(height: 4),
+                Text(
+                  'Lokalna analiza ostatnich wykonań tego ćwiczenia.',
+                  style: theme.textTheme.bodySmall?.copyWith(color: theme.colorScheme.onSurfaceVariant),
+                ),
+                const SizedBox(height: 14),
+                _ExerciseProgressMetricGrid(progress: progress),
+                const SizedBox(height: 14),
+                _ExerciseProgressStatusBox(progress: progress),
+              ],
+            ),
+          ),
+        ),
+        const SizedBox(height: 12),
+        SimpleProgressBarChartCard(
+          title: 'Ciężar w czasie',
+          subtitle: 'Największy ciężar użyty w kolejnych wykonaniach ćwiczenia',
+          values: points.map((point) => point.bestWeight).toList(),
+          labels: points.map((point) => shortDate(point.date)).toList(),
+          suffix: 'kg',
+          icon: Icons.fitness_center_outlined,
+        ),
+        const SizedBox(height: 12),
+        SimpleProgressBarChartCard(
+          title: 'Objętość w czasie',
+          subtitle: 'Objętość ćwiczenia: ciężar × powtórzenia w zapisanych seriach',
+          values: points.map((point) => point.volume).toList(),
+          labels: points.map((point) => shortDate(point.date)).toList(),
+          suffix: 'kg',
+          icon: Icons.stacked_bar_chart_rounded,
+        ),
+        const SizedBox(height: 12),
+        OneRepMaxCalculatorCard(
+          initialWeight: progress.bestSet?.weightKg ?? progress.lastUsedWeight,
+          initialReps: math.max(1, progress.bestSet?.repetitions ?? progress.lastRepetitions),
+        ),
+      ],
+    );
+  }
+}
+
+class _ExerciseProgressMetricGrid extends StatelessWidget {
+  const _ExerciseProgressMetricGrid({required this.progress});
+
+  final ExerciseProgressData progress;
+
+  @override
+  Widget build(BuildContext context) {
+    return LayoutBuilder(
+      builder: (context, constraints) {
+        final width = constraints.maxWidth >= 600
+            ? (constraints.maxWidth - 20) / 3
+            : constraints.maxWidth >= 420
+                ? (constraints.maxWidth - 10) / 2
+                : constraints.maxWidth;
+        final bestSet = progress.bestSet;
+        final tiles = [
+          _ExerciseProgressMetric(label: 'Ostatni ciężar', value: formatProgressWeight(progress.lastUsedWeight)),
+          _ExerciseProgressMetric(label: 'Najlepszy ciężar', value: formatProgressWeight(progress.bestWeight)),
+          _ExerciseProgressMetric(label: 'Najlepsza seria', value: bestSet == null ? '—' : '${formatProgressWeight(bestSet.weightKg)} × ${bestSet.repetitions}'),
+          _ExerciseProgressMetric(label: 'Objętość łącznie', value: formatProgressVolume(progress.totalVolume)),
+          _ExerciseProgressMetric(label: 'Ostatnio', value: progress.lastPerformedAt == null ? '—' : trainerHistoryFullDate(progress.lastPerformedAt!)),
+          _ExerciseProgressMetric(label: 'Szac. 1RM', value: formatProgressWeight(progress.estimatedOneRepMax)),
+        ];
+        return Wrap(
+          spacing: 10,
+          runSpacing: 10,
+          children: [
+            for (final tile in tiles) SizedBox(width: width, child: tile),
+          ],
+        );
+      },
+    );
+  }
+}
+
+class _ExerciseProgressMetric extends StatelessWidget {
+  const _ExerciseProgressMetric({
+    required this.label,
+    required this.value,
+  });
+
+  final String label;
+  final String value;
+
+  @override
+  Widget build(BuildContext context) {
+    final theme = Theme.of(context);
+    return Container(
+      padding: const EdgeInsets.all(12),
+      decoration: BoxDecoration(
+        color: theme.colorScheme.surfaceContainerHighest.withValues(alpha: 0.55),
+        borderRadius: BorderRadius.circular(18),
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Text(value, maxLines: 1, overflow: TextOverflow.ellipsis, style: theme.textTheme.titleMedium?.copyWith(fontWeight: FontWeight.w900)),
+          const SizedBox(height: 2),
+          Text(label, maxLines: 1, overflow: TextOverflow.ellipsis, style: theme.textTheme.labelSmall?.copyWith(color: theme.colorScheme.onSurfaceVariant)),
+        ],
+      ),
+    );
+  }
+}
+
+class _ExerciseProgressStatusBox extends StatelessWidget {
+  const _ExerciseProgressStatusBox({required this.progress});
+
+  final ExerciseProgressData progress;
+
+  @override
+  Widget build(BuildContext context) {
+    final theme = Theme.of(context);
+    final color = progress.isStagnating ? theme.colorScheme.tertiary : theme.colorScheme.primary;
+    return Container(
+      padding: const EdgeInsets.all(14),
+      decoration: BoxDecoration(
+        color: color.withValues(alpha: 0.14),
+        borderRadius: BorderRadius.circular(20),
+        border: Border.all(color: color.withValues(alpha: 0.28)),
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Row(
+            children: [
+              Icon(progress.isStagnating ? Icons.pause_circle_outline_rounded : Icons.trending_up_rounded, color: color),
+              const SizedBox(width: 8),
+              Expanded(child: Text(progress.stagnationMessage, style: theme.textTheme.labelLarge?.copyWith(fontWeight: FontWeight.w900))),
+            ],
+          ),
+          const SizedBox(height: 10),
+          Text('Sugestia: ${progress.suggestionTitle}', style: theme.textTheme.titleSmall?.copyWith(fontWeight: FontWeight.w900)),
+          const SizedBox(height: 4),
+          Text(progress.suggestionDetails, style: theme.textTheme.bodyMedium?.copyWith(height: 1.35)),
+        ],
+      ),
+    );
+  }
+}
+
+class OneRepMaxCalculatorCard extends StatefulWidget {
+  const OneRepMaxCalculatorCard({
+    super.key,
+    required this.initialWeight,
+    required this.initialReps,
+  });
+
+  final double initialWeight;
+  final int initialReps;
+
+  @override
+  State<OneRepMaxCalculatorCard> createState() => _OneRepMaxCalculatorCardState();
+}
+
+class _OneRepMaxCalculatorCardState extends State<OneRepMaxCalculatorCard> {
+  late final TextEditingController weight;
+  late final TextEditingController reps;
+
+  @override
+  void initState() {
+    super.initState();
+    weight = TextEditingController(text: widget.initialWeight <= 0 ? '' : widget.initialWeight.toStringAsFixed(1));
+    reps = TextEditingController(text: '${widget.initialReps.clamp(1, 99)}');
+  }
+
+  @override
+  void dispose() {
+    weight.dispose();
+    reps.dispose();
+    super.dispose();
+  }
+
+  double get estimatedOneRm {
+    final parsedWeight = double.tryParse(weight.text.replaceAll(',', '.')) ?? 0;
+    final parsedReps = int.tryParse(reps.text) ?? 1;
+    return estimateOneRepMax(parsedWeight, parsedReps);
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final theme = Theme.of(context);
+    return Card(
+      child: Padding(
+        padding: const EdgeInsets.all(18),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.stretch,
+          children: [
+            Row(
+              children: [
+                Icon(Icons.calculate_outlined, color: theme.colorScheme.primary),
+                const SizedBox(width: 8),
+                Expanded(child: Text('Kalkulator 1RM', style: theme.textTheme.titleMedium?.copyWith(fontWeight: FontWeight.w900))),
+              ],
+            ),
+            const SizedBox(height: 12),
+            LayoutBuilder(
+              builder: (context, constraints) {
+                final fields = [
+                  TextField(
+                    key: const Key('one_rm_weight'),
+                    controller: weight,
+                    keyboardType: const TextInputType.numberWithOptions(decimal: true),
+                    decoration: const InputDecoration(labelText: 'Ciężar kg'),
+                    onChanged: (_) => setState(() {}),
+                  ),
+                  TextField(
+                    key: const Key('one_rm_reps'),
+                    controller: reps,
+                    keyboardType: TextInputType.number,
+                    decoration: const InputDecoration(labelText: 'Powtórzenia'),
+                    onChanged: (_) => setState(() {}),
+                  ),
+                ];
+                if (constraints.maxWidth < 420) {
+                  return Column(
+                    children: [
+                      fields.first,
+                      const SizedBox(height: 10),
+                      fields.last,
+                    ],
+                  );
+                }
+                return Row(
+                  children: [
+                    Expanded(child: fields.first),
+                    const SizedBox(width: 10),
+                    Expanded(child: fields.last),
+                  ],
+                );
+              },
+            ),
+            const SizedBox(height: 12),
+            Container(
+              padding: const EdgeInsets.all(14),
+              decoration: BoxDecoration(
+                color: theme.colorScheme.primaryContainer.withValues(alpha: 0.45),
+                borderRadius: BorderRadius.circular(18),
+              ),
+              child: Row(
+                children: [
+                  Expanded(child: Text('Szacowane 1RM', style: theme.textTheme.labelLarge?.copyWith(fontWeight: FontWeight.w900))),
+                  Text(formatProgressWeight(estimatedOneRm), style: theme.textTheme.titleLarge?.copyWith(fontWeight: FontWeight.w900)),
+                ],
+              ),
+            ),
+            const SizedBox(height: 6),
+            Text('Wzór Epleya: ciężar × (1 + powtórzenia / 30). To szacunek, nie zalecenie maksowania.', style: theme.textTheme.bodySmall?.copyWith(color: theme.colorScheme.onSurfaceVariant)),
+          ],
+        ),
+      ),
+    );
+  }
+}
+
+class ExerciseProgressPoint {
+  const ExerciseProgressPoint({
+    required this.date,
+    required this.bestWeight,
+    required this.bestReps,
+    required this.volume,
+    required this.averageRpe,
+    required this.bestSet,
+  });
+
+  final DateTime date;
+  final double bestWeight;
+  final int bestReps;
+  final double volume;
+  final double averageRpe;
+  final WorkoutSet bestSet;
+}
+
+class ExerciseProgressData {
+  const ExerciseProgressData({
+    required this.points,
+    required this.lastUsedWeight,
+    required this.lastRepetitions,
+    required this.bestWeight,
+    required this.bestSet,
+    required this.totalVolume,
+    required this.lastPerformedAt,
+    required this.estimatedOneRepMax,
+    required this.isStagnating,
+    required this.stagnationMessage,
+    required this.suggestionTitle,
+    required this.suggestionDetails,
+  });
+
+  final List<ExerciseProgressPoint> points;
+  final double lastUsedWeight;
+  final int lastRepetitions;
+  final double bestWeight;
+  final WorkoutSet? bestSet;
+  final double totalVolume;
+  final DateTime? lastPerformedAt;
+  final double estimatedOneRepMax;
+  final bool isStagnating;
+  final String stagnationMessage;
+  final String suggestionTitle;
+  final String suggestionDetails;
+
+  bool get hasHistory => points.isNotEmpty;
+}
+
+ExerciseProgressData buildExerciseProgressData({
+  required String exerciseId,
+  required List<WorkoutLog> logs,
+}) {
+  final exerciseLogs = logs.where((log) => log.exerciseId == exerciseId).toList()..sort((left, right) => left.date.compareTo(right.date));
+  final points = <ExerciseProgressPoint>[];
+  for (final log in exerciseLogs) {
+    final sets = progressSetsForLog(log);
+    if (sets.isEmpty) continue;
+    final bestSet = sets.reduce(preferBetterProgressSet);
+    final bestWeight = sets.fold<double>(0, (maxWeight, set) => math.max(maxWeight, set.weightKg));
+    final bestReps = sets.fold<int>(0, (maxReps, set) => math.max(maxReps, set.repetitions));
+    final averageRpe = sets.fold<int>(0, (sum, set) => sum + set.rpe) / sets.length;
+    points.add(
+      ExerciseProgressPoint(
+        date: log.date,
+        bestWeight: bestWeight,
+        bestReps: bestReps,
+        volume: log.volume,
+        averageRpe: averageRpe,
+        bestSet: bestSet,
+      ),
+    );
+  }
+
+  if (points.isEmpty) {
+    return const ExerciseProgressData(
+      points: [],
+      lastUsedWeight: 0,
+      lastRepetitions: 0,
+      bestWeight: 0,
+      bestSet: null,
+      totalVolume: 0,
+      lastPerformedAt: null,
+      estimatedOneRepMax: 0,
+      isStagnating: false,
+      stagnationMessage: 'Brak danych progresu',
+      suggestionTitle: 'Utrzymaj',
+      suggestionDetails: 'Zapisz kilka treningów tego ćwiczenia, a Trainer pokaże lokalną sugestię progresji.',
+    );
+  }
+
+  final bestSet = points.map((point) => point.bestSet).reduce(preferBetterProgressSet);
+  final isStagnating = detectExerciseProgressStagnation(points);
+  final suggestion = exerciseProgressSuggestion(points, isStagnating);
+  return ExerciseProgressData(
+    points: points,
+    lastUsedWeight: points.last.bestWeight,
+    lastRepetitions: points.last.bestReps,
+    bestWeight: points.fold<double>(0, (maxWeight, point) => math.max(maxWeight, point.bestWeight)),
+    bestSet: bestSet,
+    totalVolume: points.fold<double>(0, (sum, point) => sum + point.volume),
+    lastPerformedAt: points.last.date,
+    estimatedOneRepMax: estimateOneRepMax(bestSet.weightKg, bestSet.repetitions),
+    isStagnating: isStagnating,
+    stagnationMessage: isStagnating ? 'Możliwa stagnacja' : 'Progres wygląda aktywnie',
+    suggestionTitle: suggestion.$1,
+    suggestionDetails: suggestion.$2,
+  );
+}
+
+List<WorkoutSet> progressSetsForLog(WorkoutLog log) {
+  final completed = log.workoutSets.where((set) => set.isCompleted).toList();
+  if (completed.isNotEmpty) return completed;
+  if (log.sets <= 0 || log.reps <= 0) return const [];
+  return [
+    WorkoutSet(
+      id: '${log.id}_aggregate',
+      order: 1,
+      repetitions: log.reps,
+      weightKg: log.weightKg,
+      durationSec: 0,
+      rpe: log.rpe,
+      isCompleted: true,
+    ),
+  ];
+}
+
+WorkoutSet preferBetterProgressSet(WorkoutSet left, WorkoutSet right) {
+  final leftOneRm = estimateOneRepMax(left.weightKg, left.repetitions);
+  final rightOneRm = estimateOneRepMax(right.weightKg, right.repetitions);
+  if ((rightOneRm - leftOneRm).abs() > 0.05) return rightOneRm > leftOneRm ? right : left;
+  return right.volume > left.volume ? right : left;
+}
+
+double estimateOneRepMax(double weightKg, int repetitions) {
+  if (weightKg <= 0 || repetitions <= 0) return 0;
+  if (repetitions == 1) return weightKg;
+  return weightKg * (1 + repetitions / 30);
+}
+
+bool detectExerciseProgressStagnation(List<ExerciseProgressPoint> points) {
+  if (points.length < 3) return false;
+  final recent = points.sublist(points.length - 3);
+  final first = recent.first;
+  final last = recent.last;
+  final weightImproved = last.bestWeight > first.bestWeight + 0.25;
+  final repsImproved = last.bestReps > first.bestReps;
+  final volumeImproved = last.volume > first.volume + 0.5;
+  return !(weightImproved || repsImproved || volumeImproved);
+}
+
+(String, String) exerciseProgressSuggestion(List<ExerciseProgressPoint> points, bool isStagnating) {
+  if (points.isEmpty) {
+    return ('Utrzymaj', 'Najpierw zapisz kilka serii, żeby sugestia miała sens.');
+  }
+  final last = points.last;
+  if (last.averageRpe >= 9) {
+    return ('Zrób lżejszy tydzień', 'Ostatnie serie są bardzo ciężkie. Obniż obciążenie o 5–10% albo zmniejsz liczbę serii.');
+  }
+  if (isStagnating && last.averageRpe <= 7.5) {
+    return ('Zwiększ ciężar', 'Przez kilka wykonań nie widać wzrostu, a zapas siły jest dobry. Dodaj najmniejszy dostępny ciężar.');
+  }
+  if (isStagnating) {
+    return ('Zwiększ powtórzenia', 'Ciężar stoi w miejscu, więc dołóż 1–2 powtórzenia w seriach roboczych zamiast od razu zwiększać kg.');
+  }
+  if (last.averageRpe <= 7) {
+    return ('Zwiększ ciężar', 'Ostatnie wykonanie wygląda lekko. Dodaj niewielki ciężar, jeśli technika była stabilna.');
+  }
+  if (last.averageRpe <= 8.5) {
+    return ('Utrzymaj', 'Progres jest widoczny. Powtórz ciężar i spróbuj poprawić technikę albo jedną serię.');
+  }
+  return ('Zrób lżejszy tydzień', 'Intensywność jest wysoka. Lżejszy tydzień pomoże wrócić do progresji.');
+}
+
+String formatProgressWeight(double weight) {
+  if (weight <= 0) return '0 kg';
+  if (weight == weight.roundToDouble()) return '${weight.round()} kg';
+  return '${weight.toStringAsFixed(1)} kg';
+}
+
+extension _TakeLastItems<T> on Iterable<T> {
+  Iterable<T> takeLast(int count) {
+    final list = toList();
+    if (list.length <= count) return list;
+    return list.sublist(list.length - count);
   }
 }
 
