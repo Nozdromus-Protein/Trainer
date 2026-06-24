@@ -1,3 +1,4 @@
+export 'activity_credit.dart';
 export 'active_workout_session.dart';
 export 'body_measurement.dart';
 export 'exercise.dart';

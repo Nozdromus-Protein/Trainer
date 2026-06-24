@@ -156,6 +156,7 @@ class AppStore extends ChangeNotifier {
   final List<Exercise> customExercises = [];
   final List<BodyMeasurement> bodyMeasurements = [];
   final List<TrainingImpact> trainingImpacts = [];
+  final List<TrainerActivityEntry> activityEntries = [];
   ExerciseLibraryPreferences exerciseLibraryPreferences = const ExerciseLibraryPreferences();
   ActiveWorkoutSession? activeWorkoutSession;
   AppSettings settings = AppSettings.defaults();
@@ -184,6 +185,10 @@ class AppStore extends ChangeNotifier {
       ..clear()
       ..addAll(trainerData.trainingImpacts);
     trainingImpacts.sort((left, right) => right.date.compareTo(left.date));
+    activityEntries
+      ..clear()
+      ..addAll(trainerData.activityEntries);
+    activityEntries.sort((left, right) => right.date.compareTo(left.date));
     exerciseLibraryPreferences = trainerData.exerciseLibraryPreferences;
     activeWorkoutSession = trainerData.activeWorkoutSession;
     if (activeWorkoutSession?.exercises.isEmpty ?? false) {
@@ -227,6 +232,7 @@ class AppStore extends ChangeNotifier {
     await saveActiveWorkoutSession();
     await saveBodyMeasurements();
     await saveTrainingImpacts();
+    await saveActivityEntries();
   }
 
   Future<void> saveLogs() async {
@@ -407,6 +413,10 @@ class AppStore extends ChangeNotifier {
     await _calorieAdapter.publishTrainingImpacts(trainingImpacts);
   }
 
+  Future<void> saveActivityEntries() async {
+    await _trainerRepository.saveActivityEntries(activityEntries);
+  }
+
   Future<void> saveExerciseLibraryPreferences() async {
     await _trainerRepository.saveExerciseLibraryPreferences(
       exerciseLibraryPreferences,
@@ -454,6 +464,28 @@ class AppStore extends ChangeNotifier {
     }
     trainingImpacts.sort((left, right) => right.date.compareTo(left.date));
     await saveTrainingImpacts();
+  }
+
+  Future<void> upsertActivityEntry(TrainerActivityEntry entry) async {
+    final index = activityEntries.indexWhere((item) => item.id == entry.id || item.stableActivityKey == entry.stableActivityKey);
+    if (index >= 0) {
+      activityEntries[index] = entry;
+    } else {
+      activityEntries.insert(0, entry);
+    }
+    activityEntries.sort((left, right) => right.date.compareTo(left.date));
+    await saveActivityEntries();
+    notifyListeners();
+  }
+
+  List<TrainerActivityEntry> activityInputsForDay(DateTime day) {
+    final externalEntries = activityEntries.where((entry) => sameDay(entry.date, day)).toList();
+    final strengthEntries = trainingImpacts.where((impact) => sameDay(impact.date, day)).map(TrainerActivityEntry.fromTrainingImpact).toList();
+    return [...externalEntries, ...strengthEntries];
+  }
+
+  List<ActivityCreditDecision> activityCreditDecisionsForDay(DateTime day) {
+    return resolveActivityCredits(activityInputsForDay(day));
   }
 
   bool isExerciseFavorite(String id) => exerciseLibraryPreferences.isFavorite(id);
@@ -8874,6 +8906,320 @@ List<String> bodyMeasurementTags(BodyMeasurement measurement) {
   return tags.isEmpty ? ['Brak obwodów'] : tags;
 }
 
+class ActivityDeduplicationPage extends StatelessWidget {
+  const ActivityDeduplicationPage({super.key});
+
+  @override
+  Widget build(BuildContext context) {
+    final store = AppScope.of(context);
+    final decisions = store.activityCreditDecisionsForDay(store.selectedDate);
+    return PageFrame(
+      title: 'Anty-dublowanie aktywności',
+      subtitle: 'Źródła aktywności, kcal i decyzje o pominięciu duplikatów',
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.stretch,
+        children: [
+          ActivityDeduplicationOverviewCard(decisions: decisions),
+          const SizedBox(height: 12),
+          ActivityCreditTiles(decisions: decisions),
+          const SizedBox(height: 12),
+          ActivityDiagnosticsCard(decisions: decisions),
+        ],
+      ),
+    );
+  }
+}
+
+class ActivityDeduplicationOverviewCard extends StatelessWidget {
+  const ActivityDeduplicationOverviewCard({super.key, required this.decisions});
+
+  final List<ActivityCreditDecision> decisions;
+
+  @override
+  Widget build(BuildContext context) {
+    final theme = Theme.of(context);
+    final creditedKcal = totalCreditedActivityKcal(decisions);
+    final duplicates = decisions.where((decision) => decision.skippedAsDuplicate).length;
+    return Card(
+      child: Padding(
+        padding: const EdgeInsets.all(18),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Row(
+              children: [
+                Icon(Icons.rule_rounded, color: theme.colorScheme.primary),
+                const SizedBox(width: 8),
+                Expanded(child: Text('Reguły zaliczania kcal', style: theme.textTheme.titleMedium?.copyWith(fontWeight: FontWeight.w900))),
+              ],
+            ),
+            const SizedBox(height: 10),
+            Wrap(
+              spacing: 8,
+              runSpacing: 8,
+              children: [
+                MiniTag(text: 'Zaliczone: $creditedKcal kcal'),
+                MiniTag(text: 'Duplikaty: $duplicates'),
+                const MiniTag(text: 'Kroki osobno'),
+                const MiniTag(text: 'Bieg ≠ chód'),
+              ],
+            ),
+            const SizedBox(height: 10),
+            Text(
+              'Trainer przyjmuje dane z: manual, Trainer, Health Connect, zegarek, kroki, bieg i chód mierzony. Na tym etapie to lokalna logika wejściowa — bez pełnej synchronizacji Health Connect.',
+              style: theme.textTheme.bodyMedium?.copyWith(color: theme.colorScheme.onSurfaceVariant),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+}
+
+class ActivityCreditTiles extends StatelessWidget {
+  const ActivityCreditTiles({super.key, required this.decisions});
+
+  final List<ActivityCreditDecision> decisions;
+
+  @override
+  Widget build(BuildContext context) {
+    return LayoutBuilder(
+      builder: (context, constraints) {
+        final wide = constraints.maxWidth > 620;
+        final width = wide ? (constraints.maxWidth - 10) / 2 : constraints.maxWidth;
+        return Wrap(
+          spacing: 10,
+          runSpacing: 10,
+          children: [
+            SizedBox(
+              width: width,
+              child: ActivityTypeCreditTile(
+                title: 'Kroki',
+                subtitle: 'Chód zwykły z kroków liczy się osobno',
+                type: TrainerActivityType.ordinaryStepsWalk,
+                icon: Icons.directions_walk_rounded,
+                decisions: decisions,
+              ),
+            ),
+            SizedBox(
+              width: width,
+              child: ActivityTypeCreditTile(
+                title: 'Chód mierzony',
+                subtitle: 'Nie może być jednocześnie biegiem',
+                type: TrainerActivityType.measuredWalk,
+                icon: Icons.hiking_rounded,
+                decisions: decisions,
+              ),
+            ),
+            SizedBox(
+              width: width,
+              child: ActivityTypeCreditTile(
+                title: 'Bieg mierzony',
+                subtitle: 'Nie może być liczony jako chód',
+                type: TrainerActivityType.run,
+                icon: Icons.directions_run_rounded,
+                decisions: decisions,
+              ),
+            ),
+            SizedBox(
+              width: width,
+              child: ActivityTypeCreditTile(
+                title: 'Trening siłowy',
+                subtitle: 'Sesje z Trainera po zakończeniu treningu',
+                type: TrainerActivityType.strengthTraining,
+                icon: Icons.fitness_center_rounded,
+                decisions: decisions,
+              ),
+            ),
+          ],
+        );
+      },
+    );
+  }
+}
+
+class ActivityTypeCreditTile extends StatelessWidget {
+  const ActivityTypeCreditTile({
+    super.key,
+    required this.title,
+    required this.subtitle,
+    required this.type,
+    required this.icon,
+    required this.decisions,
+  });
+
+  final String title;
+  final String subtitle;
+  final TrainerActivityType type;
+  final IconData icon;
+  final List<ActivityCreditDecision> decisions;
+
+  @override
+  Widget build(BuildContext context) {
+    final theme = Theme.of(context);
+    final visible = decisions.where((decision) => decision.entry.type == type).toList();
+    final creditedKcal = visible.fold<int>(0, (sum, decision) => sum + decision.creditedKcal);
+    final duplicates = visible.where((decision) => decision.skippedAsDuplicate).length;
+    final sources = visible.map((decision) => decision.entry.source.label).toSet().toList();
+    return Card(
+      child: Padding(
+        padding: const EdgeInsets.all(16),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Row(
+              children: [
+                CircleAvatar(
+                  backgroundColor: theme.colorScheme.primaryContainer,
+                  foregroundColor: theme.colorScheme.onPrimaryContainer,
+                  child: Icon(icon),
+                ),
+                const SizedBox(width: 10),
+                Expanded(
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Text(title, maxLines: 1, overflow: TextOverflow.ellipsis, style: theme.textTheme.titleMedium?.copyWith(fontWeight: FontWeight.w900)),
+                      Text(subtitle, maxLines: 2, overflow: TextOverflow.ellipsis, style: theme.textTheme.bodySmall?.copyWith(color: theme.colorScheme.onSurfaceVariant)),
+                    ],
+                  ),
+                ),
+              ],
+            ),
+            const SizedBox(height: 12),
+            Wrap(
+              spacing: 6,
+              runSpacing: 6,
+              children: [
+                MiniTag(text: 'Kcal: $creditedKcal'),
+                MiniTag(text: 'Duplikaty: $duplicates'),
+                if (sources.isEmpty) const MiniTag(text: 'Brak źródła') else ...sources.map((source) => MiniTag(text: source)),
+              ],
+            ),
+            const SizedBox(height: 10),
+            if (visible.isEmpty)
+              Text('Brak danych wejściowych dla tego typu.', style: theme.textTheme.bodyMedium?.copyWith(color: theme.colorScheme.onSurfaceVariant))
+            else
+              ...visible.map((decision) => ActivityDecisionCompactRow(decision: decision)),
+          ],
+        ),
+      ),
+    );
+  }
+}
+
+class ActivityDiagnosticsCard extends StatelessWidget {
+  const ActivityDiagnosticsCard({super.key, required this.decisions});
+
+  final List<ActivityCreditDecision> decisions;
+
+  @override
+  Widget build(BuildContext context) {
+    final theme = Theme.of(context);
+    return Card(
+      child: Padding(
+        padding: const EdgeInsets.all(18),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Row(
+              children: [
+                Icon(Icons.manage_search_rounded, color: theme.colorScheme.primary),
+                const SizedBox(width: 8),
+                Expanded(child: Text('Diagnostyka aktywności', style: theme.textTheme.titleMedium?.copyWith(fontWeight: FontWeight.w900))),
+              ],
+            ),
+            const SizedBox(height: 10),
+            if (decisions.isEmpty)
+              Text(
+                'Brak aktywności dla wybranego dnia. Trening siłowy pojawi się po zakończeniu sesji w Trainerze, a kroki/bieg/chód można podać przez lokalne wejście activity_entries_v1.',
+                style: theme.textTheme.bodyMedium?.copyWith(color: theme.colorScheme.onSurfaceVariant),
+              )
+            else
+              ...decisions.map((decision) => ActivityDecisionDetailRow(decision: decision)),
+          ],
+        ),
+      ),
+    );
+  }
+}
+
+class ActivityDecisionCompactRow extends StatelessWidget {
+  const ActivityDecisionCompactRow({super.key, required this.decision});
+
+  final ActivityCreditDecision decision;
+
+  @override
+  Widget build(BuildContext context) {
+    final theme = Theme.of(context);
+    return Padding(
+      padding: const EdgeInsets.only(top: 8),
+      child: Row(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Icon(decision.includedInCalories ? Icons.check_circle_rounded : Icons.block_rounded, size: 18, color: decision.includedInCalories ? Colors.green : theme.colorScheme.error),
+          const SizedBox(width: 8),
+          Expanded(
+            child: Text(
+              '${decision.entry.source.label}: ${decision.includedInCalories ? 'Zaliczono do kcal' : 'Pominięto jako duplikat'}',
+              style: theme.textTheme.bodySmall?.copyWith(fontWeight: FontWeight.w800),
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+class ActivityDecisionDetailRow extends StatelessWidget {
+  const ActivityDecisionDetailRow({super.key, required this.decision});
+
+  final ActivityCreditDecision decision;
+
+  @override
+  Widget build(BuildContext context) {
+    final theme = Theme.of(context);
+    return Container(
+      margin: const EdgeInsets.only(top: 10),
+      padding: const EdgeInsets.all(12),
+      decoration: BoxDecoration(
+        borderRadius: BorderRadius.circular(18),
+        color: theme.colorScheme.surfaceContainerHighest.withValues(alpha: 0.45),
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Row(
+            children: [
+              Icon(decision.includedInCalories ? Icons.check_circle_rounded : Icons.block_rounded, color: decision.includedInCalories ? Colors.green : theme.colorScheme.error),
+              const SizedBox(width: 8),
+              Expanded(child: Text(decision.entry.type.label, style: theme.textTheme.titleSmall?.copyWith(fontWeight: FontWeight.w900))),
+            ],
+          ),
+          const SizedBox(height: 8),
+          Wrap(
+            spacing: 6,
+            runSpacing: 6,
+            children: [
+              MiniTag(text: 'Źródło: ${decision.entry.source.label}'),
+              MiniTag(text: decision.includedInCalories ? 'Zaliczono do kcal' : 'Pominięto jako duplikat'),
+              MiniTag(text: '${decision.creditedKcal} kcal'),
+              if (decision.entry.steps > 0) MiniTag(text: '${decision.entry.steps} kroków'),
+              if (decision.entry.durationMin > 0) MiniTag(text: '${decision.entry.durationMin} min'),
+            ],
+          ),
+          const SizedBox(height: 8),
+          Text(decision.reason, style: theme.textTheme.bodySmall?.copyWith(color: theme.colorScheme.onSurfaceVariant)),
+          if (decision.duplicateOfKey.isNotEmpty) ...[
+            const SizedBox(height: 4),
+            Text('Duplikat względem: ${decision.duplicateOfKey}', style: theme.textTheme.bodySmall?.copyWith(color: theme.colorScheme.onSurfaceVariant)),
+          ],
+        ],
+      ),
+    );
+  }
+}
+
 class MorePage extends StatelessWidget {
   const MorePage({super.key});
 
@@ -9183,6 +9529,13 @@ class TrainerFeaturesHub extends StatelessWidget {
                                 title: 'Pomiary sylwetki',
                                 subtitle: 'Waga, obwody, historia i wykresy',
                                 onTap: () => Navigator.of(context).push(MaterialPageRoute(builder: (_) => const BodyMeasurementsPage())))),
+                        SizedBox(
+                            width: width,
+                            child: FeatureActionTile(
+                                icon: Icons.rule_rounded,
+                                title: 'Anty-dublowanie aktywności',
+                                subtitle: 'Kroki, chód, bieg i trening siłowy',
+                                onTap: () => Navigator.of(context).push(MaterialPageRoute(builder: (_) => const ActivityDeduplicationPage())))),
                         SizedBox(
                             width: width,
                             child: FeatureActionTile(icon: Icons.public, title: 'Import z bazy ćwiczeń', subtitle: 'Szukaj w wger i zapisuj lokalnie', onTap: () => showWgerSearchSheet(context))),
@@ -9798,6 +10151,8 @@ Map<String, dynamic> buildFullExport(AppStore store) => {
       'customExercises': store.customExercises.map((e) => e.toJson()).toList(),
       'bodyMeasurements': store.bodyMeasurements.map((e) => e.toJson()).toList(),
       'trainingImpacts': store.trainingImpacts.map((e) => e.toJson()).toList(),
+      'activityEntries': store.activityEntries.map((e) => e.toJson()).toList(),
+      'activityCreditDiagnostics': store.activityCreditDecisionsForDay(store.selectedDate).map((decision) => decision.toJson()).toList(),
       'sharedCalorieProfile': buildSharedCalorieProfile(store),
     };
 
@@ -9953,6 +10308,7 @@ String postWorkoutMealSuggestion({
 Map<String, dynamic> buildSharedCalorieProfile(AppStore store) {
   final today = store.totalsForDay(store.selectedDate);
   final dayImpacts = store.trainingImpacts.where((impact) => sameDay(impact.date, store.selectedDate)).toList();
+  final activityDecisions = store.activityCreditDecisionsForDay(store.selectedDate);
   return {
     'source': 'Trainer',
     'date': store.selectedDate.toIso8601String(),
@@ -9968,6 +10324,8 @@ Map<String, dynamic> buildSharedCalorieProfile(AppStore store) {
     'today_duration_min': (today.durationSec / 60).round(),
     'training_impacts': dayImpacts.map((impact) => impact.toCalorieBridgeJson()).toList(),
     'calorie_bridge_queue_key': TrainerCalorieLocalAdapter.impactQueueKey,
+    'activity_credit_decisions': activityDecisions.map((decision) => decision.toJson()).toList(),
+    'activity_credit_included_kcal': totalCreditedActivityKcal(activityDecisions),
   };
 }
 

@@ -13,6 +13,7 @@ class TrainerLocalData {
     required this.activeWorkoutSession,
     required this.bodyMeasurements,
     required this.trainingImpacts,
+    required this.activityEntries,
   });
 
   final List<WorkoutLog> sessions;
@@ -22,6 +23,7 @@ class TrainerLocalData {
   final ActiveWorkoutSession? activeWorkoutSession;
   final List<BodyMeasurement> bodyMeasurements;
   final List<TrainingImpact> trainingImpacts;
+  final List<TrainerActivityEntry> activityEntries;
 }
 
 class TrainerLocalRepository {
@@ -34,6 +36,7 @@ class TrainerLocalRepository {
   static const activeWorkoutSessionKey = 'active_workout_session_v1';
   static const bodyMeasurementsKey = 'body_measurements_v1';
   static const trainingImpactsKey = 'training_impacts_v1';
+  static const activityEntriesKey = 'activity_entries_v1';
 
   final SharedPreferences? _preferences;
 
@@ -70,6 +73,10 @@ class TrainerLocalRepository {
       trainingImpacts: _decodeList(
         preferences.getString(trainingImpactsKey),
         TrainingImpact.fromJson,
+      ),
+      activityEntries: _decodeList(
+        preferences.getString(activityEntriesKey),
+        TrainerActivityEntry.fromJson,
       ),
     );
   }
@@ -142,6 +149,18 @@ class TrainerLocalRepository {
       trainingImpactsKey,
       jsonEncode(
         trainingImpacts.map((impact) => impact.toJson()).toList(),
+      ),
+    );
+  }
+
+  Future<void> saveActivityEntries(
+    Iterable<TrainerActivityEntry> activityEntries,
+  ) async {
+    final preferences = await _prefs;
+    await preferences.setString(
+      activityEntriesKey,
+      jsonEncode(
+        activityEntries.map((entry) => entry.toJson()).toList(),
       ),
     );
   }

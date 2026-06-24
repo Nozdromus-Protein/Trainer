@@ -79,12 +79,24 @@ void main() {
       averageRpe: 8,
       createdAt: DateTime(2026, 6, 24, 19),
     );
+    final activityEntry = TrainerActivityEntry(
+      id: 'steps-1',
+      date: DateTime(2026, 6, 24, 12),
+      source: TrainerActivitySource.steps,
+      type: TrainerActivityType.ordinaryStepsWalk,
+      estimatedKcal: 180,
+      sourceActivityId: 'steps-2026-06-24',
+      durationMin: 120,
+      steps: 8200,
+      note: 'Kroki z wejścia lokalnego',
+    );
 
     await repository.saveSessions([session]);
     await repository.savePlans([plan]);
     await repository.saveCustomExercises([exercise]);
     await repository.saveBodyMeasurements([bodyMeasurement]);
     await repository.saveTrainingImpacts([impact]);
+    await repository.saveActivityEntries([activityEntry]);
     await repository.saveExerciseLibraryPreferences(
       const ExerciseLibraryPreferences(
         favoriteExerciseIds: {'custom-1'},
@@ -140,6 +152,8 @@ void main() {
     expect(restored.bodyMeasurements.single.note, 'Pomiar kontrolny');
     expect(restored.trainingImpacts.single.estimatedBurnedKcal, 320);
     expect(restored.trainingImpacts.single.deduplicationKey, 'Trainer:session-1:2026-06-24');
+    expect(restored.activityEntries.single.steps, 8200);
+    expect(restored.activityEntries.single.source, TrainerActivitySource.steps);
   });
 
   test('TrainerCalorieLocalAdapter publishes deduplicated bridge payload', () async {

@@ -235,5 +235,92 @@ void main() {
       expect(bridgePayload['suggestedExtraWaterMl'], 700);
       expect(bridgePayload['suggestedExtraProteinG'], 32);
     });
+
+    test('activity crediting keeps ordinary steps separate from measured walk', () {
+      final steps = TrainerActivityEntry(
+        id: 'steps-1',
+        date: DateTime(2026, 6, 24, 9),
+        source: TrainerActivitySource.steps,
+        type: TrainerActivityType.ordinaryStepsWalk,
+        estimatedKcal: 180,
+        sourceActivityId: 'daily-steps',
+        durationMin: 180,
+        steps: 9000,
+      );
+      final walk = TrainerActivityEntry(
+        id: 'walk-1',
+        date: DateTime(2026, 6, 24, 10),
+        source: TrainerActivitySource.watch,
+        type: TrainerActivityType.measuredWalk,
+        estimatedKcal: 140,
+        sourceActivityId: 'measured-walk',
+        startedAt: DateTime(2026, 6, 24, 10),
+        endedAt: DateTime(2026, 6, 24, 10, 40),
+        durationMin: 40,
+        distanceKm: 3.2,
+      );
+
+      final decisions = resolveActivityCredits([steps, walk]);
+
+      expect(decisions.where((decision) => decision.includedInCalories), hasLength(2));
+      expect(totalCreditedActivityKcal(decisions), 320);
+    });
+
+    test('activity crediting skips measured walk when the same interval is a run', () {
+      final measuredWalk = TrainerActivityEntry(
+        id: 'walk-1',
+        date: DateTime(2026, 6, 24, 10),
+        source: TrainerActivitySource.watch,
+        type: TrainerActivityType.measuredWalk,
+        estimatedKcal: 120,
+        sourceActivityId: 'same-window-walk',
+        startedAt: DateTime(2026, 6, 24, 10),
+        endedAt: DateTime(2026, 6, 24, 10, 35),
+        durationMin: 35,
+        distanceKm: 4,
+      );
+      final run = TrainerActivityEntry(
+        id: 'run-1',
+        date: DateTime(2026, 6, 24, 10),
+        source: TrainerActivitySource.run,
+        type: TrainerActivityType.run,
+        estimatedKcal: 360,
+        sourceActivityId: 'same-window-run',
+        startedAt: DateTime(2026, 6, 24, 10, 5),
+        endedAt: DateTime(2026, 6, 24, 10, 38),
+        durationMin: 33,
+        distanceKm: 5.1,
+      );
+
+      final decisions = resolveActivityCredits([measuredWalk, run]);
+      final runDecision = decisions.singleWhere((decision) => decision.entry.type == TrainerActivityType.run);
+      final walkDecision = decisions.singleWhere((decision) => decision.entry.type == TrainerActivityType.measuredWalk);
+
+      expect(runDecision.includedInCalories, isTrue);
+      expect(walkDecision.skippedAsDuplicate, isTrue);
+      expect(totalCreditedActivityKcal(decisions), 360);
+    });
+
+    test('activity crediting skips the same external activity from another source', () {
+      final healthRun = TrainerActivityEntry(
+        id: 'run-health',
+        date: DateTime(2026, 6, 24, 18),
+        source: TrainerActivitySource.healthConnect,
+        type: TrainerActivityType.run,
+        estimatedKcal: 310,
+        sourceActivityId: 'external-run-42',
+        durationMin: 30,
+      );
+      final watchRun = healthRun.copyWith(
+        id: 'run-watch',
+        source: TrainerActivitySource.watch,
+        estimatedKcal: 305,
+      );
+
+      final decisions = resolveActivityCredits([healthRun, watchRun]);
+
+      expect(decisions.where((decision) => decision.includedInCalories), hasLength(1));
+      expect(decisions.where((decision) => decision.skippedAsDuplicate), hasLength(1));
+    });
   });
 }
