@@ -1,3 +1,4 @@
+import 'training_impact.dart';
 import 'workout_set.dart';
 
 class ActiveWorkoutSession {
@@ -42,8 +43,7 @@ class ActiveWorkoutSession {
         (sum, exercise) => sum + exercise.completedSets.length,
       );
 
-  int get completedExerciseCount =>
-      exercises.where((exercise) => exercise.completedSets.isNotEmpty).length;
+  int get completedExerciseCount => exercises.where((exercise) => exercise.completedSets.isNotEmpty).length;
 
   double get volume => exercises.fold<double>(
         0,
@@ -51,10 +51,7 @@ class ActiveWorkoutSession {
       );
 
   double get averageRpe {
-    final sets = exercises
-        .expand((exercise) => exercise.completedSets)
-        .where((set) => set.rpe > 0)
-        .toList();
+    final sets = exercises.expand((exercise) => exercise.completedSets).where((set) => set.rpe > 0).toList();
     if (sets.isEmpty) return 0;
     return sets.fold<int>(0, (sum, set) => sum + set.rpe) / sets.length;
   }
@@ -95,12 +92,9 @@ class ActiveWorkoutSession {
       currentExerciseIndex: currentExerciseIndex ?? this.currentExerciseIndex,
       exercises: exercises ?? this.exercises,
       note: note ?? this.note,
-      restTimerEndsAt:
-          clearRestTimerEndsAt ? null : restTimerEndsAt ?? this.restTimerEndsAt,
-      restTimerRemainingSeconds:
-          restTimerRemainingSeconds ?? this.restTimerRemainingSeconds,
-      restTimerTotalSeconds:
-          restTimerTotalSeconds ?? this.restTimerTotalSeconds,
+      restTimerEndsAt: clearRestTimerEndsAt ? null : restTimerEndsAt ?? this.restTimerEndsAt,
+      restTimerRemainingSeconds: restTimerRemainingSeconds ?? this.restTimerRemainingSeconds,
+      restTimerTotalSeconds: restTimerTotalSeconds ?? this.restTimerTotalSeconds,
       isRestTimerPaused: isRestTimerPaused ?? this.isRestTimerPaused,
     );
   }
@@ -125,30 +119,23 @@ class ActiveWorkoutSession {
     final exercises = ((json['exercises'] as List?) ?? const [])
         .whereType<Map>()
         .map(
-          (value) =>
-              ActiveWorkoutExercise.fromJson(Map<String, dynamic>.from(value)),
+          (value) => ActiveWorkoutExercise.fromJson(Map<String, dynamic>.from(value)),
         )
         .toList();
     final rawIndex = (json['currentExerciseIndex'] as num?)?.toInt() ?? 0;
     return ActiveWorkoutSession(
-      id: json['id']?.toString() ??
-          'active_${DateTime.now().microsecondsSinceEpoch}',
+      id: json['id']?.toString() ?? 'active_${DateTime.now().microsecondsSinceEpoch}',
       planId: json['planId']?.toString() ?? '',
       planName: json['planName']?.toString() ?? 'Trening',
       weekday: (json['weekday'] as num?)?.toInt() ?? DateTime.monday,
       dayTitle: json['dayTitle']?.toString() ?? 'Trening',
-      startedAt: DateTime.tryParse(json['startedAt']?.toString() ?? '') ??
-          DateTime.now(),
-      currentExerciseIndex:
-          exercises.isEmpty ? 0 : rawIndex.clamp(0, exercises.length - 1),
+      startedAt: DateTime.tryParse(json['startedAt']?.toString() ?? '') ?? DateTime.now(),
+      currentExerciseIndex: exercises.isEmpty ? 0 : rawIndex.clamp(0, exercises.length - 1),
       exercises: exercises,
       note: json['note']?.toString() ?? '',
-      restTimerEndsAt:
-          DateTime.tryParse(json['restTimerEndsAt']?.toString() ?? ''),
-      restTimerRemainingSeconds:
-          (json['restTimerRemainingSeconds'] as num?)?.toInt() ?? 0,
-      restTimerTotalSeconds:
-          (json['restTimerTotalSeconds'] as num?)?.toInt() ?? 0,
+      restTimerEndsAt: DateTime.tryParse(json['restTimerEndsAt']?.toString() ?? ''),
+      restTimerRemainingSeconds: (json['restTimerRemainingSeconds'] as num?)?.toInt() ?? 0,
+      restTimerTotalSeconds: (json['restTimerTotalSeconds'] as num?)?.toInt() ?? 0,
       isRestTimerPaused: json['isRestTimerPaused'] as bool? ?? false,
     );
   }
@@ -213,8 +200,7 @@ class ActiveWorkoutExercise {
         'isSkipped': isSkipped,
       };
 
-  factory ActiveWorkoutExercise.fromJson(Map<String, dynamic> json) =>
-      ActiveWorkoutExercise(
+  factory ActiveWorkoutExercise.fromJson(Map<String, dynamic> json) => ActiveWorkoutExercise(
         exerciseId: json['exerciseId']?.toString() ?? '',
         plannedSets: (json['plannedSets'] as num?)?.toInt() ?? 3,
         plannedReps: (json['plannedReps'] as num?)?.toInt() ?? 10,
@@ -241,6 +227,7 @@ class CompletedWorkoutSummary {
     required this.setCount,
     required this.volume,
     required this.averageRpe,
+    this.trainingImpact,
   });
 
   final String sessionId;
@@ -251,6 +238,7 @@ class CompletedWorkoutSummary {
   final int setCount;
   final double volume;
   final double averageRpe;
+  final TrainingImpact? trainingImpact;
 
   Duration get duration => endedAt.difference(startedAt);
 }

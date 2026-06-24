@@ -203,5 +203,37 @@ void main() {
       expect(restored.note, 'Pomiar rano');
       expect(restored.progressPhotoPaths, contains('front-placeholder.jpg'));
     });
+
+    test('TrainingImpact exposes calorie bridge payload and deduplication key', () {
+      final impact = TrainingImpact(
+        id: 'impact-session-1',
+        sessionId: 'session-1',
+        sessionName: 'Plan · Góra',
+        date: DateTime(2026, 6, 24, 18),
+        isTrainingDay: true,
+        estimatedBurnedKcal: 340,
+        suggestedCalorieAdjustmentKcal: 170,
+        suggestedExtraWaterMl: 700,
+        suggestedExtraProteinG: 32,
+        postWorkoutMealSuggestion: 'Białko + węgle',
+        durationMin: 50,
+        exerciseCount: 5,
+        setCount: 15,
+        volumeKg: 9200,
+        averageRpe: 8.2,
+        createdAt: DateTime(2026, 6, 24, 19),
+      );
+
+      final restored = TrainingImpact.fromJson(impact.toJson());
+      final bridgePayload = restored.toCalorieBridgeJson();
+
+      expect(restored.dateKey, '2026-06-24');
+      expect(restored.deduplicationKey, 'Trainer:session-1:2026-06-24');
+      expect(bridgePayload['schema'], TrainingImpact.schema);
+      expect(bridgePayload['activityType'], 'strength_training');
+      expect(bridgePayload['estimatedBurnedKcal'], 340);
+      expect(bridgePayload['suggestedExtraWaterMl'], 700);
+      expect(bridgePayload['suggestedExtraProteinG'], 32);
+    });
   });
 }

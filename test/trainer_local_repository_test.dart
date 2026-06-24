@@ -1,4 +1,5 @@
 import 'package:flutter_test/flutter_test.dart';
+import 'package:licznik_treningu/features/trainer/data/trainer_calorie_adapter.dart';
 import 'package:licznik_treningu/features/trainer/data/trainer_local_repository.dart';
 import 'package:licznik_treningu/features/trainer/domain/trainer_models.dart';
 import 'package:shared_preferences/shared_preferences.dart';
@@ -60,11 +61,30 @@ void main() {
       shouldersCm: 128,
       note: 'Pomiar kontrolny',
     );
+    final impact = TrainingImpact(
+      id: 'impact-session-1',
+      sessionId: 'session-1',
+      sessionName: 'Plan lokalny · Góra',
+      date: DateTime(2026, 6, 24, 18),
+      isTrainingDay: true,
+      estimatedBurnedKcal: 320,
+      suggestedCalorieAdjustmentKcal: 160,
+      suggestedExtraWaterMl: 650,
+      suggestedExtraProteinG: 30,
+      postWorkoutMealSuggestion: 'Białko + węgle po treningu',
+      durationMin: 45,
+      exerciseCount: 4,
+      setCount: 12,
+      volumeKg: 7200,
+      averageRpe: 8,
+      createdAt: DateTime(2026, 6, 24, 19),
+    );
 
     await repository.saveSessions([session]);
     await repository.savePlans([plan]);
     await repository.saveCustomExercises([exercise]);
     await repository.saveBodyMeasurements([bodyMeasurement]);
+    await repository.saveTrainingImpacts([impact]);
     await repository.saveExerciseLibraryPreferences(
       const ExerciseLibraryPreferences(
         favoriteExerciseIds: {'custom-1'},
@@ -118,5 +138,58 @@ void main() {
     expect(restored.activeWorkoutSession?.restTimerRemainingSeconds, 75);
     expect(restored.bodyMeasurements.single.weightKg, 98.4);
     expect(restored.bodyMeasurements.single.note, 'Pomiar kontrolny');
+    expect(restored.trainingImpacts.single.estimatedBurnedKcal, 320);
+    expect(restored.trainingImpacts.single.deduplicationKey, 'Trainer:session-1:2026-06-24');
+  });
+
+  test('TrainerCalorieLocalAdapter publishes deduplicated bridge payload', () async {
+    SharedPreferences.setMockInitialValues({});
+    final preferences = await SharedPreferences.getInstance();
+    final adapter = TrainerCalorieLocalAdapter(preferences: preferences);
+    final older = TrainingImpact(
+      id: 'impact-session-1-old',
+      sessionId: 'session-1',
+      sessionName: 'Stary wpis',
+      date: DateTime(2026, 6, 24, 18),
+      isTrainingDay: true,
+      estimatedBurnedKcal: 120,
+      suggestedCalorieAdjustmentKcal: 60,
+      suggestedExtraWaterMl: 500,
+      suggestedExtraProteinG: 25,
+      postWorkoutMealSuggestion: 'Stary wpis',
+      durationMin: 20,
+      exerciseCount: 2,
+      setCount: 6,
+      volumeKg: 3000,
+      averageRpe: 7,
+      createdAt: DateTime(2026, 6, 24, 18, 30),
+    );
+    final newer = TrainingImpact(
+      id: 'impact-session-1-new',
+      sessionId: 'session-1',
+      sessionName: 'Nowy wpis',
+      date: DateTime(2026, 6, 24, 19),
+      isTrainingDay: true,
+      estimatedBurnedKcal: 240,
+      suggestedCalorieAdjustmentKcal: 120,
+      suggestedExtraWaterMl: 650,
+      suggestedExtraProteinG: 30,
+      postWorkoutMealSuggestion: 'Nowy wpis',
+      durationMin: 40,
+      exerciseCount: 3,
+      setCount: 9,
+      volumeKg: 5200,
+      averageRpe: 8,
+      createdAt: DateTime(2026, 6, 24, 19, 30),
+    );
+
+    await adapter.publishTrainingImpacts([older, newer]);
+
+    final payload = await adapter.loadBridgePayload();
+    expect(payload, hasLength(1));
+    expect(payload.single['schema'], TrainingImpact.schema);
+    expect(payload.single['deduplicationKey'], 'Trainer:session-1:2026-06-24');
+    expect(payload.single['estimatedBurnedKcal'], 240);
+    expect(preferences.getString(TrainerCalorieLocalAdapter.latestImpactKey), isNotNull);
   });
 }

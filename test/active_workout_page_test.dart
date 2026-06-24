@@ -41,8 +41,7 @@ const testPlan = WorkoutPlan(
 void main() {
   TestWidgetsFlutterBinding.ensureInitialized();
 
-  test('active workout progress and completed session persist locally',
-      () async {
+  test('active workout progress and completed session persist locally', () async {
     SharedPreferences.setMockInitialValues({});
     final store = AppStore();
     await store.load();
@@ -71,19 +70,24 @@ void main() {
     expect(summary.setCount, 1);
     expect(summary.volume, 120);
     expect(summary.averageRpe, 8);
+    expect(summary.trainingImpact, isNotNull);
+    expect(summary.trainingImpact?.isTrainingDay, isTrue);
+    expect(summary.trainingImpact?.suggestedExtraWaterMl, greaterThanOrEqualTo(350));
+    expect(summary.trainingImpact?.suggestedExtraProteinG, greaterThanOrEqualTo(20));
     expect(restoredDraft.activeWorkoutSession, isNull);
     expect(restoredDraft.logs, hasLength(1));
     expect(restoredDraft.logs.single.sessionId, summary.sessionId);
     expect(restoredDraft.logs.single.workoutSets.single.repetitions, 12);
+    expect(restoredDraft.trainingImpacts.single.sessionId, summary.sessionId);
 
     final restoredHistory = AppStore();
     await restoredHistory.load();
     expect(restoredHistory.activeWorkoutSession, isNull);
+    expect(restoredHistory.trainingImpacts.single.deduplicationKey, 'Trainer:${summary.sessionId}:${restoredHistory.trainingImpacts.single.dateKey}');
     expect(restoredHistory.logs.single.sessionName, 'Plan aktywny · Góra');
   });
 
-  test('rest timer, notes and exercise replacement preserve completed sets',
-      () async {
+  test('rest timer, notes and exercise replacement preserve completed sets', () async {
     SharedPreferences.setMockInitialValues({});
     final store = AppStore();
     await store.load();
@@ -193,8 +197,7 @@ void main() {
     expect(strength.seconds, 180);
   });
 
-  testWidgets('active workout and summary do not overflow on a narrow screen',
-      (tester) async {
+  testWidgets('active workout and summary do not overflow on a narrow screen', (tester) async {
     SharedPreferences.setMockInitialValues({});
     final store = AppStore();
     await store.load();
@@ -218,8 +221,7 @@ void main() {
 
     expect(find.text('Aktywny trening'), findsOneWidget);
     expect(find.text('Zapisz serię'), findsOneWidget);
-    expect(
-        find.text('Następne ćwiczenie', skipOffstage: false), findsOneWidget);
+    expect(find.text('Następne ćwiczenie', skipOffstage: false), findsOneWidget);
     expect(find.text('Pomiń ćwiczenie', skipOffstage: false), findsOneWidget);
     expect(tester.takeException(), isNull);
 
@@ -281,6 +283,24 @@ void main() {
             setCount: 4,
             volume: 1200,
             averageRpe: 8,
+            trainingImpact: TrainingImpact(
+              id: 'impact-summary-1',
+              sessionId: 'summary-1',
+              sessionName: 'Plan aktywny · Góra',
+              date: DateTime(2026, 6, 23, 18, 45),
+              isTrainingDay: true,
+              estimatedBurnedKcal: 320,
+              suggestedCalorieAdjustmentKcal: 160,
+              suggestedExtraWaterMl: 700,
+              suggestedExtraProteinG: 30,
+              postWorkoutMealSuggestion: 'Po treningu: białko i płyny.',
+              durationMin: 45,
+              exerciseCount: 2,
+              setCount: 4,
+              volumeKg: 1200,
+              averageRpe: 8,
+              createdAt: DateTime(2026, 6, 23, 19),
+            ),
           ),
         ),
       ),
@@ -289,6 +309,9 @@ void main() {
 
     expect(find.text('Trening zakończony'), findsOneWidget);
     expect(find.text('45:00'), findsOneWidget);
+    expect(find.text('Wpływ na Licznik Kalorii'), findsOneWidget);
+    expect(find.text('+700 ml wody'), findsOneWidget);
+    expect(find.text('+30 g białka'), findsOneWidget);
     expect(tester.takeException(), isNull);
   });
 }

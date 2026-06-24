@@ -8,6 +8,7 @@ import 'package:shared_preferences/shared_preferences.dart';
 
 import 'features/trainer/application/exercise_library_filter.dart';
 import 'features/trainer/application/workout_plan_factory.dart';
+import 'features/trainer/data/trainer_calorie_adapter.dart';
 import 'features/trainer/data/trainer_local_repository.dart';
 import 'features/trainer/domain/trainer_models.dart';
 
@@ -144,13 +145,17 @@ class AppScope extends InheritedNotifier<AppStore> {
 }
 
 class AppStore extends ChangeNotifier {
-  AppStore({TrainerLocalRepository? trainerRepository}) : _trainerRepository = trainerRepository ?? TrainerLocalRepository();
+  AppStore({TrainerLocalRepository? trainerRepository, TrainerCalorieLocalAdapter? calorieAdapter})
+      : _trainerRepository = trainerRepository ?? TrainerLocalRepository(),
+        _calorieAdapter = calorieAdapter ?? const TrainerCalorieLocalAdapter();
 
   final TrainerLocalRepository _trainerRepository;
+  final TrainerCalorieLocalAdapter _calorieAdapter;
   final List<WorkoutLog> logs = [];
   final List<WorkoutPlan> plans = [];
   final List<Exercise> customExercises = [];
   final List<BodyMeasurement> bodyMeasurements = [];
+  final List<TrainingImpact> trainingImpacts = [];
   ExerciseLibraryPreferences exerciseLibraryPreferences = const ExerciseLibraryPreferences();
   ActiveWorkoutSession? activeWorkoutSession;
   AppSettings settings = AppSettings.defaults();
@@ -175,6 +180,10 @@ class AppStore extends ChangeNotifier {
       ..clear()
       ..addAll(trainerData.bodyMeasurements);
     bodyMeasurements.sort((left, right) => right.date.compareTo(left.date));
+    trainingImpacts
+      ..clear()
+      ..addAll(trainerData.trainingImpacts);
+    trainingImpacts.sort((left, right) => right.date.compareTo(left.date));
     exerciseLibraryPreferences = trainerData.exerciseLibraryPreferences;
     activeWorkoutSession = trainerData.activeWorkoutSession;
     if (activeWorkoutSession?.exercises.isEmpty ?? false) {
@@ -217,6 +226,7 @@ class AppStore extends ChangeNotifier {
     await saveExerciseLibraryPreferences();
     await saveActiveWorkoutSession();
     await saveBodyMeasurements();
+    await saveTrainingImpacts();
   }
 
   Future<void> saveLogs() async {
@@ -392,6 +402,11 @@ class AppStore extends ChangeNotifier {
     await _trainerRepository.saveBodyMeasurements(bodyMeasurements);
   }
 
+  Future<void> saveTrainingImpacts() async {
+    await _trainerRepository.saveTrainingImpacts(trainingImpacts);
+    await _calorieAdapter.publishTrainingImpacts(trainingImpacts);
+  }
+
   Future<void> saveExerciseLibraryPreferences() async {
     await _trainerRepository.saveExerciseLibraryPreferences(
       exerciseLibraryPreferences,
@@ -428,6 +443,17 @@ class AppStore extends ChangeNotifier {
     bodyMeasurements.sort((left, right) => right.date.compareTo(left.date));
     await saveBodyMeasurements();
     notifyListeners();
+  }
+
+  Future<void> upsertTrainingImpact(TrainingImpact impact) async {
+    final index = trainingImpacts.indexWhere((item) => item.deduplicationKey == impact.deduplicationKey || item.sessionId == impact.sessionId);
+    if (index >= 0) {
+      trainingImpacts[index] = impact;
+    } else {
+      trainingImpacts.insert(0, impact);
+    }
+    trainingImpacts.sort((left, right) => right.date.compareTo(left.date));
+    await saveTrainingImpacts();
   }
 
   bool isExerciseFavorite(String id) => exerciseLibraryPreferences.isFavorite(id);
@@ -877,6 +903,13 @@ class AppStore extends ChangeNotifier {
     logs.removeWhere((log) => log.sessionId == session.id);
     logs.insertAll(0, completedLogs);
     await saveLogs();
+    final impact = buildTrainingImpactForCompletedWorkout(
+      session: session,
+      completedLogs: completedLogs,
+      settings: settings,
+      endedAt: endedAt,
+    );
+    await upsertTrainingImpact(impact);
     final summary = CompletedWorkoutSummary(
       sessionId: session.id,
       name: sessionName,
@@ -886,6 +919,7 @@ class AppStore extends ChangeNotifier {
       setCount: session.completedSetCount,
       volume: session.volume,
       averageRpe: session.averageRpe,
+      trainingImpact: impact,
     );
     activeWorkoutSession = null;
     await saveActiveWorkoutSession();
@@ -6969,11 +7003,62 @@ class WorkoutSummaryPage extends StatelessWidget {
                 trailing: Text(summary.averageRpe == 0 ? '—' : summary.averageRpe.toStringAsFixed(1), style: Theme.of(context).textTheme.titleLarge?.copyWith(fontWeight: FontWeight.w900)),
               ),
             ),
+            if (summary.trainingImpact != null) ...[
+              const SizedBox(height: 10),
+              _TrainingImpactSummaryCard(impact: summary.trainingImpact!),
+            ],
             const SizedBox(height: 18),
             FilledButton.icon(
               onPressed: () => Navigator.of(context).pop(),
               icon: const Icon(Icons.check_rounded),
               label: const Text('Gotowe'),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+}
+
+class _TrainingImpactSummaryCard extends StatelessWidget {
+  const _TrainingImpactSummaryCard({required this.impact});
+
+  final TrainingImpact impact;
+
+  @override
+  Widget build(BuildContext context) {
+    final theme = Theme.of(context);
+    return Card(
+      child: Padding(
+        padding: const EdgeInsets.all(16),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Row(
+              children: [
+                Icon(Icons.sync_alt_rounded, color: theme.colorScheme.primary),
+                const SizedBox(width: 8),
+                Expanded(child: Text('Wpływ na Licznik Kalorii', style: theme.textTheme.titleMedium?.copyWith(fontWeight: FontWeight.w900))),
+              ],
+            ),
+            const SizedBox(height: 10),
+            Wrap(
+              spacing: 8,
+              runSpacing: 8,
+              children: [
+                MiniTag(text: impact.isTrainingDay ? 'Dzień treningowy' : 'Dzień bez treningu'),
+                MiniTag(text: '${impact.estimatedBurnedKcal} kcal spalonych'),
+                MiniTag(text: '+${impact.suggestedCalorieAdjustmentKcal} kcal sugestii'),
+                MiniTag(text: '+${impact.suggestedExtraWaterMl} ml wody'),
+                MiniTag(text: '+${impact.suggestedExtraProteinG} g białka'),
+              ],
+            ),
+            const SizedBox(height: 10),
+            Text(impact.postWorkoutMealSuggestion, style: theme.textTheme.bodyMedium?.copyWith(color: theme.colorScheme.onSurfaceVariant)),
+            const SizedBox(height: 8),
+            Text(
+              'Adapter lokalny: ${TrainerCalorieLocalAdapter.impactQueueKey}. Klucz anty-duplikacji: ${impact.deduplicationKey}.',
+              style: theme.textTheme.bodySmall?.copyWith(color: theme.colorScheme.onSurfaceVariant),
             ),
           ],
         ),
@@ -9712,6 +9797,7 @@ Map<String, dynamic> buildFullExport(AppStore store) => {
       'plans': store.plans.map((e) => e.toJson()).toList(),
       'customExercises': store.customExercises.map((e) => e.toJson()).toList(),
       'bodyMeasurements': store.bodyMeasurements.map((e) => e.toJson()).toList(),
+      'trainingImpacts': store.trainingImpacts.map((e) => e.toJson()).toList(),
       'sharedCalorieProfile': buildSharedCalorieProfile(store),
     };
 
@@ -9784,8 +9870,89 @@ int trainingDayCalorieBoost(DayTotals totals, AppSettings settings) {
   return boost.clamp(0, 650).toInt();
 }
 
+TrainingImpact buildTrainingImpactForCompletedWorkout({
+  required ActiveWorkoutSession session,
+  required List<WorkoutLog> completedLogs,
+  required AppSettings settings,
+  required DateTime endedAt,
+}) {
+  final durationSeconds = math.max(0, endedAt.difference(session.startedAt).inSeconds);
+  final durationMin = math.max(1, (durationSeconds + 59) ~/ 60);
+  final loggedCalories = completedLogs.fold<double>(0, (sum, log) => sum + log.calories).round();
+  final fallbackCalories = (durationMin * 5 + session.completedSetCount * 6 + session.volume / 600).round();
+  final estimatedBurnedKcal = math.max(loggedCalories, fallbackCalories).clamp(0, 2200).toInt();
+  final calorieAdjustment = suggestedCalorieAdjustmentForTraining(estimatedBurnedKcal, settings.trainingMode);
+  final waterMl = suggestedExtraWaterForTraining(durationMin: durationMin, averageRpe: session.averageRpe);
+  final proteinG = suggestedExtraProteinForTraining(settings: settings, setCount: session.completedSetCount, averageRpe: session.averageRpe, volume: session.volume);
+
+  return TrainingImpact(
+    id: 'impact_${session.id}',
+    sessionId: session.id,
+    sessionName: '${session.planName} · ${session.dayTitle}',
+    date: endedAt,
+    isTrainingDay: session.completedSetCount > 0,
+    estimatedBurnedKcal: estimatedBurnedKcal,
+    suggestedCalorieAdjustmentKcal: calorieAdjustment,
+    suggestedExtraWaterMl: waterMl,
+    suggestedExtraProteinG: proteinG,
+    postWorkoutMealSuggestion: postWorkoutMealSuggestion(proteinG: proteinG, calorieAdjustmentKcal: calorieAdjustment, mode: settings.trainingMode),
+    durationMin: durationMin,
+    exerciseCount: session.completedExerciseCount,
+    setCount: session.completedSetCount,
+    volumeKg: session.volume,
+    averageRpe: session.averageRpe,
+    createdAt: DateTime.now(),
+  );
+}
+
+int suggestedCalorieAdjustmentForTraining(int estimatedBurnedKcal, String trainingMode) {
+  final mode = normalizeTrainingMode(trainingMode);
+  var factor = 0.5;
+  if (mode == 'Redukcja') factor = 0.35;
+  if (mode == 'Masa') factor = 0.75;
+  if (mode == 'Kondycja') factor = 0.65;
+  return (estimatedBurnedKcal * factor).round().clamp(0, 700).toInt();
+}
+
+int suggestedExtraWaterForTraining({
+  required int durationMin,
+  required double averageRpe,
+}) {
+  final intensityBonus = averageRpe >= 8 ? 150 : 0;
+  return (350 + durationMin * 8 + intensityBonus).clamp(350, 1800).toInt();
+}
+
+int suggestedExtraProteinForTraining({
+  required AppSettings settings,
+  required int setCount,
+  required double averageRpe,
+  required double volume,
+}) {
+  var protein = (settings.bodyWeightKg * 0.25).round();
+  if (setCount >= 10) protein += 5;
+  if (averageRpe >= 8) protein += 5;
+  if (volume >= 12000) protein += 5;
+  return protein.clamp(20, 45).toInt();
+}
+
+String postWorkoutMealSuggestion({
+  required int proteinG,
+  required int calorieAdjustmentKcal,
+  required String mode,
+}) {
+  final normalizedMode = normalizeTrainingMode(mode);
+  if (normalizedMode == 'Redukcja') {
+    return 'Po treningu: $proteinG g białka, dużo płynów i lekki posiłek bez automatycznego podbijania kalorii ponad plan.';
+  }
+  if (calorieAdjustmentKcal >= 350) {
+    return 'Po treningu: $proteinG g białka + porcja węglowodanów. Licznik Kalorii może potraktować to jako sugestię posiłku potreningowego.';
+  }
+  return 'Po treningu: $proteinG g białka i uzupełnienie płynów. Kalorie dodawać ostrożnie według celu dnia.';
+}
+
 Map<String, dynamic> buildSharedCalorieProfile(AppStore store) {
   final today = store.totalsForDay(store.selectedDate);
+  final dayImpacts = store.trainingImpacts.where((impact) => sameDay(impact.date, store.selectedDate)).toList();
   return {
     'source': 'Trainer',
     'date': store.selectedDate.toIso8601String(),
@@ -9799,6 +9966,8 @@ Map<String, dynamic> buildSharedCalorieProfile(AppStore store) {
     'suggested_calorie_boost': trainingDayCalorieBoost(today, store.settings),
     'today_volume_kg': today.volume.round(),
     'today_duration_min': (today.durationSec / 60).round(),
+    'training_impacts': dayImpacts.map((impact) => impact.toCalorieBridgeJson()).toList(),
+    'calorie_bridge_queue_key': TrainerCalorieLocalAdapter.impactQueueKey,
   };
 }
 
