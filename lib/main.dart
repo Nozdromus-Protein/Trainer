@@ -2876,7 +2876,18 @@ class _HomeShellState extends State<HomeShell> {
     ];
     return Scaffold(
       resizeToAvoidBottomInset: true,
-      body: SafeArea(child: pages[index]),
+      body: SafeArea(
+        child: AnimatedSwitcher(
+          duration: const Duration(milliseconds: 220),
+          switchInCurve: Curves.easeOut,
+          switchOutCurve: Curves.easeIn,
+          transitionBuilder: (child, animation) => FadeTransition(opacity: animation, child: child),
+          child: KeyedSubtree(
+            key: ValueKey<int>(index),
+            child: pages[index],
+          ),
+        ),
+      ),
       bottomNavigationBar: SafeArea(
         top: false,
         child: NavigationBar(
@@ -2917,6 +2928,9 @@ class TrainerHomePage extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final store = AppScope.of(context);
+    final scheme = Theme.of(context).colorScheme;
+    final theme = Theme.of(context);
+    final isDark = theme.brightness == Brightness.dark;
     final todayLogs = store.logsForDay(DateTime.now());
     final plan = store.activeWorkoutPlan;
     WorkoutDay? todayPlan;
@@ -2928,42 +2942,61 @@ class TrainerHomePage extends StatelessWidget {
         }
       }
     }
+    final hasActiveSession = store.activeWorkoutSession != null;
+    final weekLogs = store.logsBetween(DateTime.now().subtract(const Duration(days: 6)), DateTime.now());
+    final weekDays = weekLogs.map((l) => l.date.weekday).toSet().length;
+
+    // Kolory akcentów per sekcja
+    final mint = const Color(0xFF24D6A3);
+    final blue = const Color(0xFF58A6FF);
+    final amber = const Color(0xFFFFB86B);
+    final purple = const Color(0xFFB388FF);
+    final rose = const Color(0xFFFF6B6B);
+    final cyan = const Color(0xFF26C6DA);
+
     final tiles = [
       TrainerHomeTileData(
         title: 'Dzisiejszy trening',
         subtitle: todayPlan == null ? 'Brak treningu w planie na dziś' : '${todayPlan.title} · ${todayPlan.items.length} ćwiczeń',
         icon: Icons.today_rounded,
         onTap: onToday,
+        accentColor: mint,
+        badge: hasActiveSession ? 'W TOKU' : (todayLogs.isNotEmpty ? 'GOTOWE' : null),
       ),
       TrainerHomeTileData(
         title: 'Baza ćwiczeń',
         subtitle: '${ExerciseRepo.combined(store.customExercises).length} ćwiczeń dostępnych lokalnie',
         icon: Icons.fitness_center_rounded,
         onTap: onExercises,
+        accentColor: blue,
       ),
       TrainerHomeTileData(
         title: 'Historia',
-        subtitle: '${store.logs.length} zapisanych wpisów treningowych',
+        subtitle: store.logs.isEmpty ? 'Brak zapisanych wpisów' : '${store.logs.length} wpisów treningowych',
         icon: Icons.history_rounded,
         onTap: onHistory,
+        accentColor: amber,
       ),
       TrainerHomeTileData(
         title: 'Plany treningowe',
-        subtitle: '${store.plans.length} ${store.plans.length == 1 ? 'aktywny plan' : 'zapisanych planów'}',
+        subtitle: store.plans.isEmpty ? 'Brak planów — wygeneruj z AI' : '${store.plans.length} ${store.plans.length == 1 ? 'plan' : 'planów'} · ${plan?.name ?? ''}',
         icon: Icons.calendar_month_rounded,
         onTap: onPlans,
+        accentColor: purple,
       ),
       TrainerHomeTileData(
         title: 'Progres',
-        subtitle: 'Podsumowanie zapisanych treningów',
+        subtitle: 'Podsumowanie treningów i sylwetka',
         icon: Icons.trending_up_rounded,
         onTap: onProgress,
+        accentColor: rose,
       ),
       TrainerHomeTileData(
-        title: 'Ustawienia Trainera',
-        subtitle: 'Profil, wygląd i dane lokalne',
+        title: 'Ustawienia',
+        subtitle: 'Profil, wygląd i integracje',
         icon: Icons.tune_rounded,
         onTap: onSettings,
+        accentColor: cyan,
       ),
     ];
 
@@ -2973,38 +3006,84 @@ class TrainerHomePage extends StatelessWidget {
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.stretch,
         children: [
-          Card(
-            color: Theme.of(context).colorScheme.primaryContainer,
+          // Hero card — premium gradient
+          Container(
+            decoration: BoxDecoration(
+              gradient: LinearGradient(
+                colors: isDark
+                    ? [const Color(0xFF1A2E26), const Color(0xFF0D1B2A)]
+                    : [scheme.primaryContainer, scheme.secondaryContainer],
+                begin: Alignment.topLeft,
+                end: Alignment.bottomRight,
+              ),
+              borderRadius: BorderRadius.circular(24),
+              border: Border.all(color: scheme.primary.withValues(alpha: isDark ? 0.25 : 0.15)),
+            ),
             child: Padding(
-              padding: const EdgeInsets.all(18),
+              padding: const EdgeInsets.all(20),
               child: Row(
                 children: [
-                  CircleAvatar(
-                    radius: 28,
-                    backgroundColor: Theme.of(context).colorScheme.onPrimaryContainer,
-                    foregroundColor: Theme.of(context).colorScheme.primaryContainer,
-                    child: const Icon(Icons.directions_run_rounded, size: 30),
-                  ),
-                  const SizedBox(width: 14),
                   Expanded(
                     child: Column(
                       crossAxisAlignment: CrossAxisAlignment.start,
                       children: [
                         Text(
-                          todayLogs.isEmpty ? 'Gotowy na dzisiejszy trening?' : 'Dzisiejszy trening zapisany',
-                          style: Theme.of(context).textTheme.titleLarge?.copyWith(
-                                fontWeight: FontWeight.w900,
-                                color: Theme.of(context).colorScheme.onPrimaryContainer,
-                              ),
+                          hasActiveSession
+                              ? 'Trening w toku ▶'
+                              : todayLogs.isNotEmpty
+                                  ? 'Świetna robota! 💪'
+                                  : 'Gotowy na trening?',
+                          style: theme.textTheme.titleLarge?.copyWith(
+                            fontWeight: FontWeight.w900,
+                            color: isDark ? Colors.white : scheme.onPrimaryContainer,
+                          ),
                         ),
-                        const SizedBox(height: 4),
+                        const SizedBox(height: 6),
                         Text(
-                          todayLogs.isEmpty ? 'Otwórz plan lub dodaj pierwszy wpis.' : '${todayLogs.length} ${todayLogs.length == 1 ? 'wpis' : 'wpisy'} w historii dnia.',
-                          style: Theme.of(context).textTheme.bodyMedium?.copyWith(
-                                color: Theme.of(context).colorScheme.onPrimaryContainer,
-                              ),
+                          todayPlan != null
+                              ? 'Dziś: ${todayPlan.title}'
+                              : todayLogs.isNotEmpty
+                                  ? '${todayLogs.length} ${todayLogs.length == 1 ? 'ćwiczenie' : 'ćwiczenia'} zapisane'
+                                  : 'Otwórz plan lub dodaj wpis',
+                          style: theme.textTheme.bodyMedium?.copyWith(
+                            color: (isDark ? Colors.white : scheme.onPrimaryContainer).withValues(alpha: 0.75),
+                          ),
+                        ),
+                        const SizedBox(height: 12),
+                        Row(
+                          children: [
+                            _HeroBadge(
+                              icon: Icons.local_fire_department_outlined,
+                              label: '$weekDays dni w tyg.',
+                              color: const Color(0xFFFF6B6B),
+                            ),
+                            const SizedBox(width: 8),
+                            _HeroBadge(
+                              icon: Icons.fitness_center_rounded,
+                              label: '${store.logs.length} wpisów',
+                              color: const Color(0xFF24D6A3),
+                            ),
+                          ],
                         ),
                       ],
+                    ),
+                  ),
+                  const SizedBox(width: 14),
+                  GestureDetector(
+                    onTap: onToday,
+                    child: Container(
+                      width: 72,
+                      height: 72,
+                      decoration: BoxDecoration(
+                        color: scheme.primary.withValues(alpha: isDark ? 0.18 : 0.12),
+                        borderRadius: BorderRadius.circular(22),
+                        border: Border.all(color: scheme.primary.withValues(alpha: 0.28)),
+                      ),
+                      child: Icon(
+                        hasActiveSession ? Icons.play_circle_rounded : Icons.directions_run_rounded,
+                        color: scheme.primary,
+                        size: 38,
+                      ),
                     ),
                   ),
                 ],
@@ -3012,29 +3091,38 @@ class TrainerHomePage extends StatelessWidget {
             ),
           ),
           const SizedBox(height: 16),
-          LayoutBuilder(
-            builder: (context, constraints) {
-              final columns = constraints.maxWidth >= 760
-                  ? 3
-                  : constraints.maxWidth >= 430
-                      ? 2
-                      : 1;
-              final tileWidth = (constraints.maxWidth - (columns - 1) * 12) / columns;
-              final tileHeight = columns == 1 ? 156.0 : 180.0;
-              return GridView.builder(
-                shrinkWrap: true,
-                physics: const NeverScrollableScrollPhysics(),
-                itemCount: tiles.length,
-                gridDelegate: SliverGridDelegateWithFixedCrossAxisCount(
-                  crossAxisCount: columns,
-                  crossAxisSpacing: 12,
-                  mainAxisSpacing: 12,
-                  childAspectRatio: tileWidth / tileHeight,
-                ),
-                itemBuilder: (context, index) => TrainerHomeTile(data: tiles[index]),
-              );
-            },
-          ),
+          ...tiles.map((tile) => Padding(
+            padding: const EdgeInsets.only(bottom: 10),
+            child: TrainerHomeTile(data: tile),
+          )),
+        ],
+      ),
+    );
+  }
+}
+
+class _HeroBadge extends StatelessWidget {
+  const _HeroBadge({required this.icon, required this.label, required this.color});
+  final IconData icon;
+  final String label;
+  final Color color;
+
+  @override
+  Widget build(BuildContext context) {
+    final isDark = Theme.of(context).brightness == Brightness.dark;
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 5),
+      decoration: BoxDecoration(
+        color: color.withValues(alpha: isDark ? 0.18 : 0.12),
+        borderRadius: BorderRadius.circular(12),
+        border: Border.all(color: color.withValues(alpha: 0.28)),
+      ),
+      child: Row(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          Icon(icon, size: 13, color: color),
+          const SizedBox(width: 5),
+          Text(label, style: TextStyle(fontSize: 11, fontWeight: FontWeight.w700, color: color)),
         ],
       ),
     );
@@ -3047,12 +3135,16 @@ class TrainerHomeTileData {
     required this.subtitle,
     required this.icon,
     required this.onTap,
+    this.accentColor,
+    this.badge,
   });
 
   final String title;
   final String subtitle;
   final IconData icon;
   final VoidCallback onTap;
+  final Color? accentColor;
+  final String? badge;
 }
 
 class TrainerHomeTile extends StatelessWidget {
@@ -3063,26 +3155,37 @@ class TrainerHomeTile extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final theme = Theme.of(context);
+    final scheme = theme.colorScheme;
+    final isDark = theme.brightness == Brightness.dark;
+    final accent = data.accentColor ?? scheme.primary;
+
     return Card(
       clipBehavior: Clip.antiAlias,
       child: InkWell(
         onTap: data.onTap,
+        splashColor: accent.withValues(alpha: 0.12),
+        highlightColor: accent.withValues(alpha: 0.07),
         child: Padding(
           padding: const EdgeInsets.all(16),
           child: Row(
             crossAxisAlignment: CrossAxisAlignment.center,
             children: [
               Container(
-                width: 48,
-                height: 48,
+                width: 52,
+                height: 52,
                 decoration: BoxDecoration(
-                  color: theme.colorScheme.primaryContainer,
-                  borderRadius: BorderRadius.circular(16),
+                  gradient: LinearGradient(
+                    colors: [
+                      accent.withValues(alpha: isDark ? 0.30 : 0.18),
+                      accent.withValues(alpha: isDark ? 0.14 : 0.08),
+                    ],
+                    begin: Alignment.topLeft,
+                    end: Alignment.bottomRight,
+                  ),
+                  borderRadius: BorderRadius.circular(18),
+                  border: Border.all(color: accent.withValues(alpha: isDark ? 0.35 : 0.22), width: 1),
                 ),
-                child: Icon(
-                  data.icon,
-                  color: theme.colorScheme.onPrimaryContainer,
-                ),
+                child: Icon(data.icon, color: accent, size: 26),
               ),
               const SizedBox(width: 14),
               Expanded(
@@ -3090,29 +3193,41 @@ class TrainerHomeTile extends StatelessWidget {
                   mainAxisAlignment: MainAxisAlignment.center,
                   crossAxisAlignment: CrossAxisAlignment.start,
                   children: [
-                    Text(
-                      data.title,
-                      maxLines: 2,
-                      overflow: TextOverflow.ellipsis,
-                      style: theme.textTheme.titleMedium?.copyWith(fontWeight: FontWeight.w900),
+                    Row(
+                      children: [
+                        Expanded(
+                          child: Text(
+                            data.title,
+                            maxLines: 1,
+                            overflow: TextOverflow.ellipsis,
+                            style: theme.textTheme.titleMedium?.copyWith(fontWeight: FontWeight.w800),
+                          ),
+                        ),
+                        if (data.badge != null) ...[
+                          const SizedBox(width: 6),
+                          Container(
+                            padding: const EdgeInsets.symmetric(horizontal: 7, vertical: 2),
+                            decoration: BoxDecoration(
+                              color: accent.withValues(alpha: isDark ? 0.22 : 0.14),
+                              borderRadius: BorderRadius.circular(10),
+                            ),
+                            child: Text(data.badge!, style: TextStyle(fontSize: 10, fontWeight: FontWeight.w800, color: accent)),
+                          ),
+                        ],
+                      ],
                     ),
-                    const SizedBox(height: 5),
+                    const SizedBox(height: 4),
                     Text(
                       data.subtitle,
-                      maxLines: 3,
+                      maxLines: 2,
                       overflow: TextOverflow.ellipsis,
-                      style: theme.textTheme.bodySmall?.copyWith(
-                        color: theme.colorScheme.onSurfaceVariant,
-                      ),
+                      style: theme.textTheme.bodySmall?.copyWith(color: scheme.onSurfaceVariant, height: 1.35),
                     ),
                   ],
                 ),
               ),
-              const SizedBox(width: 8),
-              Icon(
-                Icons.chevron_right_rounded,
-                color: theme.colorScheme.onSurfaceVariant,
-              ),
+              const SizedBox(width: 6),
+              Icon(Icons.chevron_right_rounded, color: scheme.onSurfaceVariant.withValues(alpha: 0.5), size: 20),
             ],
           ),
         ),
@@ -3132,20 +3247,34 @@ class PageFrame extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final theme = Theme.of(context);
+    final scheme = theme.colorScheme;
     return CustomScrollView(
       slivers: [
         SliverPadding(
-          padding: const EdgeInsets.fromLTRB(16, 14, 16, 0),
+          padding: const EdgeInsets.fromLTRB(20, 18, 16, 0),
           sliver: SliverToBoxAdapter(
             child: Row(
+              crossAxisAlignment: CrossAxisAlignment.start,
               children: [
                 Expanded(
                   child: Column(
                     crossAxisAlignment: CrossAxisAlignment.start,
                     children: [
-                      Text(title, style: theme.textTheme.headlineMedium?.copyWith(fontWeight: FontWeight.w900)),
-                      const SizedBox(height: 4),
-                      Text(subtitle, style: theme.textTheme.bodyMedium?.copyWith(color: theme.colorScheme.onSurfaceVariant)),
+                      Text(
+                        title,
+                        style: theme.textTheme.headlineMedium?.copyWith(
+                          fontWeight: FontWeight.w900,
+                          letterSpacing: -0.5,
+                        ),
+                      ),
+                      const SizedBox(height: 3),
+                      Text(
+                        subtitle,
+                        style: theme.textTheme.bodySmall?.copyWith(
+                          color: scheme.onSurfaceVariant,
+                          letterSpacing: 0.1,
+                        ),
+                      ),
                     ],
                   ),
                 ),
@@ -3155,7 +3284,7 @@ class PageFrame extends StatelessWidget {
           ),
         ),
         SliverPadding(
-          padding: const EdgeInsets.all(16),
+          padding: const EdgeInsets.fromLTRB(16, 14, 16, 16),
           sliver: SliverToBoxAdapter(child: child),
         ),
       ],
