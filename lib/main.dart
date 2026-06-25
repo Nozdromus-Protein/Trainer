@@ -1321,6 +1321,184 @@ bool sameDay(DateTime a, DateTime b) => a.year == b.year && a.month == b.month &
 
 String idNow() => DateTime.now().microsecondsSinceEpoch.toString();
 
+// --- Etap 18: Sugestie progresji (lokalna logika) ---
+
+enum ProgressionAction {
+  increaseWeight,
+  increaseReps,
+  maintain,
+  decreaseWeight,
+  deload,
+}
+
+class ProgressionSuggestion {
+  const ProgressionSuggestion({
+    required this.action,
+    required this.reason,
+    required this.suggestedWeightKg,
+    required this.suggestedReps,
+    required this.currentWeightKg,
+    required this.currentReps,
+  });
+
+  final ProgressionAction action;
+  final String reason;
+  final double suggestedWeightKg;
+  final int suggestedReps;
+  final double currentWeightKg;
+  final int currentReps;
+
+  String get label {
+    switch (action) {
+      case ProgressionAction.increaseWeight:
+        return 'Zwiększ ciężar';
+      case ProgressionAction.increaseReps:
+        return 'Zwiększ powtórzenia';
+      case ProgressionAction.maintain:
+        return 'Utrzymaj';
+      case ProgressionAction.decreaseWeight:
+        return 'Zmniejsz ciężar';
+      case ProgressionAction.deload:
+        return 'Zrób deload';
+    }
+  }
+
+  IconData get icon {
+    switch (action) {
+      case ProgressionAction.increaseWeight:
+        return Icons.trending_up_rounded;
+      case ProgressionAction.increaseReps:
+        return Icons.add_circle_outline_rounded;
+      case ProgressionAction.maintain:
+        return Icons.remove_rounded;
+      case ProgressionAction.decreaseWeight:
+        return Icons.trending_down_rounded;
+      case ProgressionAction.deload:
+        return Icons.battery_charging_full_rounded;
+    }
+  }
+
+  bool get hasNewValues => suggestedWeightKg != currentWeightKg || suggestedReps != currentReps;
+}
+
+/// Analizuje historię ćwiczenia i zwraca sugestię progresji.
+/// Czysta lokalna logika — nie wywołuje AI ani sieci.
+ProgressionSuggestion? progressionSuggestionForExercise({
+  required String exerciseId,
+  required List<WorkoutLog> allLogs,
+  required int plannedReps,
+  required double plannedWeightKg,
+}) {
+  // Pobierz logi tego ćwiczenia, max 20 ostatnich, posortowane od najnowszego
+  final history = allLogs
+      .where((l) => l.exerciseId == exerciseId)
+      .toList()
+    ..sort((a, b) => b.date.compareTo(a.date));
+  if (history.isEmpty) return null;
+
+  // Ostatnia sesja
+  final latest = history.first;
+  final currentWeight = latest.weightKg > 0 ? latest.weightKg : plannedWeightKg;
+  final currentReps = latest.reps > 0 ? latest.reps : plannedReps;
+
+  // Okno analizy: max 5 ostatnich sesji
+  final window = history.take(5).toList();
+  final avgRpe = window.isEmpty ? 0.0 : window.fold<double>(0, (s, l) => s + l.rpe) / window.length;
+  final allCompletedReps = window.every((l) => l.reps >= plannedReps);
+  final anyHighRpe = window.any((l) => l.rpe >= 9);
+
+  // Stagnacja: min 4 sesje, ciężar nie wzrósł
+  bool stagnant = false;
+  if (history.length >= 4) {
+    final older = history.sublist(1, math.min(5, history.length));
+    final olderAvgWeight = older.fold<double>(0, (s, l) => s + l.weightKg) / older.length;
+    stagnant = currentWeight <= olderAvgWeight && window.length >= 4;
+  }
+
+  // Reguły progresji:
+
+  // 1. Zmęczenie / wysoki RPE → zmniejsz ciężar lub deload
+  if (avgRpe >= 9.5 || (anyHighRpe && avgRpe >= 9.0)) {
+    final newWeight = (currentWeight * 0.9).roundToDouble();
+    return ProgressionSuggestion(
+      action: ProgressionAction.decreaseWeight,
+      reason: 'Średnie RPE ${avgRpe.toStringAsFixed(1)} — trening jest zbyt intensywny. Zmniejsz ciężar o ok. 10%.',
+      suggestedWeightKg: newWeight > 0 ? newWeight : 0,
+      suggestedReps: currentReps,
+      currentWeightKg: currentWeight,
+      currentReps: currentReps,
+    );
+  }
+
+  // 2. Deload: stagnacja + wysoki RPE lub długa historia bez wzrostu
+  if (stagnant && avgRpe >= 8.0 && history.length >= 6) {
+    final deloadWeight = (currentWeight * 0.8).roundToDouble();
+    return ProgressionSuggestion(
+      action: ProgressionAction.deload,
+      reason: 'Brak progresu przez ostatnie ${window.length}+ sesje przy RPE ${avgRpe.toStringAsFixed(1)}. Tydzień deload (80% ciężaru) pomoże w regeneracji.',
+      suggestedWeightKg: deloadWeight > 0 ? deloadWeight : 0,
+      suggestedReps: math.max(6, (currentReps * 0.8).round()),
+      currentWeightKg: currentWeight,
+      currentReps: currentReps,
+    );
+  }
+
+  // 3. Niski RPE i pełne powtórzenia → zwiększ ciężar
+  if ((avgRpe > 0 && avgRpe <= 7.0) && allCompletedReps && window.length >= 2) {
+    final step = currentWeight < 10 ? 1.0 : currentWeight < 40 ? 2.5 : 5.0;
+    final newWeight = currentWeight + step;
+    return ProgressionSuggestion(
+      action: ProgressionAction.increaseWeight,
+      reason: 'RPE ${avgRpe.toStringAsFixed(1)} — jest rezerwa. Dodaj ${step.toStringAsFixed(step == step.roundToDouble() ? 0 : 1)} kg.',
+      suggestedWeightKg: newWeight,
+      suggestedReps: currentReps,
+      currentWeightKg: currentWeight,
+      currentReps: currentReps,
+    );
+  }
+
+  // 4. Dobry RPE, nieukończone powtórzenia → zwiększ powtórzenia, nie ciężar
+  if (avgRpe > 0 && avgRpe <= 7.5 && !allCompletedReps && window.length >= 2) {
+    final newReps = currentReps + 1;
+    return ProgressionSuggestion(
+      action: ProgressionAction.increaseReps,
+      reason: 'Dobry RPE (${avgRpe.toStringAsFixed(1)}), ale nie wszystkie powtórzenia ukończone. Spróbuj dobić do $newReps powt. przed zwiększeniem ciężaru.',
+      suggestedWeightKg: currentWeight,
+      suggestedReps: newReps,
+      currentWeightKg: currentWeight,
+      currentReps: currentReps,
+    );
+  }
+
+  // 5. Stagnacja bez zbyt wysokiego RPE → zwiększ ciężar (delikatny krok)
+  if (stagnant && avgRpe < 8.0) {
+    final step = currentWeight < 20 ? 1.0 : 2.5;
+    final newWeight = currentWeight + step;
+    return ProgressionSuggestion(
+      action: ProgressionAction.increaseWeight,
+      reason: 'Stagnacja od ${window.length} sesji. Spróbuj zwiększyć ciężar o $step kg.',
+      suggestedWeightKg: newWeight,
+      suggestedReps: currentReps,
+      currentWeightKg: currentWeight,
+      currentReps: currentReps,
+    );
+  }
+
+  // 6. Utrzymaj — RPE 7–8, wszystko w porządku
+  if (avgRpe >= 7.0 && avgRpe <= 8.5) {
+    return ProgressionSuggestion(
+      action: ProgressionAction.maintain,
+      reason: 'RPE ${avgRpe.toStringAsFixed(1)} — optymalny zakres. Kontynuuj z aktualnym ciężarem.',
+      suggestedWeightKg: currentWeight,
+      suggestedReps: currentReps,
+      currentWeightKg: currentWeight,
+      currentReps: currentReps,
+    );
+  }
+
+  return null;
+}
+
 // --- Etap 17: AI analiza treningu ---
 
 class WorkoutAiAnalysis {
@@ -5737,6 +5915,28 @@ class ExerciseDetailsPage extends StatelessWidget {
             exercise: exercise,
             logs: store.logs,
           ),
+          // Etap 18: sugestia progresji w szczegółach ćwiczenia
+          Builder(builder: (ctx) {
+            final activePlan = store.activeWorkoutPlan;
+            final todayWeekday = DateTime.now().weekday;
+            final planItem = activePlan?.days
+                .where((d) => d.weekday == todayWeekday)
+                .expand((d) => d.items)
+                .where((it) => it.exerciseId == exercise.id)
+                .firstOrNull;
+            return Padding(
+              padding: const EdgeInsets.only(top: 12),
+              child: ProgressionSuggestionCard(
+                exerciseId: exercise.id,
+                exerciseName: exercise.name,
+                logs: store.logs,
+                plannedReps: planItem?.reps ?? exercise.defaultReps,
+                plannedWeightKg: planItem?.suggestedWeightKg ?? 0,
+                planId: activePlan?.id,
+                weekday: todayWeekday,
+              ),
+            );
+          }),
         ],
       ),
       bottomNavigationBar: _ExerciseDetailsActions(
@@ -6834,6 +7034,17 @@ class _ActiveWorkoutPageState extends State<ActiveWorkoutPage> {
                 ),
               ],
               const SizedBox(height: 12),
+              // Etap 18: sugestia progresji dla aktywnego ćwiczenia
+              ProgressionSuggestionCard(
+                exerciseId: activeExercise.exerciseId,
+                exerciseName: exercise.name,
+                logs: store.logs,
+                plannedReps: activeExercise.plannedReps,
+                plannedWeightKg: activeExercise.suggestedWeightKg,
+                planId: store.activeWorkoutPlan?.id,
+                weekday: session.weekday,
+                onApplied: () => setState(() {}),
+              ),
               if (activeExercise.completedSets.isNotEmpty) ...[
                 _CompletedSetsCard(sets: activeExercise.completedSets),
                 const SizedBox(height: 12),
@@ -7650,6 +7861,9 @@ class _WorkoutSummaryPageState extends State<WorkoutSummaryPage> {
             const SizedBox(height: 10),
             _WorkoutStretchingCard(focus: widget.stretchingFocus),
             const SizedBox(height: 10),
+            // Etap 18: sugestie progresji per ćwiczenie
+            _WorkoutProgressionSuggestionsCard(summary: widget.summary),
+            const SizedBox(height: 10),
             // Etap 17: karta analizy AI
             _AiWorkoutAnalysisCard(
               analysis: analysis,
@@ -7666,6 +7880,120 @@ class _WorkoutSummaryPageState extends State<WorkoutSummaryPage> {
           ],
         ),
       ),
+    );
+  }
+}
+
+class _WorkoutProgressionSuggestionsCard extends StatelessWidget {
+  const _WorkoutProgressionSuggestionsCard({required this.summary});
+
+  final CompletedWorkoutSummary summary;
+
+  @override
+  Widget build(BuildContext context) {
+    final store = AppScope.of(context);
+    final theme = Theme.of(context);
+
+    // Zbierz ćwiczenia z tej sesji
+    final sessionLogs = store.logs.where((l) => l.sessionId == summary.sessionId).toList();
+    final exerciseIds = sessionLogs.map((l) => l.exerciseId).toSet().toList();
+    if (exerciseIds.isEmpty) return const SizedBox.shrink();
+
+    final activePlan = store.activeWorkoutPlan;
+    final suggestions = <MapEntry<String, ProgressionSuggestion>>[];
+    for (final id in exerciseIds) {
+      final planItem = activePlan?.days
+          .expand((d) => d.items)
+          .where((it) => it.exerciseId == id)
+          .firstOrNull;
+      final log = sessionLogs.firstWhere((l) => l.exerciseId == id);
+      final s = progressionSuggestionForExercise(
+        exerciseId: id,
+        allLogs: store.logs,
+        plannedReps: planItem?.reps ?? log.reps,
+        plannedWeightKg: planItem?.suggestedWeightKg ?? log.weightKg,
+      );
+      if (s != null && s.action != ProgressionAction.maintain) {
+        suggestions.add(MapEntry(id, s));
+      }
+    }
+
+    if (suggestions.isEmpty) return const SizedBox.shrink();
+
+    return Card(
+      child: Padding(
+        padding: const EdgeInsets.all(16),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Row(
+              children: [
+                Icon(Icons.trending_up_rounded, color: theme.colorScheme.primary),
+                const SizedBox(width: 8),
+                Expanded(child: Text('Sugestie progresji', style: theme.textTheme.titleMedium?.copyWith(fontWeight: FontWeight.w900))),
+              ],
+            ),
+            const SizedBox(height: 10),
+            for (final entry in suggestions) ...[
+              _ProgressionSummaryRow(
+                exerciseId: entry.key,
+                suggestion: entry.value,
+                activePlan: activePlan,
+              ),
+              if (entry != suggestions.last) const Divider(height: 16),
+            ],
+          ],
+        ),
+      ),
+    );
+  }
+}
+
+class _ProgressionSummaryRow extends StatelessWidget {
+  const _ProgressionSummaryRow({required this.exerciseId, required this.suggestion, required this.activePlan});
+
+  final String exerciseId;
+  final ProgressionSuggestion suggestion;
+  final WorkoutPlan? activePlan;
+
+  @override
+  Widget build(BuildContext context) {
+    final store = AppScope.of(context);
+    final exercise = ExerciseRepo.byId(exerciseId, store.customExercises);
+    final theme = Theme.of(context);
+    final scheme = theme.colorScheme;
+
+    Color color;
+    switch (suggestion.action) {
+      case ProgressionAction.increaseWeight:
+      case ProgressionAction.increaseReps:
+        color = Colors.green;
+      case ProgressionAction.maintain:
+        color = scheme.primary;
+      case ProgressionAction.decreaseWeight:
+        color = Colors.orange;
+      case ProgressionAction.deload:
+        color = Colors.deepOrange;
+    }
+
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        Row(
+          children: [
+            Icon(suggestion.icon, size: 16, color: color),
+            const SizedBox(width: 6),
+            Expanded(
+              child: Text(
+                '${exercise.name} — ${suggestion.label}',
+                style: theme.textTheme.bodyMedium?.copyWith(fontWeight: FontWeight.w700),
+              ),
+            ),
+          ],
+        ),
+        const SizedBox(height: 2),
+        Text(suggestion.reason, style: theme.textTheme.bodySmall?.copyWith(color: scheme.onSurfaceVariant, height: 1.35)),
+      ],
     );
   }
 }
@@ -13422,6 +13750,168 @@ class HumanExercisePainter extends CustomPainter {
 
   @override
   bool shouldRepaint(covariant HumanExercisePainter oldDelegate) => oldDelegate.type != type || oldDelegate.progress != progress || oldDelegate.bodyColor != bodyColor || oldDelegate.backgroundColor != backgroundColor || oldDelegate.accentColor != accentColor;
+}
+
+// ============================================================
+// Etap 18: Widget sugestii progresji
+// ============================================================
+
+class ProgressionSuggestionCard extends StatelessWidget {
+  const ProgressionSuggestionCard({
+    super.key,
+    required this.exerciseId,
+    required this.exerciseName,
+    required this.logs,
+    required this.plannedReps,
+    required this.plannedWeightKg,
+    this.planId,
+    this.weekday,
+    this.onApplied,
+  });
+
+  final String exerciseId;
+  final String exerciseName;
+  final List<WorkoutLog> logs;
+  final int plannedReps;
+  final double plannedWeightKg;
+  final String? planId;
+  final int? weekday;
+  final VoidCallback? onApplied;
+
+  Color _actionColor(ProgressionAction action, ColorScheme scheme) {
+    switch (action) {
+      case ProgressionAction.increaseWeight:
+      case ProgressionAction.increaseReps:
+        return Colors.green;
+      case ProgressionAction.maintain:
+        return scheme.primary;
+      case ProgressionAction.decreaseWeight:
+        return Colors.orange;
+      case ProgressionAction.deload:
+        return Colors.deepOrange;
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final suggestion = progressionSuggestionForExercise(
+      exerciseId: exerciseId,
+      allLogs: logs,
+      plannedReps: plannedReps,
+      plannedWeightKg: plannedWeightKg,
+    );
+    if (suggestion == null) return const SizedBox.shrink();
+
+    final theme = Theme.of(context);
+    final scheme = theme.colorScheme;
+    final color = _actionColor(suggestion.action, scheme);
+    final store = AppScope.of(context);
+
+    return Card(
+      child: Padding(
+        padding: const EdgeInsets.fromLTRB(16, 14, 16, 14),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.stretch,
+          children: [
+            Row(
+              children: [
+                Icon(suggestion.icon, color: color, size: 20),
+                const SizedBox(width: 8),
+                Expanded(
+                  child: Text(
+                    suggestion.label,
+                    style: theme.textTheme.titleSmall?.copyWith(fontWeight: FontWeight.w800, color: color),
+                  ),
+                ),
+              ],
+            ),
+            const SizedBox(height: 6),
+            Text(suggestion.reason, style: theme.textTheme.bodySmall?.copyWith(color: scheme.onSurfaceVariant, height: 1.4)),
+            if (suggestion.hasNewValues && planId != null && weekday != null) ...[
+              const SizedBox(height: 10),
+              Row(
+                children: [
+                  Expanded(
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        Text('Sugerowany ciężar', style: theme.textTheme.labelSmall?.copyWith(color: scheme.onSurfaceVariant)),
+                        Text(
+                          suggestion.suggestedWeightKg > 0
+                              ? '${_formatPlanWeight(suggestion.suggestedWeightKg)} kg'
+                              : 'bez ciężaru',
+                          style: theme.textTheme.bodyMedium?.copyWith(fontWeight: FontWeight.w700),
+                        ),
+                      ],
+                    ),
+                  ),
+                  const SizedBox(width: 12),
+                  Expanded(
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        Text('Sugerowane powtórzenia', style: theme.textTheme.labelSmall?.copyWith(color: scheme.onSurfaceVariant)),
+                        Text('${suggestion.suggestedReps}', style: theme.textTheme.bodyMedium?.copyWith(fontWeight: FontWeight.w700)),
+                      ],
+                    ),
+                  ),
+                ],
+              ),
+              const SizedBox(height: 10),
+              OutlinedButton.icon(
+                onPressed: () async {
+                  final confirmed = await showDialog<bool>(
+                    context: context,
+                    builder: (ctx) => AlertDialog(
+                      title: Text('Zastosować sugestię dla „$exerciseName"?'),
+                      content: Text(
+                        'Ciężar w planie zmieni się z ${_formatPlanWeight(suggestion.currentWeightKg)} kg'
+                        ' na ${_formatPlanWeight(suggestion.suggestedWeightKg)} kg'
+                        ', powtórzenia: ${suggestion.currentReps} → ${suggestion.suggestedReps}.',
+                      ),
+                      actions: [
+                        TextButton(onPressed: () => Navigator.pop(ctx, false), child: const Text('Anuluj')),
+                        FilledButton(onPressed: () => Navigator.pop(ctx, true), child: const Text('Zastosuj')),
+                      ],
+                    ),
+                  );
+                  if (confirmed != true || !context.mounted) return;
+                  // Zachowaj istniejące dane planu, zmień tylko ciężar i powtórzenia
+                  final activePlan = store.activeWorkoutPlan;
+                  final existingItem = activePlan?.days
+                      .where((d) => d.weekday == weekday)
+                      .expand((d) => d.items)
+                      .where((it) => it.exerciseId == exerciseId)
+                      .firstOrNull;
+                  await store.upsertPlanItem(
+                    planId: planId!,
+                    weekday: weekday!,
+                    item: PlanItem(
+                      exerciseId: exerciseId,
+                      sets: existingItem?.sets ?? 3,
+                      reps: suggestion.suggestedReps,
+                      durationSec: existingItem?.durationSec ?? 0,
+                      note: existingItem?.note ?? '',
+                      suggestedWeightKg: suggestion.suggestedWeightKg,
+                      restSeconds: existingItem?.restSeconds ?? 90,
+                    ),
+                  );
+                  if (context.mounted) {
+                    ScaffoldMessenger.of(context).showSnackBar(
+                      SnackBar(content: Text('Zaktualizowano „$exerciseName" w planie.')),
+                    );
+                    onApplied?.call();
+                  }
+                },
+                icon: const Icon(Icons.check_circle_outline_rounded, size: 18),
+                label: const Text('Zastosuj sugestię'),
+              ),
+            ],
+          ],
+        ),
+      ),
+    );
+  }
 }
 
 // ============================================================
