@@ -746,6 +746,26 @@ class AppStore extends ChangeNotifier {
     return sorted.first;
   }
 
+  /// Etap 22: tylko-odczyt — snapshot Health Connect dla wskazanego dnia
+  /// (np. wybranego na dashboardzie). Nie liczy nic od nowa.
+  TrainerHealthConnectSnapshot? healthConnectSnapshotForDay(DateTime day) {
+    TrainerHealthConnectSnapshot? best;
+    for (final snapshot in healthConnectSnapshots) {
+      if (sameDay(snapshot.date, day)) {
+        if (best == null || snapshot.checkedAt.isAfter(best.checkedAt)) best = snapshot;
+      }
+    }
+    return best;
+  }
+
+  /// Etap 22: tylko-odczyt — wpływ treningu (korekta dnia) dla wskazanego dnia.
+  TrainingImpact? trainingImpactForDay(DateTime day) {
+    for (final impact in trainingImpacts) {
+      if (sameDay(impact.date, day)) return impact;
+    }
+    return null;
+  }
+
   Future<TrainerHealthConnectSnapshot> checkHealthConnectStatus() async {
     return _runHealthConnectAction(
       () => _healthConnectService.checkStatus(date: selectedDate),
@@ -3027,40 +3047,34 @@ class HomeShell extends StatefulWidget {
   State<HomeShell> createState() => _HomeShellState();
 }
 
+/// Etap 21: wspólny sposób otwierania podstron Trainera ze spójnym AppBarem.
+/// Zastępuje dawny prywatny launcher z dashboardu „Start".
+void openTrainerSubPage(BuildContext context, Widget page, {String? title}) {
+  Navigator.of(context).push(
+    MaterialPageRoute<void>(
+      builder: (_) => Scaffold(
+        appBar: AppBar(toolbarHeight: 48, title: Text(title ?? kAppName)),
+        body: SafeArea(child: page),
+      ),
+    ),
+  );
+}
+
 class _HomeShellState extends State<HomeShell> {
   int index = 0;
 
-  void openStandalonePage(Widget page) {
-    Navigator.of(context).push(
-      MaterialPageRoute<void>(
-        builder: (_) => Scaffold(
-          appBar: AppBar(
-            toolbarHeight: 48,
-            title: const Text(kAppName),
-          ),
-          body: SafeArea(child: page),
-        ),
-      ),
-    );
-  }
+  // Etap 21: uporządkowane menu główne — 5 czytelnych zakładek.
+  // Każdy ekran ma jeden jasny punkt wejścia (bez dublowania nawigacji).
+  static const _pages = [
+    TodayPage(),
+    PlanPage(),
+    ExercisesPage(),
+    ProgressPage(),
+    MorePage(),
+  ];
 
   @override
   Widget build(BuildContext context) {
-    final pages = [
-      TrainerHomePage(
-        onToday: () => openStandalonePage(const TodayPage()),
-        onExercises: () => setState(() => index = 1),
-        onHistory: () => openStandalonePage(const HistoryPage()),
-        onPlans: () => setState(() => index = 2),
-        onProgress: () => setState(() => index = 3),
-        onSettings: () => setState(() => index = 5),
-      ),
-      const ExercisesPage(),
-      const PlanPage(),
-      const ProgressPage(),
-      const AiTrainerPage(),
-      const MorePage(),
-    ];
     return Scaffold(
       resizeToAvoidBottomInset: true,
       body: SafeArea(
@@ -3071,7 +3085,7 @@ class _HomeShellState extends State<HomeShell> {
           transitionBuilder: (child, animation) => FadeTransition(opacity: animation, child: child),
           child: KeyedSubtree(
             key: ValueKey<int>(index),
-            child: pages[index],
+            child: _pages[index],
           ),
         ),
       ),
@@ -3081,11 +3095,10 @@ class _HomeShellState extends State<HomeShell> {
           selectedIndex: index,
           onDestinationSelected: (v) => setState(() => index = v),
           destinations: const [
-            NavigationDestination(icon: Icon(Icons.grid_view_outlined), selectedIcon: Icon(Icons.grid_view_rounded), label: 'Start'),
+            NavigationDestination(icon: Icon(Icons.today_outlined), selectedIcon: Icon(Icons.today_rounded), label: 'Dzisiaj'),
+            NavigationDestination(icon: Icon(Icons.calendar_month_outlined), selectedIcon: Icon(Icons.calendar_month), label: 'Trening'),
             NavigationDestination(icon: Icon(Icons.fitness_center_outlined), selectedIcon: Icon(Icons.fitness_center), label: 'Ćwiczenia'),
-            NavigationDestination(icon: Icon(Icons.calendar_month_outlined), selectedIcon: Icon(Icons.calendar_month), label: 'Plan'),
-            NavigationDestination(icon: Icon(Icons.show_chart_outlined), selectedIcon: Icon(Icons.show_chart), label: 'Postęp'),
-            NavigationDestination(icon: Icon(Icons.smart_toy_outlined), selectedIcon: Icon(Icons.smart_toy_rounded), label: 'AI'),
+            NavigationDestination(icon: Icon(Icons.insights_outlined), selectedIcon: Icon(Icons.insights_rounded), label: 'Postęp'),
             NavigationDestination(icon: Icon(Icons.more_horiz), selectedIcon: Icon(Icons.more), label: 'Więcej'),
           ],
         ),
@@ -4647,11 +4660,19 @@ class TodayPage extends StatelessWidget {
     final day = store.selectedDate;
     final logs = store.logsForDay(day);
     final totals = store.totalsForDay(day);
+    final dayImpact = store.trainingImpactForDay(day);
     return PageFrame(
       title: kAppName,
-      subtitle: 'Dziennik, plan, AI i postęp',
+      subtitle: 'Dziennik dnia, statystyki i szybkie akcje',
       actions: [
         IconButton.filledTonal(
+          tooltip: 'Historia treningów',
+          onPressed: () => openTrainerSubPage(context, const HistoryPage(), title: 'Historia treningów'),
+          icon: const Icon(Icons.history_rounded),
+        ),
+        const SizedBox(width: 8),
+        IconButton.filledTonal(
+          tooltip: 'Dodaj ćwiczenie',
           onPressed: () => showAddWorkoutSheet(context),
           icon: const Icon(Icons.add),
         ),
@@ -4683,13 +4704,13 @@ class TodayPage extends StatelessWidget {
             const SizedBox(height: 14),
           ],
           DateSwitcher(date: day, onChanged: store.setSelectedDate),
-          const SizedBox(height: 14),
+
+          // === SEKCJA: Podsumowanie dnia ===
+          const SizedBox(height: 18),
+          const SectionHeader(title: 'Podsumowanie dnia'),
+          const SizedBox(height: 10),
           DailyHero(totals: totals),
-          const SizedBox(height: 14),
-          TrainingInsightCard(logs: store.logs, selectedDay: day),
-          const SizedBox(height: 14),
-          WorkoutTimerCard(),
-          const SizedBox(height: 14),
+          const SizedBox(height: 10),
           Row(
             children: [
               Expanded(child: StatCard(label: 'Serie', value: '${totals.sets}', icon: Icons.repeat)),
@@ -4705,9 +4726,13 @@ class TodayPage extends StatelessWidget {
               Expanded(child: StatCard(label: 'Wpisy', value: '${totals.sessions}', icon: Icons.list_alt)),
             ],
           ),
+          const SizedBox(height: 10),
+          TrainingInsightCard(logs: store.logs, selectedDay: day),
+
+          // === SEKCJA: Dzisiejszy trening ===
           const SizedBox(height: 18),
           SectionHeader(
-            title: 'Dzisiejsze ćwiczenia',
+            title: 'Dzisiejszy trening',
             actionLabel: 'Dodaj',
             onAction: () => showAddWorkoutSheet(context),
           ),
@@ -4715,18 +4740,286 @@ class TodayPage extends StatelessWidget {
           if (logs.isEmpty)
             EmptyCard(
               icon: Icons.fitness_center,
-              title: 'Nie masz jeszcze wpisu',
+              title: 'Brak treningu z dzisiaj',
               text: 'Dodaj ćwiczenie ręcznie albo opisz trening w AI. Aplikacja policzy czas, objętość i spalone kalorie.',
               buttonLabel: 'Dodaj ćwiczenie',
               onPressed: () => showAddWorkoutSheet(context),
             )
           else
             ...logs.map((log) => WorkoutLogCard(log: log)),
-          const SizedBox(height: 16),
-          QuickWorkoutActionsCard(),
           const SizedBox(height: 12),
+          WorkoutTimerCard(),
+          const SizedBox(height: 12),
+          QuickWorkoutActionsCard(),
+
+          // === SEKCJA: Aktywność z zegarka / Health Connect ===
+          const SizedBox(height: 18),
+          const SectionHeader(title: 'Aktywność z zegarka'),
+          const SizedBox(height: 10),
+          TodayActivityCard(day: day),
+
+          // === SEKCJA: Sugestie i korekta dnia ===
+          const SizedBox(height: 18),
+          const SectionHeader(title: 'Sugestie i korekta dnia'),
+          const SizedBox(height: 10),
+          if (dayImpact != null) ...[
+            DayAdjustmentCard(impact: dayImpact),
+            const SizedBox(height: 12),
+          ],
           AiQuickCard(),
         ],
+      ),
+    );
+  }
+}
+
+/// Etap 22: karta aktywności dnia z Health Connect / zegarka.
+/// Tylko wyświetla istniejące dane (snapshot + zarejestrowane aktywności),
+/// nic nie przelicza i nie dubluje danych Health Connect.
+class TodayActivityCard extends StatelessWidget {
+  const TodayActivityCard({super.key, required this.day});
+
+  final DateTime day;
+
+  @override
+  Widget build(BuildContext context) {
+    final store = AppScope.of(context);
+    final theme = Theme.of(context);
+    final scheme = theme.colorScheme;
+    final snapshot = store.healthConnectSnapshotForDay(day);
+
+    // Bieg / chód mierzony z zarejestrowanych aktywności tego dnia.
+    // Świadomie pomijamy "chód zwykły z kroków" — to te same kroki, które
+    // pokazujemy już w liczniku "Kroki" (brak dublowania danych Health Connect).
+    final activityInputs = store.activityInputsForDay(day);
+    final runWalk = activityInputs
+        .where((e) =>
+            e.type == TrainerActivityType.run ||
+            e.type == TrainerActivityType.measuredWalk)
+        .toList();
+
+    // Stan pusty — brak snapshotu i brak zarejestrowanego biegu/chodu.
+    if (snapshot == null && runWalk.isEmpty) {
+      return Card(
+        child: Padding(
+          padding: const EdgeInsets.all(18),
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Row(
+                children: [
+                  Icon(Icons.watch_outlined, color: scheme.onSurfaceVariant),
+                  const SizedBox(width: 8),
+                  Expanded(child: Text('Brak danych z dzisiaj', style: theme.textTheme.titleSmall?.copyWith(fontWeight: FontWeight.w800))),
+                ],
+              ),
+              const SizedBox(height: 6),
+              Text(
+                'Nie odczytano jeszcze kroków, dystansu ani aktywnych kalorii z Health Connect / zegarka na ten dzień.',
+                style: theme.textTheme.bodySmall?.copyWith(color: scheme.onSurfaceVariant, height: 1.4),
+              ),
+              const SizedBox(height: 12),
+              OutlinedButton.icon(
+                onPressed: () => Navigator.of(context).push(MaterialPageRoute(builder: (_) => const HealthConnectSettingsPage())),
+                icon: const Icon(Icons.health_and_safety_outlined, size: 18),
+                label: const Text('Otwórz Health Connect'),
+              ),
+            ],
+          ),
+        ),
+      );
+    }
+
+    final partial = snapshot != null &&
+        (!snapshot.permissionsGranted || snapshot.missingData.isNotEmpty || !snapshot.hasAnyDailyData);
+
+    return Card(
+      child: Padding(
+        padding: const EdgeInsets.all(16),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.stretch,
+          children: [
+            Row(
+              children: [
+                Icon(Icons.watch_outlined, color: scheme.primary),
+                const SizedBox(width: 8),
+                Expanded(child: Text('Aktywność dnia', style: theme.textTheme.titleMedium?.copyWith(fontWeight: FontWeight.w900))),
+                if (snapshot != null)
+                  Text(
+                    'odczyt ${formatHealthConnectTimestamp(snapshot.checkedAt)}',
+                    style: theme.textTheme.labelSmall?.copyWith(color: scheme.onSurfaceVariant),
+                  ),
+              ],
+            ),
+            // Ostrzeżenie o danych częściowych.
+            if (partial) ...[
+              const SizedBox(height: 10),
+              Container(
+                padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+                decoration: BoxDecoration(
+                  color: scheme.tertiaryContainer.withValues(alpha: 0.5),
+                  borderRadius: BorderRadius.circular(12),
+                ),
+                child: Row(
+                  children: [
+                    Icon(Icons.info_outline_rounded, size: 16, color: scheme.onTertiaryContainer),
+                    const SizedBox(width: 8),
+                    Expanded(
+                      child: Text(
+                        'Dane mogą być niepełne (brak części uprawnień lub odczytów).',
+                        style: theme.textTheme.bodySmall?.copyWith(color: scheme.onTertiaryContainer),
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+            ],
+            // Główne liczniki: kroki, dystans, aktywne kcal.
+            if (snapshot != null) ...[
+              const SizedBox(height: 12),
+              Row(
+                children: [
+                  Expanded(child: _ActivityMetricTile(icon: Icons.directions_walk_rounded, value: '${snapshot.steps}', label: 'Kroki')),
+                  const SizedBox(width: 8),
+                  Expanded(child: _ActivityMetricTile(icon: Icons.route_rounded, value: formatHealthConnectDistance(snapshot.distanceKm), label: 'Dystans')),
+                  const SizedBox(width: 8),
+                  Expanded(child: _ActivityMetricTile(icon: Icons.local_fire_department_outlined, value: snapshot.activeKcal.toStringAsFixed(0), label: 'Akt. kcal')),
+                ],
+              ),
+              const SizedBox(height: 8),
+              Wrap(
+                spacing: 8,
+                runSpacing: 8,
+                children: [
+                  MiniTag(text: 'Treningi: ${snapshot.workoutSessions} · ${snapshot.workoutMinutes} min'),
+                  MiniTag(text: snapshot.heartRateSamples == 0 ? 'Tętno: —' : 'Tętno: ${snapshot.averageHeartRate.toStringAsFixed(0)} bpm'),
+                  MiniTag(text: snapshot.sleepMinutes == 0 ? 'Sen: —' : 'Sen: ${formatHealthConnectMinutes(snapshot.sleepMinutes)}'),
+                ],
+              ),
+            ],
+            // Bieg / chód, jeśli dane istnieją.
+            if (runWalk.isNotEmpty) ...[
+              const SizedBox(height: 14),
+              Text('Bieg / chód', style: theme.textTheme.labelLarge?.copyWith(fontWeight: FontWeight.w800)),
+              const SizedBox(height: 8),
+              ...runWalk.map((entry) => Padding(
+                    padding: const EdgeInsets.only(bottom: 8),
+                    child: Row(
+                      children: [
+                        Icon(
+                          entry.type == TrainerActivityType.run ? Icons.directions_run_rounded : Icons.directions_walk_rounded,
+                          size: 18,
+                          color: scheme.primary,
+                        ),
+                        const SizedBox(width: 8),
+                        Expanded(
+                          child: Text(
+                            entry.type.label,
+                            maxLines: 1,
+                            overflow: TextOverflow.ellipsis,
+                            style: theme.textTheme.bodyMedium?.copyWith(fontWeight: FontWeight.w600),
+                          ),
+                        ),
+                        const SizedBox(width: 8),
+                        Text(
+                          [
+                            if (entry.distanceKm > 0) formatHealthConnectDistance(entry.distanceKm),
+                            if (entry.durationMin > 0) '${entry.durationMin} min',
+                            '${entry.estimatedKcal} kcal',
+                          ].join(' · '),
+                          style: theme.textTheme.bodySmall?.copyWith(color: scheme.onSurfaceVariant),
+                        ),
+                      ],
+                    ),
+                  )),
+            ],
+          ],
+        ),
+      ),
+    );
+  }
+}
+
+class _ActivityMetricTile extends StatelessWidget {
+  const _ActivityMetricTile({required this.icon, required this.value, required this.label});
+
+  final IconData icon;
+  final String value;
+  final String label;
+
+  @override
+  Widget build(BuildContext context) {
+    final theme = Theme.of(context);
+    final scheme = theme.colorScheme;
+    return Container(
+      padding: const EdgeInsets.symmetric(vertical: 12, horizontal: 8),
+      decoration: BoxDecoration(
+        color: scheme.surfaceContainerHighest.withValues(alpha: 0.5),
+        borderRadius: BorderRadius.circular(16),
+      ),
+      child: Column(
+        children: [
+          Icon(icon, color: scheme.primary, size: 20),
+          const SizedBox(height: 6),
+          FittedBox(
+            fit: BoxFit.scaleDown,
+            child: Text(value, style: theme.textTheme.titleMedium?.copyWith(fontWeight: FontWeight.w900)),
+          ),
+          const SizedBox(height: 2),
+          Text(
+            label,
+            maxLines: 1,
+            overflow: TextOverflow.ellipsis,
+            style: theme.textTheme.labelSmall?.copyWith(color: scheme.onSurfaceVariant),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+/// Etap 22: kompaktowa karta korekty dnia (wpływ treningu na cele).
+/// Wyświetla istniejące dane TrainingImpact — nic nie przelicza.
+class DayAdjustmentCard extends StatelessWidget {
+  const DayAdjustmentCard({super.key, required this.impact});
+
+  final TrainingImpact impact;
+
+  @override
+  Widget build(BuildContext context) {
+    final theme = Theme.of(context);
+    final scheme = theme.colorScheme;
+    return Card(
+      child: Padding(
+        padding: const EdgeInsets.all(16),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Row(
+              children: [
+                Icon(Icons.tips_and_updates_outlined, color: scheme.primary),
+                const SizedBox(width: 8),
+                Expanded(child: Text('Korekta dnia', style: theme.textTheme.titleMedium?.copyWith(fontWeight: FontWeight.w900))),
+              ],
+            ),
+            const SizedBox(height: 10),
+            Wrap(
+              spacing: 8,
+              runSpacing: 8,
+              children: [
+                MiniTag(text: impact.isTrainingDay ? 'Dzień treningowy' : 'Dzień bez treningu'),
+                MiniTag(text: '${impact.estimatedBurnedKcal} kcal spalonych'),
+                MiniTag(text: '+${impact.suggestedCalorieAdjustmentKcal} kcal celu'),
+                MiniTag(text: '+${impact.suggestedExtraWaterMl} ml wody'),
+                MiniTag(text: '+${impact.suggestedExtraProteinG} g białka'),
+              ],
+            ),
+            if (impact.postWorkoutMealSuggestion.trim().isNotEmpty) ...[
+              const SizedBox(height: 10),
+              Text(impact.postWorkoutMealSuggestion, style: theme.textTheme.bodySmall?.copyWith(color: scheme.onSurfaceVariant, height: 1.4)),
+            ],
+          ],
+        ),
       ),
     );
   }
@@ -11455,6 +11748,30 @@ class BackupRestoreCard extends StatelessWidget {
   }
 }
 
+/// Etap 21: karta z listą pozycji nawigacyjnych jednej sekcji menu „Więcej".
+class _MoreNavCard extends StatelessWidget {
+  const _MoreNavCard({required this.tiles});
+
+  final List<FeatureActionTile> tiles;
+
+  @override
+  Widget build(BuildContext context) {
+    return Card(
+      child: Padding(
+        padding: const EdgeInsets.all(10),
+        child: Column(
+          children: [
+            for (var i = 0; i < tiles.length; i++) ...[
+              tiles[i],
+              if (i != tiles.length - 1) const SizedBox(height: 6),
+            ],
+          ],
+        ),
+      ),
+    );
+  }
+}
+
 class MorePage extends StatelessWidget {
   const MorePage({super.key});
 
@@ -11463,27 +11780,110 @@ class MorePage extends StatelessWidget {
     final store = AppScope.of(context);
     return PageFrame(
       title: 'Więcej',
-      subtitle: 'Profil, poziomy, motyw, eksport i stały backend AI',
+      subtitle: 'Integracje, zdrowie, ustawienia i dane aplikacji',
       child: Column(
+        crossAxisAlignment: CrossAxisAlignment.stretch,
         children: [
+          // Trener AI — przeniesiony z dolnego paska, wciąż łatwo dostępny.
+          _MoreNavCard(
+            tiles: [
+              FeatureActionTile(
+                icon: Icons.smart_toy_rounded,
+                title: 'AI Trainer',
+                subtitle: 'Czat z trenerem AI i szybkie pytania',
+                onTap: () => openTrainerSubPage(context, const AiTrainerPage(), title: 'AI Trainer'),
+              ),
+            ],
+          ),
+          const SizedBox(height: 16),
+
+          const SectionHeader(title: 'Integracje'),
+          const SizedBox(height: 10),
+          _MoreNavCard(
+            tiles: [
+              FeatureActionTile(
+                icon: Icons.health_and_safety_outlined,
+                title: 'Health Connect',
+                subtitle: 'Dostępność, uprawnienia i dzienny odczyt',
+                onTap: () => Navigator.of(context).push(MaterialPageRoute(builder: (_) => const HealthConnectSettingsPage())),
+              ),
+              FeatureActionTile(
+                icon: Icons.public,
+                title: 'Import z bazy ćwiczeń',
+                subtitle: 'Szukaj w wger i zapisuj lokalnie',
+                onTap: () => showWgerSearchSheet(context),
+              ),
+            ],
+          ),
+          const SizedBox(height: 16),
+
+          const SectionHeader(title: 'Zdrowie i aktywność'),
+          const SizedBox(height: 10),
+          _MoreNavCard(
+            tiles: [
+              FeatureActionTile(
+                icon: Icons.straighten_rounded,
+                title: 'Pomiary sylwetki',
+                subtitle: 'Waga, obwody, historia i wykresy',
+                onTap: () => Navigator.of(context).push(MaterialPageRoute(builder: (_) => const BodyMeasurementsPage())),
+              ),
+              FeatureActionTile(
+                icon: Icons.rule_rounded,
+                title: 'Anty-dublowanie aktywności',
+                subtitle: 'Kroki, chód, bieg i trening siłowy',
+                onTap: () => Navigator.of(context).push(MaterialPageRoute(builder: (_) => const ActivityDeduplicationPage())),
+              ),
+              FeatureActionTile(
+                icon: Icons.history_rounded,
+                title: 'Historia treningów',
+                subtitle: 'Wszystkie zapisane treningi',
+                onTap: () => openTrainerSubPage(context, const HistoryPage(), title: 'Historia treningów'),
+              ),
+            ],
+          ),
+          const SizedBox(height: 16),
+
+          const SectionHeader(title: 'Cele i ustawienia'),
+          const SizedBox(height: 10),
           SettingsCard(settings: store.settings, onSave: store.updateSettings),
-          const SizedBox(height: 12),
-          BackupRestoreCard(store: store),
-          const SizedBox(height: 12),
-          ExportCard(),
           const SizedBox(height: 12),
           Card(
             child: SwitchListTile(
+              secondary: const Icon(Icons.dark_mode_outlined),
               title: const Text('Tryb nocny'),
               subtitle: const Text('Ciemny, premium styl podobny do aplikacji licznika'),
               value: store.settings.darkMode,
               onChanged: (v) => store.updateSettings(store.settings.copyWith(darkMode: v)),
             ),
           ),
+          const SizedBox(height: 16),
+
+          const SectionHeader(title: 'Dane aplikacji'),
+          const SizedBox(height: 10),
+          BackupRestoreCard(store: store),
           const SizedBox(height: 12),
-          TrainerFeaturesHub(store: store),
+          ExportCard(),
+          const SizedBox(height: 16),
+
+          const SectionHeader(title: 'Pomoc / diagnostyka'),
+          const SizedBox(height: 10),
+          _MoreNavCard(
+            tiles: [
+              FeatureActionTile(
+                icon: Icons.monitor_heart_outlined,
+                title: 'Diagnostyka',
+                subtitle: 'Stan danych, Health Connect, AI i błędne wpisy',
+                onTap: () => Navigator.of(context).push(MaterialPageRoute(builder: (_) => const DiagnosticsPage())),
+              ),
+            ],
+          ),
           const SizedBox(height: 12),
           AboutCard(),
+          const SizedBox(height: 16),
+
+          const SectionHeader(title: 'Wszystkie funkcje i analizy'),
+          const SizedBox(height: 10),
+          TrainerFeaturesHub(store: store),
         ],
       ),
     );
@@ -14250,6 +14650,66 @@ class _ExerciseMediaHero extends StatelessWidget {
 /// jeśli plik nie istnieje albo nie da się go wczytać.
 ///
 /// Priorytet podglądu: animacja (GIF) > obraz statyczny (lokalny/zdalny) > fallback.
+/// Etap 23: estetyczny placeholder ćwiczenia bez multimediów.
+/// Zastępuje stare „patyczakowe" ilustracje czystą, themowaną grafiką
+/// (gradient + ikona dobrana do partii/kategorii). Skaluje się do kontenera,
+/// bez rozciągania ikony.
+class ExercisePlaceholder extends StatelessWidget {
+  const ExercisePlaceholder({super.key, required this.exercise, this.size});
+
+  final Exercise exercise;
+  final double? size;
+
+  static IconData iconForExercise(Exercise exercise) {
+    final text = '${exercise.category} ${exercise.muscles.join(' ')} ${exercise.illustrationType} ${exercise.name}'.toLowerCase();
+    bool has(List<String> keys) => keys.any(text.contains);
+    if (has(['bieg', 'run', 'cardio', 'skip', 'interwa', 'hiit'])) return Icons.directions_run_rounded;
+    if (has(['rower', 'bike', 'cykl'])) return Icons.directions_bike_rounded;
+    if (has(['brzuch', 'core', 'plank', 'deska', 'abs'])) return Icons.self_improvement_rounded;
+    if (has(['plec', 'back', 'pull', 'wiosł', 'podciąg', 'row'])) return Icons.rowing_rounded;
+    if (has(['bark', 'shoulder', 'arnold', 'ohp'])) return Icons.accessibility_new_rounded;
+    if (has(['noga', 'nogi', 'leg', 'przysiad', 'squat', 'wykrok', 'lunge', 'udo', 'łyd', 'lyd', 'pośladk', 'posladk'])) return Icons.sports_gymnastics_rounded;
+    if (has(['biceps', 'triceps', 'rami', 'arm', 'uginan', 'curl'])) return Icons.sports_mma_rounded;
+    if (has(['rozcią', 'rozciag', 'mobil', 'stretch', 'joga', 'yoga']) ) return Icons.spa_rounded;
+    return Icons.fitness_center_rounded;
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final theme = Theme.of(context);
+    final scheme = theme.colorScheme;
+    final isDark = theme.brightness == Brightness.dark;
+    final icon = iconForExercise(exercise);
+    return Container(
+      width: size,
+      height: size,
+      decoration: BoxDecoration(
+        gradient: LinearGradient(
+          begin: Alignment.topLeft,
+          end: Alignment.bottomRight,
+          colors: isDark
+              ? [scheme.surfaceContainerHighest, scheme.surfaceContainerHigh]
+              : [scheme.primaryContainer.withValues(alpha: 0.55), scheme.surfaceContainerHighest],
+        ),
+        borderRadius: BorderRadius.circular(20),
+      ),
+      child: LayoutBuilder(
+        builder: (context, constraints) {
+          // Ikona ~42% mniejszego wymiaru, ograniczona do rozsądnego zakresu.
+          final base = math.min(
+            constraints.hasBoundedWidth ? constraints.maxWidth : (size ?? 96),
+            constraints.hasBoundedHeight ? constraints.maxHeight : (size ?? 96),
+          );
+          final iconSize = (base * 0.42).clamp(16.0, 120.0);
+          return Center(
+            child: Icon(icon, size: iconSize, color: scheme.primary.withValues(alpha: isDark ? 0.85 : 0.7)),
+          );
+        },
+      ),
+    );
+  }
+}
+
 class ExerciseMediaPreview extends StatelessWidget {
   const ExerciseMediaPreview({
     super.key,
@@ -14267,7 +14727,7 @@ class ExerciseMediaPreview extends StatelessWidget {
     return lower.startsWith('http://') || lower.startsWith('https://');
   }
 
-  Widget _fallback() => HumanExerciseImage(type: exercise.illustrationType, size: fallbackSize);
+  Widget _fallback() => ExercisePlaceholder(exercise: exercise, size: fallbackSize);
 
   /// Buduje widget obrazu/GIF-a z fallbackiem na wypadek braku pliku.
   Widget _buildMedia(String path) {
@@ -14314,7 +14774,7 @@ class ExerciseVisual extends StatelessWidget {
     if (exercise.hasMedia) {
       return ExerciseMediaPreview(exercise: exercise);
     }
-    return HumanExerciseImage(type: exercise.illustrationType);
+    return ExercisePlaceholder(exercise: exercise);
   }
 }
 
@@ -14339,7 +14799,7 @@ class ExerciseHeroVisual extends StatelessWidget {
               padding: const EdgeInsets.all(18),
               child: exercise.hasMedia
                   ? ExerciseMediaPreview(exercise: exercise, fit: BoxFit.contain, fallbackSize: 230)
-                  : Center(child: HumanExerciseImage(type: exercise.illustrationType, size: 230)),
+                  : Center(child: ExercisePlaceholder(exercise: exercise, size: 230)),
             ),
           ),
           // Znacznik animacji, gdy ćwiczenie ma GIF.
