@@ -1467,7 +1467,7 @@ class AppStore extends ChangeNotifier {
       final reply = (result['reply'] ?? result['message'] ?? result['content'] ?? result['response'] ?? result['answer'] ?? prettyJson(result)).toString().trim();
       aiChatHistory.add(AiChatMessage(role: 'assistant', content: reply, timestamp: DateTime.now()));
     } catch (e) {
-      aiChatHistory.add(AiChatMessage(role: 'error', content: 'Błąd połączenia z AI: $e', timestamp: DateTime.now()));
+      aiChatHistory.add(AiChatMessage(role: 'error', content: friendlyAiErrorMessage(e), timestamp: DateTime.now()));
     } finally {
       aiChatBusy = false;
       notifyListeners();
@@ -1739,6 +1739,26 @@ class WorkoutAiAnalysis {
 }
 
 // --- Etap 16: AI Trainer czat ---
+
+/// Zamienia techniczny błąd HTTP/sieci na czytelny komunikat dla użytkownika
+/// AI Trainera. Obsługuje 404, 500 i timeout zgodnie z wymaganiami.
+String friendlyAiErrorMessage(Object error) {
+  final text = error.toString();
+  final lower = text.toLowerCase();
+  if (text.contains('404') || lower.contains('not found')) {
+    return 'Endpoint AI Trainer nie istnieje na backendzie (404). Zaktualizuj/zdeployuj backend.';
+  }
+  if (text.contains('500') || text.contains('502') || text.contains('503') || lower.contains('server error')) {
+    return 'Błąd serwera AI. Spróbuj ponownie za chwilę.';
+  }
+  if (lower.contains('timeout') || lower.contains('timed out')) {
+    return 'Backend nie odpowiada. Sprawdź połączenie i spróbuj ponownie.';
+  }
+  if (lower.contains('socketexception') || lower.contains('failed host lookup') || lower.contains('connection')) {
+    return 'Brak połączenia z backendem AI. Sprawdź internet.';
+  }
+  return 'Błąd połączenia z AI: $text';
+}
 
 class AiChatMessage {
   const AiChatMessage({required this.role, required this.content, required this.timestamp});
@@ -6119,6 +6139,11 @@ class ExerciseDetailsPage extends StatelessWidget {
             ],
           ),
           const SizedBox(height: 16),
+          // Etap 15: podgląd multimediów (GIF/zdjęcie) gdy ćwiczenie je ma.
+          if (exercise.hasMedia) ...[
+            _ExerciseMediaHero(exercise: exercise),
+            const SizedBox(height: 12),
+          ],
           _ExerciseMuscleMapPlaceholder(exercise: exercise),
           const SizedBox(height: 12),
           Card(
@@ -13759,6 +13784,9 @@ class _CreateExerciseSheetContentState extends State<CreateExerciseSheetContent>
       easierVersion: original?.easierVersion ?? '',
       harderVersion: original?.harderVersion ?? '',
       imageUrl: original?.imageUrl,
+      imagePath: original?.imagePath,
+      gifPath: original?.gifPath,
+      videoPath: original?.videoPath,
       source: original == null
           ? 'custom'
           : original.source == 'local'
@@ -14163,6 +14191,118 @@ double estimateCalories({required double met, required double weightKg, required
   return met * 3.5 * weightKg / 200 * minutes;
 }
 
+/// Duży podgląd multimediów ćwiczenia w ekranie szczegółów.
+/// Pokazuje GIF/zdjęcie z bezpiecznym fallbackiem i znacznikiem typu mediów.
+class _ExerciseMediaHero extends StatelessWidget {
+  const _ExerciseMediaHero({required this.exercise});
+
+  final Exercise exercise;
+
+  @override
+  Widget build(BuildContext context) {
+    final theme = Theme.of(context);
+    final isAnimated = exercise.animatedMediaPath != null;
+    return Container(
+      height: 240,
+      decoration: BoxDecoration(
+        color: theme.colorScheme.surfaceContainerHighest,
+        borderRadius: BorderRadius.circular(24),
+        border: Border.all(color: theme.colorScheme.outlineVariant.withValues(alpha: 0.4)),
+      ),
+      clipBehavior: Clip.antiAlias,
+      child: Stack(
+        fit: StackFit.expand,
+        children: [
+          Padding(
+            padding: const EdgeInsets.all(8),
+            child: ExerciseMediaPreview(exercise: exercise, fit: BoxFit.contain, fallbackSize: 200),
+          ),
+          Positioned(
+            left: 12,
+            top: 12,
+            child: Container(
+              padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 5),
+              decoration: BoxDecoration(
+                color: theme.colorScheme.primary,
+                borderRadius: BorderRadius.circular(12),
+              ),
+              child: Row(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  Icon(isAnimated ? Icons.gif_box_outlined : Icons.image_outlined, size: 16, color: theme.colorScheme.onPrimary),
+                  const SizedBox(width: 4),
+                  Text(
+                    isAnimated ? 'Animacja' : 'Zdjęcie',
+                    style: TextStyle(fontSize: 11, fontWeight: FontWeight.w800, color: theme.colorScheme.onPrimary),
+                  ),
+                ],
+              ),
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+/// Crash-safe budowniczy multimediów ćwiczenia.
+/// Obsługuje GIF/obraz lokalny (asset) i zdalny (URL), z bezpiecznym fallbackiem,
+/// jeśli plik nie istnieje albo nie da się go wczytać.
+///
+/// Priorytet podglądu: animacja (GIF) > obraz statyczny (lokalny/zdalny) > fallback.
+class ExerciseMediaPreview extends StatelessWidget {
+  const ExerciseMediaPreview({
+    super.key,
+    required this.exercise,
+    this.fit = BoxFit.cover,
+    this.fallbackSize,
+  });
+
+  final Exercise exercise;
+  final BoxFit fit;
+  final double? fallbackSize;
+
+  bool _isRemote(String path) {
+    final lower = path.toLowerCase();
+    return lower.startsWith('http://') || lower.startsWith('https://');
+  }
+
+  Widget _fallback() => HumanExerciseImage(type: exercise.illustrationType, size: fallbackSize);
+
+  /// Buduje widget obrazu/GIF-a z fallbackiem na wypadek braku pliku.
+  Widget _buildMedia(String path) {
+    if (_isRemote(path)) {
+      return Image.network(
+        path,
+        fit: fit,
+        errorBuilder: (_, __, ___) => _fallback(),
+        loadingBuilder: (context, child, progress) => progress == null ? child : _fallback(),
+      );
+    }
+    // Asset (np. assets/exercises/squat.gif). errorBuilder chroni przed crashem,
+    // gdy plik nie został dodany do projektu.
+    return Image.asset(
+      path,
+      fit: fit,
+      gaplessPlayback: true,
+      errorBuilder: (_, __, ___) => _fallback(),
+    );
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    // Najpierw animacja (GIF), potem obraz statyczny.
+    final animated = exercise.animatedMediaPath;
+    final staticPath = exercise.staticMediaPath;
+    final path = animated ?? staticPath;
+    if (path == null) return _fallback();
+    return ClipRRect(
+      borderRadius: BorderRadius.circular(20),
+      child: _buildMedia(path),
+    );
+  }
+}
+
 class ExerciseVisual extends StatelessWidget {
   final Exercise exercise;
 
@@ -14170,17 +14310,9 @@ class ExerciseVisual extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    final image = exercise.imageUrl;
-    if (image != null && image.isNotEmpty) {
-      return ClipRRect(
-        borderRadius: BorderRadius.circular(20),
-        child: Image.network(
-          image,
-          fit: BoxFit.cover,
-          errorBuilder: (_, __, ___) => HumanExerciseImage(type: exercise.illustrationType),
-          loadingBuilder: (context, child, progress) => progress == null ? child : HumanExerciseImage(type: exercise.illustrationType),
-        ),
-      );
+    // Obsługa GIF / obrazu lokalnego / zdalnego z bezpiecznym fallbackiem.
+    if (exercise.hasMedia) {
+      return ExerciseMediaPreview(exercise: exercise);
     }
     return HumanExerciseImage(type: exercise.illustrationType);
   }
@@ -14205,18 +14337,32 @@ class ExerciseHeroVisual extends StatelessWidget {
           Positioned.fill(
             child: Padding(
               padding: const EdgeInsets.all(18),
-              child: exercise.imageUrl != null
-                  ? ClipRRect(
-                      borderRadius: BorderRadius.circular(24),
-                      child: Image.network(
-                        exercise.imageUrl!,
-                        fit: BoxFit.contain,
-                        errorBuilder: (_, __, ___) => Center(child: HumanExerciseImage(type: exercise.illustrationType, size: 230)),
-                      ),
-                    )
+              child: exercise.hasMedia
+                  ? ExerciseMediaPreview(exercise: exercise, fit: BoxFit.contain, fallbackSize: 230)
                   : Center(child: HumanExerciseImage(type: exercise.illustrationType, size: 230)),
             ),
           ),
+          // Znacznik animacji, gdy ćwiczenie ma GIF.
+          if (exercise.animatedMediaPath != null)
+            Positioned(
+              right: 16,
+              top: 16,
+              child: Container(
+                padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 5),
+                decoration: BoxDecoration(
+                  color: theme.colorScheme.primary,
+                  borderRadius: BorderRadius.circular(12),
+                ),
+                child: Row(
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    Icon(Icons.gif_box_outlined, size: 16, color: theme.colorScheme.onPrimary),
+                    const SizedBox(width: 4),
+                    Text('Animacja', style: TextStyle(fontSize: 11, fontWeight: FontWeight.w800, color: theme.colorScheme.onPrimary)),
+                  ],
+                ),
+              ),
+            ),
           Positioned(
             left: 16,
             bottom: 16,

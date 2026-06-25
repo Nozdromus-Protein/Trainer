@@ -25,6 +25,9 @@ class Exercise {
     this.easierVersion = '',
     this.harderVersion = '',
     this.imageUrl,
+    this.imagePath,
+    this.gifPath,
+    this.videoPath,
     this.source = 'local',
   });
 
@@ -50,10 +53,39 @@ class Exercise {
   final String tempo;
   final String easierVersion;
   final String harderVersion;
+
+  /// Zdalny obraz ćwiczenia (np. z bazy wger). Ładowany przez sieć.
   final String? imageUrl;
+
+  /// Lokalny statyczny obraz ćwiczenia. Asset (np. `assets/exercises/squat.png`)
+  /// albo ścieżka URL. Ma pierwszeństwo nad zdalnym [imageUrl] przy statycznym podglądzie.
+  final String? imagePath;
+
+  /// Animacja / GIF ćwiczenia. Asset albo URL. Ma najwyższy priorytet w podglądzie.
+  final String? gifPath;
+
+  /// Ścieżka wideo ćwiczenia. Na razie tylko struktura pod przyszłą obsługę odtwarzacza.
+  final String? videoPath;
+
   final String source;
 
   String get primaryMuscle => muscles.isEmpty ? category : muscles.first;
+
+  /// Ścieżka do animowanego multimediów (GIF) albo null.
+  String? get animatedMediaPath => (gifPath != null && gifPath!.trim().isNotEmpty) ? gifPath!.trim() : null;
+
+  /// Ścieżka do statycznego obrazu (lokalny albo zdalny) albo null.
+  String? get staticMediaPath {
+    if (imagePath != null && imagePath!.trim().isNotEmpty) return imagePath!.trim();
+    if (imageUrl != null && imageUrl!.trim().isNotEmpty) return imageUrl!.trim();
+    return null;
+  }
+
+  /// Czy ćwiczenie ma jakiekolwiek multimedia (GIF, obraz lokalny, obraz zdalny).
+  bool get hasMedia => animatedMediaPath != null || staticMediaPath != null;
+
+  /// Czy ćwiczenie ma wideo (na przyszłość).
+  bool get hasVideo => videoPath != null && videoPath!.trim().isNotEmpty;
 
   List<String> get supportingMuscles =>
       muscles.length <= 1 ? const [] : muscles.skip(1).toList();
@@ -94,6 +126,9 @@ class Exercise {
     String? easierVersion,
     String? harderVersion,
     String? imageUrl,
+    String? imagePath,
+    String? gifPath,
+    String? videoPath,
     String? source,
   }) {
     return Exercise(
@@ -120,6 +155,9 @@ class Exercise {
       easierVersion: easierVersion ?? this.easierVersion,
       harderVersion: harderVersion ?? this.harderVersion,
       imageUrl: imageUrl ?? this.imageUrl,
+      imagePath: imagePath ?? this.imagePath,
+      gifPath: gifPath ?? this.gifPath,
+      videoPath: videoPath ?? this.videoPath,
       source: source ?? this.source,
     );
   }
@@ -148,6 +186,9 @@ class Exercise {
         'easierVersion': easierVersion,
         'harderVersion': harderVersion,
         'imageUrl': imageUrl,
+        'imagePath': imagePath,
+        'gifPath': gifPath,
+        'videoPath': videoPath,
         'source': source,
       };
 
@@ -183,6 +224,9 @@ class Exercise {
         easierVersion: json['easierVersion']?.toString() ?? '',
         harderVersion: json['harderVersion']?.toString() ?? '',
         imageUrl: _nullableText(json['imageUrl']),
+        imagePath: _nullableText(json['imagePath']),
+        gifPath: _nullableText(json['gifPath']),
+        videoPath: _nullableText(json['videoPath']),
         source: json['source']?.toString() ?? 'custom',
       );
 }

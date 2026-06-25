@@ -81,6 +81,8 @@ def home():
             "POST /workout/generate-plan",
             "POST /analyze-exercise-form",
             "POST /workout/analyze-form",
+            "POST /chat",
+            "POST /ai/chat",
         ],
     }
 
@@ -1104,6 +1106,91 @@ async def analyze_exercise_form(req: AnalyzeExerciseFormRequest):
         error_text = str(error)
         print("BLAD TRAINER ANALYZE FORM:", error_text)
         return trainer_error_result("analyze_exercise_form", error_text)
+
+
+class TrainerChatRequest(BaseModel):
+    message: str
+    user: Optional[Dict[str, Any]] = None
+    recent_logs: Optional[List[Any]] = None
+    active_plan: Optional[Dict[str, Any]] = None
+    history: Optional[List[Any]] = None
+    ai_provider: Optional[str] = None
+    provider: Optional[str] = None
+
+
+def build_trainer_chat_prompt(req: TrainerChatRequest) -> str:
+    history_text = ""
+    if req.history:
+        lines = []
+        for item in req.history:
+            if isinstance(item, dict):
+                role = "Użytkownik" if str(item.get("role")) == "user" else "Trener"
+                content = str(item.get("content") or "").strip()
+                if content:
+                    lines.append(f"{role}: {content}")
+        history_text = "\n".join(lines)
+
+    return f"""
+Jesteś osobistym trenerem AI w aplikacji Trainer. Odpowiadasz po polsku, krótko,
+praktycznie i konkretnie, jak doświadczony trener personalny.
+
+Pytanie użytkownika:
+"{req.message}"
+
+Profil użytkownika:
+{json.dumps(req.user or {}, ensure_ascii=False)}
+
+Ostatnie treningi:
+{json.dumps(req.recent_logs or [], ensure_ascii=False)}
+
+Aktywny plan treningowy:
+{json.dumps(req.active_plan or {}, ensure_ascii=False)}
+
+Wcześniejsza rozmowa:
+{history_text}
+
+Zwróć WYŁĄCZNIE poprawny JSON, bez markdown i bez komentarzy.
+
+Format:
+{{
+  "reply": "odpowiedź trenera po polsku, zwięzła i konkretna"
+}}
+
+Zasady:
+- Bądź konkretny: jeśli pytanie dotyczy ciężaru, powtórzeń, odpoczynku albo techniki, daj jasną wskazówkę.
+- Korzystaj z kontekstu (profil, ostatnie treningi, plan), jeśli jest dostępny.
+- Nie diagnozuj medycznie. Przy bólu albo kontuzji zalecaj ostrożność i konsultację ze specjalistą.
+- Nie zmieniaj planu użytkownika samodzielnie — możesz tylko zaproponować zmianę.
+- Jeżeli brakuje danych, powiedz to wprost i podaj ogólną, bezpieczną radę.
+"""
+
+
+@app.post("/chat")
+@app.post("/ai/chat")
+async def trainer_chat(req: TrainerChatRequest):
+    try:
+        prompt = build_trainer_chat_prompt(req)
+        raw = await generate_text_json(prompt, req.ai_provider or req.provider)
+        reply = str(
+            raw.get("reply")
+            or raw.get("message")
+            or raw.get("content")
+            or raw.get("answer")
+            or "Nie udało się przygotować odpowiedzi."
+        )
+        return {
+            "reply": reply,
+            "aiProvider": raw.get("aiProvider"),
+            "aiModel": raw.get("aiModel"),
+        }
+    except Exception as error:
+        error_text = str(error)
+        print("BLAD TRAINER CHAT:", error_text)
+        return {
+            "reply": "Trener AI ma chwilowy problem z odpowiedzią. Spróbuj ponownie za moment.",
+            "error": error_text,
+            "kind": "trainer_chat",
+        }
 
 
 @app.post("/analyze-meal")
