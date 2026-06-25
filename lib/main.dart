@@ -258,6 +258,11 @@ class AppStore extends ChangeNotifier {
       } catch (_) {}
     }
 
+    final rawBackupAt = prefs.getString(_backupAtKey);
+    if (rawBackupAt != null && rawBackupAt.isNotEmpty) {
+      lastBackupAt = DateTime.tryParse(rawBackupAt);
+    }
+
     final rawChat = prefs.getString(_aiChatKey);
     if (rawChat != null && rawChat.isNotEmpty) {
       try {
@@ -571,6 +576,168 @@ class AppStore extends ChangeNotifier {
     activityEntries.sort((left, right) => right.date.compareTo(left.date));
     await saveActivityEntries();
     notifyListeners();
+  }
+
+  // --- Etap 20: backup, import i diagnostyka ---
+
+  static const _backupKey = 'trainer_local_backup_v1';
+  static const _backupAtKey = 'trainer_local_backup_at_v1';
+
+  DateTime? lastBackupAt;
+
+  /// Najnowszy moment zmiany danych w aplikacji — przybliżenie „ostatniego
+  /// zapisu" bez ingerencji w pojedyncze metody save.
+  DateTime? get lastDataActivityAt {
+    final candidates = <DateTime>[
+      for (final log in logs) log.date,
+      for (final measurement in bodyMeasurements) measurement.date,
+      for (final impact in trainingImpacts) impact.date,
+      for (final snapshot in healthConnectSnapshots) snapshot.checkedAt,
+      if (lastBackupAt != null) lastBackupAt!,
+    ];
+    if (candidates.isEmpty) return null;
+    candidates.sort((a, b) => b.compareTo(a));
+    return candidates.first;
+  }
+
+  /// Usuwa pojedynczą zarejestrowaną aktywność (np. błędny wpis kroków/biegu).
+  Future<bool> removeActivityEntry(String id) async {
+    final before = activityEntries.length;
+    activityEntries.removeWhere((entry) => entry.id == id);
+    if (activityEntries.length == before) return false;
+    await saveActivityEntries();
+    notifyListeners();
+    return true;
+  }
+
+  /// Zwraca aktywności, które wyglądają na błędne (do ręcznej weryfikacji).
+  /// Nic nie usuwa — tylko wykrywa podejrzane wpisy.
+  List<TrainerActivityEntry> suspiciousActivityEntries() {
+    final result = <TrainerActivityEntry>[];
+    for (final entry in activityEntries) {
+      final tooManyKcal = entry.estimatedKcal > 3000;
+      final negative = entry.estimatedKcal < 0 || entry.steps < 0 || entry.distanceKm < 0;
+      final absurdSteps = entry.steps > 80000;
+      final absurdDistance = entry.distanceKm > 200;
+      final stepsWithoutKcal = entry.steps > 5000 && entry.estimatedKcal == 0;
+      if (tooManyKcal || negative || absurdSteps || absurdDistance || stepsWithoutKcal) {
+        result.add(entry);
+      }
+    }
+    return result;
+  }
+
+  /// Tworzy lokalną kopię wszystkich danych Trainera w SharedPreferences.
+  Future<DateTime> createLocalBackup() async {
+    final prefs = await SharedPreferences.getInstance();
+    final now = DateTime.now();
+    final payload = {
+      'createdAt': now.toIso8601String(),
+      'version': 1,
+      'data': buildFullExport(this),
+    };
+    await prefs.setString(_backupKey, jsonEncode(payload));
+    await prefs.setString(_backupAtKey, now.toIso8601String());
+    lastBackupAt = now;
+    notifyListeners();
+    return now;
+  }
+
+  /// Czy istnieje zapisana lokalna kopia.
+  Future<bool> hasLocalBackup() async {
+    final prefs = await SharedPreferences.getInstance();
+    final raw = prefs.getString(_backupKey);
+    return raw != null && raw.isNotEmpty;
+  }
+
+  /// Przywraca dane z lokalnej kopii. Zwraca false, gdy kopii brak lub jest błędna.
+  Future<bool> restoreLocalBackup() async {
+    final prefs = await SharedPreferences.getInstance();
+    final raw = prefs.getString(_backupKey);
+    if (raw == null || raw.isEmpty) return false;
+    try {
+      final decoded = jsonDecode(raw);
+      if (decoded is! Map) return false;
+      final data = decoded['data'];
+      if (data is! Map) return false;
+      return importFullData(Map<String, dynamic>.from(data));
+    } catch (_) {
+      return false;
+    }
+  }
+
+  /// Importuje pełen zestaw danych Trainera z mapy JSON (np. z eksportu).
+  /// Zwraca true, gdy import się powiódł. Nie usuwa danych przy błędzie.
+  Future<bool> importFullData(Map<String, dynamic> data) async {
+    try {
+      // Parsujemy do tymczasowych list — jeśli coś jest błędne, nie ruszamy stanu.
+      List<T> parseList<T>(String key, T Function(Map<String, dynamic>) fromJson) {
+        final raw = data[key];
+        if (raw is! List) return <T>[];
+        final out = <T>[];
+        for (final item in raw.whereType<Map>()) {
+          try {
+            out.add(fromJson(Map<String, dynamic>.from(item)));
+          } catch (_) {}
+        }
+        return out;
+      }
+
+      final newSettings = data['settings'] is Map ? AppSettings.fromJson(Map<String, dynamic>.from(data['settings'] as Map)) : null;
+      final newLogs = parseList('logs', WorkoutLog.fromJson);
+      final newPlans = parseList('plans', WorkoutPlan.fromJson);
+      final newExercises = parseList('customExercises', Exercise.fromJson);
+      final newMeasurements = parseList('bodyMeasurements', BodyMeasurement.fromJson);
+      final newImpacts = parseList('trainingImpacts', TrainingImpact.fromJson);
+      final newActivities = parseList('activityEntries', TrainerActivityEntry.fromJson);
+      final newSnapshots = parseList('healthConnectSnapshots', TrainerHealthConnectSnapshot.fromJson);
+
+      // Brak jakichkolwiek danych = nie ma czego importować.
+      final hasAnything = newSettings != null ||
+          newLogs.isNotEmpty ||
+          newPlans.isNotEmpty ||
+          newExercises.isNotEmpty ||
+          newMeasurements.isNotEmpty;
+      if (!hasAnything) return false;
+
+      if (newSettings != null) settings = newSettings;
+      logs
+        ..clear()
+        ..addAll(newLogs);
+      if (newPlans.isNotEmpty) {
+        plans
+          ..clear()
+          ..addAll(newPlans);
+        if (!plans.any((p) => p.isActive)) {
+          plans[0] = plans[0].copyWith(isActive: true);
+        }
+      }
+      customExercises
+        ..clear()
+        ..addAll(newExercises);
+      bodyMeasurements
+        ..clear()
+        ..addAll(newMeasurements)
+        ..sort((a, b) => b.date.compareTo(a.date));
+      trainingImpacts
+        ..clear()
+        ..addAll(newImpacts)
+        ..sort((a, b) => b.date.compareTo(a.date));
+      activityEntries
+        ..clear()
+        ..addAll(newActivities)
+        ..sort((a, b) => b.date.compareTo(a.date));
+      healthConnectSnapshots
+        ..clear()
+        ..addAll(newSnapshots)
+        ..sort((a, b) => b.checkedAt.compareTo(a.checkedAt));
+
+      await saveAll();
+      notifyListeners();
+      return true;
+    } catch (_) {
+      return false;
+    }
   }
 
   TrainerHealthConnectSnapshot? get latestHealthConnectSnapshot {
@@ -10827,6 +10994,442 @@ class ActivityDecisionDetailRow extends StatelessWidget {
   }
 }
 
+// ============================================================
+// Etap 20: Backup, eksport i diagnostyka
+// ============================================================
+
+class DiagnosticsPage extends StatelessWidget {
+  const DiagnosticsPage({super.key});
+
+  @override
+  Widget build(BuildContext context) {
+    final store = AppScope.of(context);
+    final theme = Theme.of(context);
+    final scheme = theme.colorScheme;
+
+    final snapshot = store.latestHealthConnectSnapshot;
+    final suspicious = store.suspiciousActivityEntries();
+    final lastActivity = store.lastDataActivityAt;
+    final aiAnalysesCount = store.logs.where((l) => store.workoutAiAnalysisFor(l.sessionId) != null).map((l) => l.sessionId).toSet().length;
+
+    String fmt(DateTime? dt) {
+      if (dt == null) return '—';
+      String two(int v) => v.toString().padLeft(2, '0');
+      return '${dt.year}-${two(dt.month)}-${two(dt.day)} ${two(dt.hour)}:${two(dt.minute)}';
+    }
+
+    return Scaffold(
+      appBar: AppBar(title: const Text('Diagnostyka danych')),
+      body: SafeArea(
+        child: ListView(
+          padding: const EdgeInsets.fromLTRB(16, 16, 16, 28),
+          children: [
+            // Liczniki danych
+            Card(
+              child: Padding(
+                padding: const EdgeInsets.all(16),
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Row(
+                      children: [
+                        Icon(Icons.storage_rounded, color: scheme.primary),
+                        const SizedBox(width: 8),
+                        Expanded(child: Text('Stan danych lokalnych', style: theme.textTheme.titleMedium?.copyWith(fontWeight: FontWeight.w900))),
+                      ],
+                    ),
+                    const SizedBox(height: 12),
+                    _DiagRow(label: 'Ćwiczenia (własne)', value: '${store.customExercises.length}'),
+                    _DiagRow(label: 'Ćwiczenia (łącznie z bazą)', value: '${ExerciseRepo.combined(store.customExercises).length}'),
+                    _DiagRow(label: 'Plany treningowe', value: '${store.plans.length}'),
+                    _DiagRow(label: 'Wpisy treningowe', value: '${store.logs.length}'),
+                    _DiagRow(label: 'Pomiary sylwetki', value: '${store.bodyMeasurements.length}'),
+                    _DiagRow(label: 'Zarejestrowane aktywności', value: '${store.activityEntries.length}'),
+                    _DiagRow(label: 'Wpływy na kalorie', value: '${store.trainingImpacts.length}'),
+                    _DiagRow(label: 'Ostatnia aktywność danych', value: fmt(lastActivity)),
+                    _DiagRow(label: 'Ostatnia kopia lokalna', value: fmt(store.lastBackupAt)),
+                  ],
+                ),
+              ),
+            ),
+            const SizedBox(height: 12),
+            // Status Health Connect
+            Card(
+              child: Padding(
+                padding: const EdgeInsets.all(16),
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Row(
+                      children: [
+                        Icon(Icons.health_and_safety_outlined, color: scheme.primary),
+                        const SizedBox(width: 8),
+                        Expanded(child: Text('Health Connect', style: theme.textTheme.titleMedium?.copyWith(fontWeight: FontWeight.w900))),
+                      ],
+                    ),
+                    const SizedBox(height: 12),
+                    if (snapshot == null)
+                      Text('Brak odczytu. Otwórz ekran Health Connect i sprawdź status.', style: theme.textTheme.bodySmall?.copyWith(color: scheme.onSurfaceVariant))
+                    else ...[
+                      _DiagRow(label: 'Dostępność SDK', value: snapshot.isAvailable ? 'Dostępne' : 'Niedostępne'),
+                      _DiagRow(label: 'Uprawnienia', value: snapshot.permissionsGranted ? 'Przyznane' : 'Brak / częściowe'),
+                      _DiagRow(label: 'Ostatni odczyt', value: fmt(snapshot.checkedAt)),
+                      _DiagRow(label: 'Dane dnia', value: snapshot.hasAnyDailyData ? 'Obecne' : 'Brak'),
+                      if (snapshot.missingData.isNotEmpty)
+                        _DiagRow(label: 'Brakujące dane', value: snapshot.missingData.length.toString()),
+                      if (snapshot.errorMessage.isNotEmpty) ...[
+                        const SizedBox(height: 6),
+                        Text('Błąd: ${snapshot.errorMessage}', style: theme.textTheme.bodySmall?.copyWith(color: scheme.error)),
+                      ],
+                    ],
+                  ],
+                ),
+              ),
+            ),
+            const SizedBox(height: 12),
+            // Status AI
+            Card(
+              child: Padding(
+                padding: const EdgeInsets.all(16),
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Row(
+                      children: [
+                        Icon(Icons.smart_toy_outlined, color: scheme.primary),
+                        const SizedBox(width: 8),
+                        Expanded(child: Text('AI Trainer', style: theme.textTheme.titleMedium?.copyWith(fontWeight: FontWeight.w900))),
+                      ],
+                    ),
+                    const SizedBox(height: 12),
+                    _DiagRow(label: 'Backend URL', value: store.settings.backendUrl),
+                    _DiagRow(label: 'Status AI', value: store.aiBusy ? 'Zajęte' : 'Bezczynne'),
+                    _DiagRow(label: 'Wiadomości w czacie', value: '${store.aiChatHistory.length}'),
+                    _DiagRow(label: 'Analizy treningów AI', value: '$aiAnalysesCount'),
+                  ],
+                ),
+              ),
+            ),
+            const SizedBox(height: 12),
+            // Potencjalne błędne wpisy
+            Card(
+              color: suspicious.isEmpty ? null : scheme.errorContainer.withValues(alpha: 0.4),
+              child: Padding(
+                padding: const EdgeInsets.all(16),
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Row(
+                      children: [
+                        Icon(suspicious.isEmpty ? Icons.verified_rounded : Icons.warning_amber_rounded, color: suspicious.isEmpty ? Colors.green : Colors.deepOrange),
+                        const SizedBox(width: 8),
+                        Expanded(child: Text('Potencjalne błędne wpisy', style: theme.textTheme.titleMedium?.copyWith(fontWeight: FontWeight.w900))),
+                      ],
+                    ),
+                    const SizedBox(height: 10),
+                    if (suspicious.isEmpty)
+                      Text('Nie wykryto podejrzanych aktywności.', style: theme.textTheme.bodySmall?.copyWith(color: scheme.onSurfaceVariant))
+                    else ...[
+                      Text('${suspicious.length} ${suspicious.length == 1 ? 'wpis wymaga' : 'wpisów wymaga'} weryfikacji:', style: theme.textTheme.bodySmall?.copyWith(color: scheme.onSurfaceVariant)),
+                      const SizedBox(height: 8),
+                      for (final entry in suspicious) _SuspiciousEntryTile(entry: entry),
+                    ],
+                  ],
+                ),
+              ),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+}
+
+class _DiagRow extends StatelessWidget {
+  const _DiagRow({required this.label, required this.value});
+  final String label;
+  final String value;
+
+  @override
+  Widget build(BuildContext context) {
+    final theme = Theme.of(context);
+    return Padding(
+      padding: const EdgeInsets.symmetric(vertical: 4),
+      child: Row(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Expanded(
+            flex: 5,
+            child: Text(label, style: theme.textTheme.bodySmall?.copyWith(color: theme.colorScheme.onSurfaceVariant)),
+          ),
+          const SizedBox(width: 10),
+          Expanded(
+            flex: 4,
+            child: Text(
+              value,
+              textAlign: TextAlign.right,
+              style: theme.textTheme.bodyMedium?.copyWith(fontWeight: FontWeight.w700),
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+class _SuspiciousEntryTile extends StatelessWidget {
+  const _SuspiciousEntryTile({required this.entry});
+  final TrainerActivityEntry entry;
+
+  @override
+  Widget build(BuildContext context) {
+    final store = AppScope.of(context);
+    final theme = Theme.of(context);
+    String two(int v) => v.toString().padLeft(2, '0');
+    final dateLabel = '${entry.date.year}-${two(entry.date.month)}-${two(entry.date.day)}';
+    return Container(
+      margin: const EdgeInsets.only(bottom: 8),
+      padding: const EdgeInsets.all(12),
+      decoration: BoxDecoration(
+        color: theme.colorScheme.surface.withValues(alpha: 0.6),
+        borderRadius: BorderRadius.circular(12),
+      ),
+      child: Row(
+        children: [
+          Expanded(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Text('${entry.source.label} · ${entry.type.label}', style: theme.textTheme.bodyMedium?.copyWith(fontWeight: FontWeight.w700)),
+                const SizedBox(height: 2),
+                Text(
+                  '$dateLabel · ${entry.estimatedKcal} kcal${entry.steps > 0 ? ' · ${entry.steps} kroków' : ''}${entry.distanceKm > 0 ? ' · ${entry.distanceKm.toStringAsFixed(1)} km' : ''}',
+                  style: theme.textTheme.bodySmall?.copyWith(color: theme.colorScheme.onSurfaceVariant),
+                ),
+              ],
+            ),
+          ),
+          const SizedBox(width: 8),
+          IconButton(
+            tooltip: 'Usuń wpis',
+            icon: Icon(Icons.delete_outline_rounded, color: theme.colorScheme.error),
+            onPressed: () async {
+              final ok = await showDialog<bool>(
+                context: context,
+                builder: (ctx) => AlertDialog(
+                  title: const Text('Usunąć błędny wpis?'),
+                  content: Text('Wpis „${entry.source.label} · ${entry.type.label}" z dnia $dateLabel zostanie trwale usunięty z lokalnych danych.'),
+                  actions: [
+                    TextButton(onPressed: () => Navigator.pop(ctx, false), child: const Text('Anuluj')),
+                    FilledButton(onPressed: () => Navigator.pop(ctx, true), child: const Text('Usuń')),
+                  ],
+                ),
+              );
+              if (ok == true && context.mounted) {
+                final removed = await store.removeActivityEntry(entry.id);
+                if (context.mounted && removed) {
+                  ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('Usunięto błędny wpis.')));
+                }
+              }
+            },
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+class BackupRestoreCard extends StatelessWidget {
+  const BackupRestoreCard({super.key, required this.store});
+  final AppStore store;
+
+  Future<void> _showImportDialog(BuildContext context) async {
+    final controller = TextEditingController();
+    final json = await showDialog<String>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: const Text('Import danych JSON'),
+        content: SizedBox(
+          width: 520,
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Text('Wklej wcześniej wyeksportowane dane JSON. Obecne dane zostaną zastąpione.', style: Theme.of(ctx).textTheme.bodySmall),
+              const SizedBox(height: 10),
+              TextField(
+                controller: controller,
+                maxLines: 6,
+                decoration: const InputDecoration(hintText: '{ "settings": ... }'),
+              ),
+            ],
+          ),
+        ),
+        actions: [
+          TextButton(onPressed: () => Navigator.pop(ctx), child: const Text('Anuluj')),
+          FilledButton(onPressed: () => Navigator.pop(ctx, controller.text.trim()), child: const Text('Importuj')),
+        ],
+      ),
+    );
+    if (json == null || json.isEmpty || !context.mounted) return;
+
+    final confirmed = await showDialog<bool>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: const Text('Zastąpić obecne dane?'),
+        content: const Text('Import nadpisze treningi, plany, ćwiczenia i ustawienia. Warto najpierw zrobić kopię lokalną.'),
+        actions: [
+          TextButton(onPressed: () => Navigator.pop(ctx, false), child: const Text('Anuluj')),
+          FilledButton(onPressed: () => Navigator.pop(ctx, true), child: const Text('Zastąp')),
+        ],
+      ),
+    );
+    if (confirmed != true || !context.mounted) return;
+
+    try {
+      final decoded = jsonDecode(json);
+      Map<String, dynamic>? data;
+      if (decoded is Map && decoded['data'] is Map) {
+        data = Map<String, dynamic>.from(decoded['data'] as Map);
+      } else if (decoded is Map) {
+        data = Map<String, dynamic>.from(decoded);
+      }
+      if (data == null) {
+        if (context.mounted) showError(context, 'Nieprawidłowy format danych.');
+        return;
+      }
+      final ok = await store.importFullData(data);
+      if (context.mounted) {
+        showError(context, ok ? 'Import zakończony sukcesem.' : 'Nie udało się zaimportować danych.');
+      }
+    } catch (e) {
+      if (context.mounted) showError(context, 'Błąd importu: $e');
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final theme = Theme.of(context);
+    final scheme = theme.colorScheme;
+    String fmt(DateTime? dt) {
+      if (dt == null) return 'brak';
+      String two(int v) => v.toString().padLeft(2, '0');
+      return '${dt.year}-${two(dt.month)}-${two(dt.day)} ${two(dt.hour)}:${two(dt.minute)}';
+    }
+
+    return Card(
+      child: Padding(
+        padding: const EdgeInsets.all(18),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Row(
+              children: [
+                Icon(Icons.shield_outlined, color: scheme.primary),
+                const SizedBox(width: 8),
+                Expanded(child: Text('Backup i bezpieczeństwo danych', style: theme.textTheme.titleLarge?.copyWith(fontWeight: FontWeight.w900))),
+              ],
+            ),
+            const SizedBox(height: 4),
+            Text('Ostatnia kopia: ${fmt(store.lastBackupAt)}', style: theme.textTheme.bodySmall?.copyWith(color: scheme.onSurfaceVariant)),
+            const SizedBox(height: 14),
+            LayoutBuilder(
+              builder: (context, constraints) {
+                final wide = constraints.maxWidth > 520;
+                final width = wide ? (constraints.maxWidth - 10) / 2 : constraints.maxWidth;
+                return Wrap(
+                  spacing: 10,
+                  runSpacing: 10,
+                  children: [
+                    SizedBox(
+                      width: width,
+                      child: FeatureActionTile(
+                        icon: Icons.save_outlined,
+                        title: 'Kopia lokalna',
+                        subtitle: 'Zapisz migawkę danych na urządzeniu',
+                        onTap: () async {
+                          final at = await store.createLocalBackup();
+                          if (context.mounted) showError(context, 'Zapisano kopię (${fmt(at)}).');
+                        },
+                      ),
+                    ),
+                    SizedBox(
+                      width: width,
+                      child: FeatureActionTile(
+                        icon: Icons.restore_rounded,
+                        title: 'Przywróć kopię',
+                        subtitle: 'Odtwórz dane z lokalnej migawki',
+                        onTap: () async {
+                          final has = await store.hasLocalBackup();
+                          if (!context.mounted) return;
+                          if (!has) {
+                            showError(context, 'Brak zapisanej kopii lokalnej.');
+                            return;
+                          }
+                          final ok = await showDialog<bool>(
+                            context: context,
+                            builder: (ctx) => AlertDialog(
+                              title: const Text('Przywrócić kopię?'),
+                              content: const Text('Obecne dane zostaną zastąpione danymi z ostatniej kopii lokalnej.'),
+                              actions: [
+                                TextButton(onPressed: () => Navigator.pop(ctx, false), child: const Text('Anuluj')),
+                                FilledButton(onPressed: () => Navigator.pop(ctx, true), child: const Text('Przywróć')),
+                              ],
+                            ),
+                          );
+                          if (ok != true || !context.mounted) return;
+                          final restored = await store.restoreLocalBackup();
+                          if (context.mounted) showError(context, restored ? 'Przywrócono dane z kopii.' : 'Nie udało się przywrócić kopii.');
+                        },
+                      ),
+                    ),
+                    SizedBox(
+                      width: width,
+                      child: FeatureActionTile(
+                        icon: Icons.history_edu_outlined,
+                        title: 'Eksport historii CSV',
+                        subtitle: 'Wszystkie treningi do arkusza',
+                        onTap: () => showExportDialog(context, buildCsvExport(store)),
+                      ),
+                    ),
+                    SizedBox(
+                      width: width,
+                      child: FeatureActionTile(
+                        icon: Icons.insights_outlined,
+                        title: 'Eksport progresu CSV',
+                        subtitle: 'Rekordy i objętość per ćwiczenie',
+                        onTap: () => showExportDialog(context, buildProgressCsvExport(store)),
+                      ),
+                    ),
+                    SizedBox(
+                      width: width,
+                      child: FeatureActionTile(
+                        icon: Icons.upload_file_outlined,
+                        title: 'Import danych',
+                        subtitle: 'Wczytaj dane z eksportu JSON',
+                        onTap: () => _showImportDialog(context),
+                      ),
+                    ),
+                    SizedBox(
+                      width: width,
+                      child: FeatureActionTile(
+                        icon: Icons.monitor_heart_outlined,
+                        title: 'Diagnostyka',
+                        subtitle: 'Stan danych, HC, AI i błędne wpisy',
+                        onTap: () => Navigator.of(context).push(MaterialPageRoute(builder: (_) => const DiagnosticsPage())),
+                      ),
+                    ),
+                  ],
+                );
+              },
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+}
+
 class MorePage extends StatelessWidget {
   const MorePage({super.key});
 
@@ -10839,6 +11442,8 @@ class MorePage extends StatelessWidget {
       child: Column(
         children: [
           SettingsCard(settings: store.settings, onSave: store.updateSettings),
+          const SizedBox(height: 12),
+          BackupRestoreCard(store: store),
           const SizedBox(height: 12),
           ExportCard(),
           const SizedBox(height: 12),
@@ -11742,6 +12347,45 @@ String buildCsvExport(AppStore store) {
       log.volume.round(),
       cell(log.note),
     ].join(','));
+  }
+  return buffer.toString();
+}
+
+/// Etap 20: eksport podstawowego progresu per ćwiczenie do CSV.
+/// Dla każdego ćwiczenia: liczba sesji, max ciężar, łączna objętość, daty.
+String buildProgressCsvExport(AppStore store) {
+  final buffer = StringBuffer('exercise,sessions,maxWeightKg,totalVolume,bestVolumeSession,firstDate,lastDate\n');
+  String cell(Object? value) {
+    final raw = (value ?? '').toString().replaceAll('"', '""');
+    return '"$raw"';
+  }
+
+  final byExercise = <String, List<WorkoutLog>>{};
+  for (final log in store.logs) {
+    byExercise.putIfAbsent(log.exerciseId, () => []).add(log);
+  }
+
+  final rows = <List<Object>>[];
+  byExercise.forEach((exerciseId, logs) {
+    final exercise = ExerciseRepo.byId(exerciseId, store.customExercises);
+    final sorted = [...logs]..sort((a, b) => a.date.compareTo(b.date));
+    final maxWeight = logs.fold<double>(0, (m, l) => math.max(m, l.weightKg));
+    final totalVolume = logs.fold<double>(0, (s, l) => s + l.volume);
+    final bestVolume = logs.fold<double>(0, (m, l) => math.max(m, l.volume));
+    rows.add([
+      cell(exercise.name),
+      logs.length,
+      maxWeight.toStringAsFixed(1),
+      totalVolume.round(),
+      bestVolume.round(),
+      cell(sorted.first.date.toIso8601String().substring(0, 10)),
+      cell(sorted.last.date.toIso8601String().substring(0, 10)),
+    ]);
+  });
+
+  rows.sort((a, b) => (b[3] as int).compareTo(a[3] as int));
+  for (final row in rows) {
+    buffer.writeln(row.join(','));
   }
   return buffer.toString();
 }
