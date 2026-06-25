@@ -171,9 +171,12 @@ class AppStore extends ChangeNotifier {
   String? lastAiMessage;
   bool aiBusy = false;
   bool healthConnectBusy = false;
+  final List<AiChatMessage> aiChatHistory = [];
+  bool aiChatBusy = false;
 
   static const _settingsKey = 'workout_settings_v1';
   static const _warmupStatusKey = 'warmup_status_v1';
+  static const _aiChatKey = 'ai_chat_history_v1';
 
   // Status rozgrzewki dla danej sesji treningowej: 'done' / 'skipped'.
   // Trzymany lokalnie, żeby karta rozgrzewki nie wracała po oznaczeniu.
@@ -234,6 +237,18 @@ class AppStore extends ChangeNotifier {
                 (key, value) => MapEntry(key.toString(), value.toString()),
               ),
             );
+        }
+      } catch (_) {}
+    }
+
+    final rawChat = prefs.getString(_aiChatKey);
+    if (rawChat != null && rawChat.isNotEmpty) {
+      try {
+        final decoded = jsonDecode(rawChat);
+        if (decoded is List) {
+          aiChatHistory
+            ..clear()
+            ..addAll(decoded.whereType<Map>().map((e) => AiChatMessage.fromJson(Map<String, dynamic>.from(e))));
         }
       } catch (_) {}
     }
@@ -1149,6 +1164,65 @@ class AppStore extends ChangeNotifier {
     }
   }
 
+  Future<void> saveAiChatHistory() async {
+    final prefs = await SharedPreferences.getInstance();
+    // Trzymaj max 100 ostatnich wiadomości
+    final toSave = aiChatHistory.length > 100 ? aiChatHistory.sublist(aiChatHistory.length - 100) : aiChatHistory;
+    await prefs.setString(_aiChatKey, jsonEncode(toSave.map((m) => m.toJson()).toList()));
+  }
+
+  Future<void> clearAiChatHistory() async {
+    aiChatHistory.clear();
+    await saveAiChatHistory();
+    notifyListeners();
+  }
+
+  Future<void> chatWithAi(String userMessage) async {
+    if (userMessage.trim().isEmpty) return;
+    aiChatHistory.add(AiChatMessage(role: 'user', content: userMessage.trim(), timestamp: DateTime.now()));
+    aiChatBusy = true;
+    notifyListeners();
+    try {
+      final api = AiBackendService(settings.backendUrl);
+      // Grupuj logi po dacie (ostatnie 5 dni z aktywnością)
+      final logsByDate = <String, List<WorkoutLog>>{};
+      for (final log in logs) {
+        final key = log.date.toIso8601String().substring(0, 10);
+        logsByDate.putIfAbsent(key, () => []).add(log);
+      }
+      final recentDays = logsByDate.keys.toList()..sort((a, b) => b.compareTo(a));
+      final recentLogs = recentDays.take(5).map((date) {
+        final dayLogs = logsByDate[date]!;
+        return {
+          'date': date,
+          'exercises': dayLogs.map((l) => {'id': l.exerciseId, 'sets': l.sets, 'reps': l.reps, 'weight_kg': l.weightKg}).toList(),
+        };
+      }).toList();
+      final activePlan = activeWorkoutPlan;
+      final result = await api.chat({
+        'message': userMessage.trim(),
+        'user': settings.toAiProfile(),
+        'recent_logs': recentLogs,
+        'active_plan': activePlan == null ? null : {
+          'name': activePlan.name,
+          'days': activePlan.days.map((d) => {'title': d.title, 'weekday': d.weekday, 'exercises': d.items.length}).toList(),
+        },
+        'history': aiChatHistory.length > 1
+            ? aiChatHistory.sublist(math.max(0, aiChatHistory.length - 11), aiChatHistory.length - 1)
+                .map((m) => {'role': m.role, 'content': m.content}).toList()
+            : [],
+      });
+      final reply = (result['reply'] ?? result['message'] ?? result['content'] ?? result['response'] ?? result['answer'] ?? prettyJson(result)).toString().trim();
+      aiChatHistory.add(AiChatMessage(role: 'assistant', content: reply, timestamp: DateTime.now()));
+    } catch (e) {
+      aiChatHistory.add(AiChatMessage(role: 'error', content: 'Błąd połączenia z AI: $e', timestamp: DateTime.now()));
+    } finally {
+      aiChatBusy = false;
+      notifyListeners();
+      await saveAiChatHistory();
+    }
+  }
+
   Future<void> generateLocalPlan() async {
     plans
       ..clear()
@@ -1161,6 +1235,24 @@ class AppStore extends ChangeNotifier {
 bool sameDay(DateTime a, DateTime b) => a.year == b.year && a.month == b.month && a.day == b.day;
 
 String idNow() => DateTime.now().microsecondsSinceEpoch.toString();
+
+// --- Etap 16: AI Trainer czat ---
+
+class AiChatMessage {
+  const AiChatMessage({required this.role, required this.content, required this.timestamp});
+
+  final String role; // 'user' | 'assistant' | 'error'
+  final String content;
+  final DateTime timestamp;
+
+  Map<String, dynamic> toJson() => {'role': role, 'content': content, 'timestamp': timestamp.toIso8601String()};
+
+  factory AiChatMessage.fromJson(Map<String, dynamic> json) => AiChatMessage(
+        role: json['role']?.toString() ?? 'user',
+        content: json['content']?.toString() ?? '',
+        timestamp: DateTime.tryParse(json['timestamp']?.toString() ?? '') ?? DateTime.now(),
+      );
+}
 
 class WorkoutRestRecommendation {
   const WorkoutRestRecommendation({
@@ -2263,6 +2355,8 @@ class AiBackendService {
 
   Future<Map<String, dynamic>> analyzeForm(Map<String, dynamic> body) => _post(['/analyze-exercise-form', '/workout/analyze-form'], body);
 
+  Future<Map<String, dynamic>> chat(Map<String, dynamic> body) => _post(['/chat', '/ai/chat'], body);
+
   Future<Map<String, dynamic>> _post(List<String> paths, Map<String, dynamic> body) async {
     final base = _cleanBase.isEmpty ? kDefaultBackendUrl : _cleanBase;
     Object? lastError;
@@ -2437,11 +2531,12 @@ class _HomeShellState extends State<HomeShell> {
         onHistory: () => openStandalonePage(const HistoryPage()),
         onPlans: () => setState(() => index = 2),
         onProgress: () => setState(() => index = 3),
-        onSettings: () => setState(() => index = 4),
+        onSettings: () => setState(() => index = 5),
       ),
       const ExercisesPage(),
       const PlanPage(),
       const ProgressPage(),
+      const AiTrainerPage(),
       const MorePage(),
     ];
     return Scaffold(
@@ -2457,6 +2552,7 @@ class _HomeShellState extends State<HomeShell> {
             NavigationDestination(icon: Icon(Icons.fitness_center_outlined), selectedIcon: Icon(Icons.fitness_center), label: 'Ćwiczenia'),
             NavigationDestination(icon: Icon(Icons.calendar_month_outlined), selectedIcon: Icon(Icons.calendar_month), label: 'Plan'),
             NavigationDestination(icon: Icon(Icons.show_chart_outlined), selectedIcon: Icon(Icons.show_chart), label: 'Postęp'),
+            NavigationDestination(icon: Icon(Icons.smart_toy_outlined), selectedIcon: Icon(Icons.smart_toy_rounded), label: 'AI'),
             NavigationDestination(icon: Icon(Icons.more_horiz), selectedIcon: Icon(Icons.more), label: 'Więcej'),
           ],
         ),
@@ -13005,4 +13101,389 @@ class HumanExercisePainter extends CustomPainter {
 
   @override
   bool shouldRepaint(covariant HumanExercisePainter oldDelegate) => oldDelegate.type != type || oldDelegate.progress != progress || oldDelegate.bodyColor != bodyColor || oldDelegate.backgroundColor != backgroundColor || oldDelegate.accentColor != accentColor;
+}
+
+// ============================================================
+// Etap 16: AI Trainer — czat
+// ============================================================
+
+const List<String> _kQuickQuestions = [
+  'Co trenować dzisiaj?',
+  'Czy zwiększyć ciężar?',
+  'Czy potrzebuję odpoczynku?',
+  'Jak poprawić technikę?',
+  'Co zrobić, gdy nie mam siły?',
+];
+
+class AiTrainerPage extends StatefulWidget {
+  const AiTrainerPage({super.key});
+
+  @override
+  State<AiTrainerPage> createState() => _AiTrainerPageState();
+}
+
+class _AiTrainerPageState extends State<AiTrainerPage> {
+  final TextEditingController _controller = TextEditingController();
+  final ScrollController _scrollController = ScrollController();
+
+  @override
+  void dispose() {
+    _controller.dispose();
+    _scrollController.dispose();
+    super.dispose();
+  }
+
+  void _send(String text) {
+    final store = AppScope.of(context);
+    final trimmed = text.trim();
+    if (trimmed.isEmpty || store.aiChatBusy) return;
+    _controller.clear();
+    store.chatWithAi(trimmed);
+    Future.delayed(const Duration(milliseconds: 200), _scrollToBottom);
+  }
+
+  void _scrollToBottom() {
+    if (_scrollController.hasClients) {
+      _scrollController.animateTo(
+        _scrollController.position.maxScrollExtent,
+        duration: const Duration(milliseconds: 300),
+        curve: Curves.easeOut,
+      );
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final store = AppScope.of(context);
+    final scheme = Theme.of(context).colorScheme;
+    final isDark = Theme.of(context).brightness == Brightness.dark;
+
+    WidgetsBinding.instance.addPostFrameCallback((_) => _scrollToBottom());
+
+    return Column(
+      children: [
+        // Header
+        Padding(
+          padding: const EdgeInsets.fromLTRB(16, 16, 8, 0),
+          child: Row(
+            children: [
+              CircleAvatar(
+                radius: 22,
+                backgroundColor: scheme.primaryContainer,
+                foregroundColor: scheme.onPrimaryContainer,
+                child: const Icon(Icons.smart_toy_rounded, size: 22),
+              ),
+              const SizedBox(width: 12),
+              Expanded(
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Text('AI Trainer', style: Theme.of(context).textTheme.titleMedium?.copyWith(fontWeight: FontWeight.w800)),
+                    Text('Asystent treningowy — zadaj pytanie', style: Theme.of(context).textTheme.bodySmall?.copyWith(color: scheme.onSurfaceVariant)),
+                  ],
+                ),
+              ),
+              if (store.aiChatHistory.isNotEmpty)
+                IconButton(
+                  icon: const Icon(Icons.delete_sweep_rounded),
+                  tooltip: 'Wyczyść historię',
+                  onPressed: () async {
+                    final ok = await showDialog<bool>(
+                      context: context,
+                      builder: (ctx) => AlertDialog(
+                        title: const Text('Wyczyścić historię?'),
+                        content: const Text('Wszystkie wiadomości zostaną usunięte.'),
+                        actions: [
+                          TextButton(onPressed: () => Navigator.pop(ctx, false), child: const Text('Anuluj')),
+                          TextButton(onPressed: () => Navigator.pop(ctx, true), child: const Text('Wyczyść')),
+                        ],
+                      ),
+                    );
+                    if (ok == true && context.mounted) AppScope.of(context).clearAiChatHistory();
+                  },
+                ),
+            ],
+          ),
+        ),
+
+        // Disclaimer
+        Container(
+          margin: const EdgeInsets.fromLTRB(16, 10, 16, 0),
+          padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+          decoration: BoxDecoration(
+            color: scheme.tertiaryContainer.withOpacity(.55),
+            borderRadius: BorderRadius.circular(12),
+          ),
+          child: Row(
+            children: [
+              Icon(Icons.info_outline_rounded, size: 16, color: scheme.onTertiaryContainer),
+              const SizedBox(width: 8),
+              Expanded(
+                child: Text(
+                  'AI nie zastępuje lekarza ani fizjoterapeuty. W razie bólu lub kontuzji skonsultuj się ze specjalistą.',
+                  style: Theme.of(context).textTheme.bodySmall?.copyWith(color: scheme.onTertiaryContainer),
+                ),
+              ),
+            ],
+          ),
+        ),
+
+        // Quick questions
+        if (store.aiChatHistory.isEmpty)
+          Padding(
+            padding: const EdgeInsets.fromLTRB(16, 12, 16, 0),
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Text('Szybkie pytania', style: Theme.of(context).textTheme.labelMedium?.copyWith(color: scheme.onSurfaceVariant)),
+                const SizedBox(height: 8),
+                Wrap(
+                  spacing: 8,
+                  runSpacing: 8,
+                  children: _kQuickQuestions
+                      .map(
+                        (q) => ActionChip(
+                          label: Text(q, style: const TextStyle(fontSize: 12)),
+                          onPressed: store.aiChatBusy ? null : () => _send(q),
+                          avatar: const Icon(Icons.flash_on_rounded, size: 14),
+                        ),
+                      )
+                      .toList(),
+                ),
+              ],
+            ),
+          ),
+
+        // Messages
+        Expanded(
+          child: store.aiChatHistory.isEmpty
+              ? Center(
+                  child: Column(
+                    mainAxisSize: MainAxisSize.min,
+                    children: [
+                      Icon(Icons.chat_bubble_outline_rounded, size: 48, color: scheme.onSurfaceVariant.withOpacity(.4)),
+                      const SizedBox(height: 12),
+                      Text('Zadaj pierwsze pytanie', style: Theme.of(context).textTheme.bodyMedium?.copyWith(color: scheme.onSurfaceVariant)),
+                    ],
+                  ),
+                )
+              : ListView.builder(
+                  controller: _scrollController,
+                  padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
+                  itemCount: store.aiChatHistory.length + (store.aiChatBusy ? 1 : 0),
+                  itemBuilder: (context, i) {
+                    if (i == store.aiChatHistory.length && store.aiChatBusy) {
+                      return const _TypingIndicator();
+                    }
+                    final msg = store.aiChatHistory[i];
+                    return _ChatBubble(message: msg, isDark: isDark);
+                  },
+                ),
+        ),
+
+        // Quick questions (when history not empty — smaller strip)
+        if (store.aiChatHistory.isNotEmpty)
+          SizedBox(
+            height: 44,
+            child: ListView(
+              padding: const EdgeInsets.symmetric(horizontal: 16),
+              scrollDirection: Axis.horizontal,
+              children: _kQuickQuestions
+                  .map(
+                    (q) => Padding(
+                      padding: const EdgeInsets.only(right: 8),
+                      child: ActionChip(
+                        label: Text(q, style: const TextStyle(fontSize: 11)),
+                        onPressed: store.aiChatBusy ? null : () => _send(q),
+                        visualDensity: VisualDensity.compact,
+                      ),
+                    ),
+                  )
+                  .toList(),
+            ),
+          ),
+
+        // Input
+        SafeArea(
+          top: false,
+          child: Padding(
+            padding: const EdgeInsets.fromLTRB(16, 8, 16, 12),
+            child: Row(
+              children: [
+                Expanded(
+                  child: TextField(
+                    controller: _controller,
+                    enabled: !store.aiChatBusy,
+                    textInputAction: TextInputAction.send,
+                    onSubmitted: _send,
+                    maxLines: 3,
+                    minLines: 1,
+                    decoration: InputDecoration(
+                      hintText: 'Napisz pytanie do trenera AI…',
+                      contentPadding: const EdgeInsets.symmetric(horizontal: 16, vertical: 10),
+                      suffixIcon: store.aiChatBusy
+                          ? const Padding(
+                              padding: EdgeInsets.all(12),
+                              child: SizedBox(width: 20, height: 20, child: CircularProgressIndicator(strokeWidth: 2)),
+                            )
+                          : null,
+                    ),
+                  ),
+                ),
+                const SizedBox(width: 8),
+                FilledButton(
+                  onPressed: store.aiChatBusy ? null : () => _send(_controller.text),
+                  style: FilledButton.styleFrom(
+                    padding: const EdgeInsets.all(14),
+                    minimumSize: const Size(48, 48),
+                  ),
+                  child: const Icon(Icons.send_rounded, size: 20),
+                ),
+              ],
+            ),
+          ),
+        ),
+      ],
+    );
+  }
+}
+
+class _ChatBubble extends StatelessWidget {
+  const _ChatBubble({required this.message, required this.isDark});
+
+  final AiChatMessage message;
+  final bool isDark;
+
+  @override
+  Widget build(BuildContext context) {
+    final scheme = Theme.of(context).colorScheme;
+    final isUser = message.role == 'user';
+    final isError = message.role == 'error';
+
+    final bubbleColor = isError
+        ? scheme.errorContainer
+        : isUser
+            ? scheme.primaryContainer
+            : isDark
+                ? const Color(0xFF1E2A22)
+                : scheme.surfaceContainerHighest;
+
+    final textColor = isError
+        ? scheme.onErrorContainer
+        : isUser
+            ? scheme.onPrimaryContainer
+            : scheme.onSurface;
+
+    return Padding(
+      padding: const EdgeInsets.only(bottom: 10),
+      child: Row(
+        mainAxisAlignment: isUser ? MainAxisAlignment.end : MainAxisAlignment.start,
+        crossAxisAlignment: CrossAxisAlignment.end,
+        children: [
+          if (!isUser) ...[
+            CircleAvatar(
+              radius: 14,
+              backgroundColor: isError ? scheme.errorContainer : scheme.primaryContainer,
+              foregroundColor: isError ? scheme.onErrorContainer : scheme.onPrimaryContainer,
+              child: Icon(isError ? Icons.warning_rounded : Icons.smart_toy_rounded, size: 14),
+            ),
+            const SizedBox(width: 6),
+          ],
+          Flexible(
+            child: Container(
+              padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
+              decoration: BoxDecoration(
+                color: bubbleColor,
+                borderRadius: BorderRadius.only(
+                  topLeft: const Radius.circular(18),
+                  topRight: const Radius.circular(18),
+                  bottomLeft: Radius.circular(isUser ? 18 : 4),
+                  bottomRight: Radius.circular(isUser ? 4 : 18),
+                ),
+              ),
+              child: Text(message.content, style: TextStyle(color: textColor, fontSize: 14, height: 1.45)),
+            ),
+          ),
+          if (isUser) const SizedBox(width: 6),
+        ],
+      ),
+    );
+  }
+}
+
+class _TypingIndicator extends StatefulWidget {
+  const _TypingIndicator();
+
+  @override
+  State<_TypingIndicator> createState() => _TypingIndicatorState();
+}
+
+class _TypingIndicatorState extends State<_TypingIndicator> with SingleTickerProviderStateMixin {
+  late AnimationController _ctrl;
+  late Animation<double> _anim;
+
+  @override
+  void initState() {
+    super.initState();
+    _ctrl = AnimationController(vsync: this, duration: const Duration(milliseconds: 900))..repeat(reverse: true);
+    _anim = CurvedAnimation(parent: _ctrl, curve: Curves.easeInOut);
+  }
+
+  @override
+  void dispose() {
+    _ctrl.dispose();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final scheme = Theme.of(context).colorScheme;
+    return Padding(
+      padding: const EdgeInsets.only(bottom: 10),
+      child: Row(
+        children: [
+          CircleAvatar(
+            radius: 14,
+            backgroundColor: scheme.primaryContainer,
+            foregroundColor: scheme.onPrimaryContainer,
+            child: const Icon(Icons.smart_toy_rounded, size: 14),
+          ),
+          const SizedBox(width: 6),
+          AnimatedBuilder(
+            animation: _anim,
+            builder: (context, _) => Container(
+              padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
+              decoration: BoxDecoration(color: scheme.surfaceContainerHighest, borderRadius: BorderRadius.circular(18)),
+              child: Row(
+                mainAxisSize: MainAxisSize.min,
+                children: List.generate(
+                  3,
+                  (i) => Padding(
+                    padding: const EdgeInsets.symmetric(horizontal: 3),
+                    child: AnimatedBuilder(
+                      animation: _ctrl,
+                      builder: (_, __) {
+                        final phase = (_ctrl.value + i * 0.3) % 1.0;
+                        final size = 6.0 + 3.0 * math.sin(phase * math.pi);
+                        return SizedBox(
+                          width: size,
+                          height: size,
+                          child: DecoratedBox(
+                            decoration: BoxDecoration(
+                              color: scheme.onSurfaceVariant.withOpacity(.7),
+                              shape: BoxShape.circle,
+                            ),
+                          ),
+                        );
+                      },
+                    ),
+                  ),
+                ),
+              ),
+            ),
+          ),
+        ],
+      ),
+    );
+  }
 }
