@@ -6,6 +6,7 @@ export 'exercise_library_preferences.dart';
 export 'health_connect_snapshot.dart';
 export 'trainer_enums.dart';
 export 'training_impact.dart';
+export 'warmup_routines.dart';
 export 'workout_plan.dart';
 export 'workout_session.dart';
 export 'workout_set.dart';

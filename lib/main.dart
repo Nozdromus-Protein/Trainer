@@ -173,6 +173,11 @@ class AppStore extends ChangeNotifier {
   bool healthConnectBusy = false;
 
   static const _settingsKey = 'workout_settings_v1';
+  static const _warmupStatusKey = 'warmup_status_v1';
+
+  // Status rozgrzewki dla danej sesji treningowej: 'done' / 'skipped'.
+  // Trzymany lokalnie, żeby karta rozgrzewki nie wracała po oznaczeniu.
+  final Map<String, String> _warmupStatusBySession = {};
 
   Future<void> load() async {
     final trainerData = await _trainerRepository.load();
@@ -214,6 +219,22 @@ class AppStore extends ChangeNotifier {
     if (rawSettings != null && rawSettings.isNotEmpty) {
       try {
         settings = AppSettings.fromJson(Map<String, dynamic>.from(jsonDecode(rawSettings)));
+      } catch (_) {}
+    }
+
+    final rawWarmupStatus = prefs.getString(_warmupStatusKey);
+    if (rawWarmupStatus != null && rawWarmupStatus.isNotEmpty) {
+      try {
+        final decoded = jsonDecode(rawWarmupStatus);
+        if (decoded is Map) {
+          _warmupStatusBySession
+            ..clear()
+            ..addAll(
+              decoded.map(
+                (key, value) => MapEntry(key.toString(), value.toString()),
+              ),
+            );
+        }
       } catch (_) {}
     }
 
@@ -411,6 +432,31 @@ class AppStore extends ChangeNotifier {
   Future<void> saveSettings() async {
     final prefs = await SharedPreferences.getInstance();
     await prefs.setString(_settingsKey, jsonEncode(settings.toJson()));
+  }
+
+  /// Zwraca status rozgrzewki dla sesji ('done' / 'skipped') albo null,
+  /// gdy użytkownik jeszcze nie zdecydował.
+  String? warmupStatusForSession(String sessionId) =>
+      _warmupStatusBySession[sessionId];
+
+  /// Zapisuje status rozgrzewki dla sesji i utrwala go lokalnie.
+  Future<void> setWarmupStatus(String sessionId, String status) async {
+    if (sessionId.isEmpty) return;
+    _warmupStatusBySession[sessionId] = status;
+    // Ograniczamy rozmiar mapy, zachowując najnowsze wpisy (LinkedHashMap
+    // trzyma kolejność wstawiania).
+    const maxEntries = 40;
+    if (_warmupStatusBySession.length > maxEntries) {
+      final staleKeys = _warmupStatusBySession.keys
+          .take(_warmupStatusBySession.length - maxEntries)
+          .toList();
+      for (final key in staleKeys) {
+        _warmupStatusBySession.remove(key);
+      }
+    }
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.setString(_warmupStatusKey, jsonEncode(_warmupStatusBySession));
+    notifyListeners();
   }
 
   Future<void> saveCustomExercises() async {
@@ -6429,12 +6475,16 @@ class _ActiveWorkoutPageState extends State<ActiveWorkoutPage> {
       ),
     );
     if (confirmed != true) return;
+    final stretchingFocus = warmupFocusForSession(session, store.customExercises);
     final summary = await store.finishActiveWorkout();
     if (!mounted || summary == null) return;
     leaving = true;
     await Navigator.of(context).pushReplacement(
       MaterialPageRoute<void>(
-        builder: (_) => WorkoutSummaryPage(summary: summary),
+        builder: (_) => WorkoutSummaryPage(
+          summary: summary,
+          stretchingFocus: stretchingFocus,
+        ),
       ),
     );
   }
@@ -6476,6 +6526,8 @@ class _ActiveWorkoutPageState extends State<ActiveWorkoutPage> {
                 elapsed: elapsed,
                 onEditNote: () => showActiveSessionNoteSheet(context),
               ),
+              const SizedBox(height: 12),
+              _WorkoutWarmupCard(session: session, store: store),
               const SizedBox(height: 12),
               _CurrentExerciseCard(
                 exercise: exercise,
@@ -6646,6 +6698,223 @@ class _ActiveWorkoutPageState extends State<ActiveWorkoutPage> {
               ),
             ],
           ),
+        ),
+      ),
+    );
+  }
+}
+
+// --- Etap 15: rozgrzewka, mobility i stretching -------------------------
+
+/// Statusy rozgrzewki przechowywane w [AppStore].
+const String kWarmupStatusDone = 'done';
+const String kWarmupStatusSkipped = 'skipped';
+
+/// Dobiera partię (focus) rozgrzewki/rozciągania na podstawie ćwiczeń sesji.
+WarmupFocus warmupFocusForSession(
+  ActiveWorkoutSession session,
+  List<Exercise> customExercises,
+) {
+  final groups = <MuscleGroup>[];
+  for (final activeExercise in session.exercises) {
+    final definition = ExerciseRepo.byId(activeExercise.exerciseId, customExercises);
+    groups.addAll(definition.muscleGroups);
+  }
+  return WarmupLibrary.focusForMuscleGroups(groups);
+}
+
+/// Formatuje procedurę do czytelnego tekstu w oknie dialogowym.
+String formatTrainingRoutine(TrainingRoutine routine) {
+  final buffer = StringBuffer();
+  for (var index = 0; index < routine.steps.length; index++) {
+    final step = routine.steps[index];
+    if (routine.numbered) {
+      buffer.writeln('${index + 1}. $step');
+    } else {
+      buffer.writeln(step);
+    }
+  }
+  return buffer.toString().trim();
+}
+
+/// Karta rozgrzewki pokazywana na początku aktywnego treningu.
+/// Sugeruje rozgrzewkę zależnie od partii, pozwala oznaczyć ją jako
+/// wykonaną albo pominąć, a także podejrzeć mobilizację.
+class _WorkoutWarmupCard extends StatelessWidget {
+  const _WorkoutWarmupCard({required this.session, required this.store});
+
+  final ActiveWorkoutSession session;
+  final AppStore store;
+
+  @override
+  Widget build(BuildContext context) {
+    final theme = Theme.of(context);
+    final focus = warmupFocusForSession(session, store.customExercises);
+    final warmup = WarmupLibrary.warmupForFocus(focus);
+    final mobility = WarmupLibrary.mobilityForFocus(focus);
+    final status = store.warmupStatusForSession(session.id);
+
+    if (status == kWarmupStatusDone || status == kWarmupStatusSkipped) {
+      final done = status == kWarmupStatusDone;
+      return Card(
+        child: ListTile(
+          leading: Icon(
+            done ? Icons.check_circle_rounded : Icons.fast_forward_rounded,
+            color: done ? theme.colorScheme.primary : theme.colorScheme.onSurfaceVariant,
+          ),
+          title: Text(done ? 'Rozgrzewka wykonana' : 'Rozgrzewka pominięta'),
+          subtitle: Text('Sugestia: ${warmup.title}'),
+          trailing: TextButton(
+            onPressed: () => showSmartTextDialog(
+              context,
+              warmup.title,
+              formatTrainingRoutine(warmup),
+            ),
+            child: const Text('Pokaż'),
+          ),
+        ),
+      );
+    }
+
+    return Card(
+      child: Padding(
+        padding: const EdgeInsets.all(16),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Row(
+              children: [
+                Icon(Icons.local_fire_department_rounded, color: theme.colorScheme.primary),
+                const SizedBox(width: 8),
+                Expanded(
+                  child: Text(
+                    'Rozgrzewka przed treningiem',
+                    style: theme.textTheme.titleMedium?.copyWith(fontWeight: FontWeight.w900),
+                  ),
+                ),
+              ],
+            ),
+            const SizedBox(height: 4),
+            Text(
+              'Sugestia pod partię: ${focus.label}',
+              style: theme.textTheme.bodySmall?.copyWith(color: theme.colorScheme.onSurfaceVariant),
+            ),
+            const SizedBox(height: 10),
+            for (final step in warmup.steps.take(3))
+              Padding(
+                padding: const EdgeInsets.only(bottom: 4),
+                child: Text('•  $step', style: theme.textTheme.bodyMedium),
+              ),
+            const SizedBox(height: 6),
+            Wrap(
+              spacing: 8,
+              runSpacing: 8,
+              children: [
+                FilledButton.tonal(
+                  onPressed: () => showSmartTextDialog(
+                    context,
+                    warmup.title,
+                    formatTrainingRoutine(warmup),
+                  ),
+                  child: const Text('Cała rozgrzewka'),
+                ),
+                OutlinedButton(
+                  onPressed: () => showSmartTextDialog(
+                    context,
+                    mobility.title,
+                    formatTrainingRoutine(mobility),
+                  ),
+                  child: const Text('Mobilność'),
+                ),
+              ],
+            ),
+            const SizedBox(height: 10),
+            LayoutBuilder(
+              builder: (context, constraints) {
+                final markDone = FilledButton.icon(
+                  onPressed: () => store.setWarmupStatus(session.id, kWarmupStatusDone),
+                  icon: const Icon(Icons.check_rounded),
+                  label: const Text('Wykonana'),
+                );
+                final skip = OutlinedButton.icon(
+                  onPressed: () => store.setWarmupStatus(session.id, kWarmupStatusSkipped),
+                  icon: const Icon(Icons.close_rounded),
+                  label: const Text('Pomiń'),
+                );
+                if (constraints.maxWidth < 360) {
+                  return Column(
+                    crossAxisAlignment: CrossAxisAlignment.stretch,
+                    children: [markDone, const SizedBox(height: 8), skip],
+                  );
+                }
+                return Row(
+                  children: [
+                    Expanded(child: markDone),
+                    const SizedBox(width: 10),
+                    Expanded(child: skip),
+                  ],
+                );
+              },
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+}
+
+/// Karta sugerowanego rozciągania pokazywana po zakończeniu treningu.
+class _WorkoutStretchingCard extends StatelessWidget {
+  const _WorkoutStretchingCard({required this.focus});
+
+  final WarmupFocus focus;
+
+  @override
+  Widget build(BuildContext context) {
+    final theme = Theme.of(context);
+    final stretching = WarmupLibrary.stretchingForFocus(focus);
+    return Card(
+      child: Padding(
+        padding: const EdgeInsets.all(16),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Row(
+              children: [
+                Icon(Icons.self_improvement_rounded, color: theme.colorScheme.primary),
+                const SizedBox(width: 8),
+                Expanded(
+                  child: Text(
+                    'Rozciąganie po treningu',
+                    style: theme.textTheme.titleMedium?.copyWith(fontWeight: FontWeight.w900),
+                  ),
+                ),
+              ],
+            ),
+            const SizedBox(height: 4),
+            Text(
+              'Sugestia pod partię: ${focus.label}',
+              style: theme.textTheme.bodySmall?.copyWith(color: theme.colorScheme.onSurfaceVariant),
+            ),
+            const SizedBox(height: 10),
+            for (final step in stretching.steps.take(3))
+              Padding(
+                padding: const EdgeInsets.only(bottom: 4),
+                child: Text('•  $step', style: theme.textTheme.bodyMedium),
+              ),
+            const SizedBox(height: 6),
+            Align(
+              alignment: Alignment.centerLeft,
+              child: FilledButton.tonal(
+                onPressed: () => showSmartTextDialog(
+                  context,
+                  stretching.title,
+                  formatTrainingRoutine(stretching),
+                ),
+                child: const Text('Całe rozciąganie'),
+              ),
+            ),
+          ],
         ),
       ),
     );
@@ -7048,9 +7317,14 @@ class _ActiveWorkoutExerciseTile extends StatelessWidget {
 }
 
 class WorkoutSummaryPage extends StatelessWidget {
-  const WorkoutSummaryPage({super.key, required this.summary});
+  const WorkoutSummaryPage({
+    super.key,
+    required this.summary,
+    this.stretchingFocus = WarmupFocus.general,
+  });
 
   final CompletedWorkoutSummary summary;
+  final WarmupFocus stretchingFocus;
 
   @override
   Widget build(BuildContext context) {
@@ -7095,6 +7369,8 @@ class WorkoutSummaryPage extends StatelessWidget {
               const SizedBox(height: 10),
               _TrainingImpactSummaryCard(impact: summary.trainingImpact!),
             ],
+            const SizedBox(height: 10),
+            _WorkoutStretchingCard(focus: stretchingFocus),
             const SizedBox(height: 18),
             FilledButton.icon(
               onPressed: () => Navigator.of(context).pop(),
