@@ -177,6 +177,9 @@ class AppStore extends ChangeNotifier {
   static const _settingsKey = 'workout_settings_v1';
   static const _warmupStatusKey = 'warmup_status_v1';
   static const _aiChatKey = 'ai_chat_history_v1';
+  static const _workoutAiAnalysesKey = 'workout_ai_analyses_v1';
+
+  final Map<String, WorkoutAiAnalysis> _workoutAiAnalyses = {};
 
   // Status rozgrzewki dla danej sesji treningowej: 'done' / 'skipped'.
   // Trzymany lokalnie, żeby karta rozgrzewki nie wracała po oznaczeniu.
@@ -236,6 +239,20 @@ class AppStore extends ChangeNotifier {
               decoded.map(
                 (key, value) => MapEntry(key.toString(), value.toString()),
               ),
+            );
+        }
+      } catch (_) {}
+    }
+
+    final rawAnalyses = prefs.getString(_workoutAiAnalysesKey);
+    if (rawAnalyses != null && rawAnalyses.isNotEmpty) {
+      try {
+        final decoded = jsonDecode(rawAnalyses);
+        if (decoded is Map) {
+          _workoutAiAnalyses
+            ..clear()
+            ..addAll(
+              decoded.map((k, v) => MapEntry(k.toString(), WorkoutAiAnalysis.fromJson(Map<String, dynamic>.from(v as Map)))),
             );
         }
       } catch (_) {}
@@ -1164,6 +1181,74 @@ class AppStore extends ChangeNotifier {
     }
   }
 
+  WorkoutAiAnalysis? workoutAiAnalysisFor(String sessionId) => _workoutAiAnalyses[sessionId];
+
+  Future<void> _saveWorkoutAiAnalyses() async {
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.setString(
+      _workoutAiAnalysesKey,
+      jsonEncode(_workoutAiAnalyses.map((k, v) => MapEntry(k, v.toJson()))),
+    );
+  }
+
+  Future<WorkoutAiAnalysis> analyzeCompletedWorkout(CompletedWorkoutSummary summary) async {
+    aiBusy = true;
+    notifyListeners();
+    try {
+      final sessionLogs = logs.where((l) => l.sessionId == summary.sessionId).toList();
+      final exerciseDetails = sessionLogs.map((l) => {
+        'exercise_id': l.exerciseId,
+        'sets': l.sets,
+        'reps': l.reps,
+        'weight_kg': l.weightKg,
+        'rpe': l.rpe,
+        'duration_sec': l.durationSec,
+        'calories': l.calories,
+      }).toList();
+
+      // Poprzednie treningi z ostatnich 7 dni jako kontekst historyczny
+      final recentHistory = logsBetween(
+        summary.startedAt.subtract(const Duration(days: 7)),
+        summary.startedAt.subtract(const Duration(seconds: 1)),
+      );
+      final recentByDate = <String, List<WorkoutLog>>{};
+      for (final l in recentHistory) {
+        final k = l.date.toIso8601String().substring(0, 10);
+        recentByDate.putIfAbsent(k, () => []).add(l);
+      }
+
+      final api = AiBackendService(settings.backendUrl);
+      final result = await api.analyzeWorkout({
+        'session': {
+          'id': summary.sessionId,
+          'name': summary.name,
+          'started_at': summary.startedAt.toIso8601String(),
+          'ended_at': summary.endedAt.toIso8601String(),
+          'duration_minutes': summary.duration.inMinutes,
+          'exercise_count': summary.exerciseCount,
+          'set_count': summary.setCount,
+          'volume_kg': summary.volume,
+          'average_rpe': summary.averageRpe,
+        },
+        'exercises': exerciseDetails,
+        'recent_history': recentByDate.entries.map((e) => {
+          'date': e.key,
+          'exercises': e.value.map((l) => {'id': l.exerciseId, 'sets': l.sets, 'reps': l.reps, 'weight_kg': l.weightKg}).toList(),
+        }).toList(),
+        'user': settings.toAiProfile(),
+      });
+
+      final analysis = WorkoutAiAnalysis.fromApiResult(summary.sessionId, result);
+      _workoutAiAnalyses[summary.sessionId] = analysis;
+      await _saveWorkoutAiAnalyses();
+      notifyListeners();
+      return analysis;
+    } finally {
+      aiBusy = false;
+      notifyListeners();
+    }
+  }
+
   Future<void> saveAiChatHistory() async {
     final prefs = await SharedPreferences.getInstance();
     // Trzymaj max 100 ostatnich wiadomości
@@ -1235,6 +1320,78 @@ class AppStore extends ChangeNotifier {
 bool sameDay(DateTime a, DateTime b) => a.year == b.year && a.month == b.month && a.day == b.day;
 
 String idNow() => DateTime.now().microsecondsSinceEpoch.toString();
+
+// --- Etap 17: AI analiza treningu ---
+
+class WorkoutAiAnalysis {
+  const WorkoutAiAnalysis({
+    required this.sessionId,
+    required this.timestamp,
+    required this.rating,
+    required this.wentWell,
+    required this.improvable,
+    required this.increaseWeight,
+    required this.fatigueWarning,
+    required this.nextStep,
+    required this.rawSummary,
+  });
+
+  final String sessionId;
+  final DateTime timestamp;
+  final String rating;
+  final String wentWell;
+  final String improvable;
+  final String increaseWeight;
+  final String fatigueWarning;
+  final String nextStep;
+  final String rawSummary;
+
+  static WorkoutAiAnalysis fromApiResult(String sessionId, Map<String, dynamic> result) {
+    String pick(List<String> keys) {
+      for (final k in keys) {
+        final v = result[k];
+        if (v != null && v.toString().trim().isNotEmpty) return v.toString().trim();
+      }
+      return '';
+    }
+    final raw = (result['summary'] ?? result['analysis'] ?? result['message'] ?? result['reply'] ?? prettyJson(result)).toString().trim();
+    return WorkoutAiAnalysis(
+      sessionId: sessionId,
+      timestamp: DateTime.now(),
+      rating: pick(['rating', 'ocena', 'score', 'grade']),
+      wentWell: pick(['went_well', 'co_poszlo_dobrze', 'positives', 'strengths', 'dobre']),
+      improvable: pick(['improvable', 'co_poprawic', 'improvements', 'weaknesses', 'poprawic']),
+      increaseWeight: pick(['increase_weight', 'zwiekszac_ciezar', 'weight_recommendation', 'ciezar']),
+      fatigueWarning: pick(['fatigue_warning', 'zmeczenie', 'recovery', 'regeneracja']),
+      nextStep: pick(['next_step', 'nastepny_krok', 'recommendation', 'next', 'sugestia']),
+      rawSummary: raw,
+    );
+  }
+
+  Map<String, dynamic> toJson() => {
+        'sessionId': sessionId,
+        'timestamp': timestamp.toIso8601String(),
+        'rating': rating,
+        'wentWell': wentWell,
+        'improvable': improvable,
+        'increaseWeight': increaseWeight,
+        'fatigueWarning': fatigueWarning,
+        'nextStep': nextStep,
+        'rawSummary': rawSummary,
+      };
+
+  factory WorkoutAiAnalysis.fromJson(Map<String, dynamic> json) => WorkoutAiAnalysis(
+        sessionId: json['sessionId']?.toString() ?? '',
+        timestamp: DateTime.tryParse(json['timestamp']?.toString() ?? '') ?? DateTime.now(),
+        rating: json['rating']?.toString() ?? '',
+        wentWell: json['wentWell']?.toString() ?? '',
+        improvable: json['improvable']?.toString() ?? '',
+        increaseWeight: json['increaseWeight']?.toString() ?? '',
+        fatigueWarning: json['fatigueWarning']?.toString() ?? '',
+        nextStep: json['nextStep']?.toString() ?? '',
+        rawSummary: json['rawSummary']?.toString() ?? '',
+      );
+}
 
 // --- Etap 16: AI Trainer czat ---
 
@@ -7412,7 +7569,7 @@ class _ActiveWorkoutExerciseTile extends StatelessWidget {
   }
 }
 
-class WorkoutSummaryPage extends StatelessWidget {
+class WorkoutSummaryPage extends StatefulWidget {
   const WorkoutSummaryPage({
     super.key,
     required this.summary,
@@ -7423,7 +7580,32 @@ class WorkoutSummaryPage extends StatelessWidget {
   final WarmupFocus stretchingFocus;
 
   @override
+  State<WorkoutSummaryPage> createState() => _WorkoutSummaryPageState();
+}
+
+class _WorkoutSummaryPageState extends State<WorkoutSummaryPage> {
+  bool _aiLoading = false;
+  String? _aiError;
+
+  Future<void> _runAiAnalysis() async {
+    final store = AppScope.of(context);
+    setState(() {
+      _aiLoading = true;
+      _aiError = null;
+    });
+    try {
+      await store.analyzeCompletedWorkout(widget.summary);
+    } catch (e) {
+      if (mounted) setState(() => _aiError = 'Błąd AI: $e');
+    } finally {
+      if (mounted) setState(() => _aiLoading = false);
+    }
+  }
+
+  @override
   Widget build(BuildContext context) {
+    final store = AppScope.of(context);
+    final analysis = store.workoutAiAnalysisFor(widget.summary.sessionId);
     return Scaffold(
       appBar: AppBar(
         automaticallyImplyLeading: false,
@@ -7437,7 +7619,7 @@ class WorkoutSummaryPage extends StatelessWidget {
             const SizedBox(height: 12),
             Text('Trening zakończony', textAlign: TextAlign.center, style: Theme.of(context).textTheme.headlineMedium?.copyWith(fontWeight: FontWeight.w900)),
             const SizedBox(height: 6),
-            Text(summary.name, textAlign: TextAlign.center, style: Theme.of(context).textTheme.bodyLarge?.copyWith(color: Theme.of(context).colorScheme.onSurfaceVariant)),
+            Text(widget.summary.name, textAlign: TextAlign.center, style: Theme.of(context).textTheme.bodyLarge?.copyWith(color: Theme.of(context).colorScheme.onSurfaceVariant)),
             const SizedBox(height: 20),
             GridView.count(
               crossAxisCount: 2,
@@ -7447,10 +7629,10 @@ class WorkoutSummaryPage extends StatelessWidget {
               crossAxisSpacing: 10,
               childAspectRatio: 1.12,
               children: [
-                _WorkoutSummaryStat(label: 'Czas', value: formatWorkoutDuration(summary.duration), icon: Icons.timer_outlined),
-                _WorkoutSummaryStat(label: 'Ćwiczenia', value: '${summary.exerciseCount}', icon: Icons.fitness_center_rounded),
-                _WorkoutSummaryStat(label: 'Serie', value: '${summary.setCount}', icon: Icons.repeat_rounded),
-                _WorkoutSummaryStat(label: 'Objętość', value: '${summary.volume.round()} kg', icon: Icons.monitor_weight_outlined),
+                _WorkoutSummaryStat(label: 'Czas', value: formatWorkoutDuration(widget.summary.duration), icon: Icons.timer_outlined),
+                _WorkoutSummaryStat(label: 'Ćwiczenia', value: '${widget.summary.exerciseCount}', icon: Icons.fitness_center_rounded),
+                _WorkoutSummaryStat(label: 'Serie', value: '${widget.summary.setCount}', icon: Icons.repeat_rounded),
+                _WorkoutSummaryStat(label: 'Objętość', value: '${widget.summary.volume.round()} kg', icon: Icons.monitor_weight_outlined),
               ],
             ),
             const SizedBox(height: 10),
@@ -7458,15 +7640,23 @@ class WorkoutSummaryPage extends StatelessWidget {
               child: ListTile(
                 leading: const Icon(Icons.speed_rounded),
                 title: const Text('Średnie RPE'),
-                trailing: Text(summary.averageRpe == 0 ? '—' : summary.averageRpe.toStringAsFixed(1), style: Theme.of(context).textTheme.titleLarge?.copyWith(fontWeight: FontWeight.w900)),
+                trailing: Text(widget.summary.averageRpe == 0 ? '—' : widget.summary.averageRpe.toStringAsFixed(1), style: Theme.of(context).textTheme.titleLarge?.copyWith(fontWeight: FontWeight.w900)),
               ),
             ),
-            if (summary.trainingImpact != null) ...[
+            if (widget.summary.trainingImpact != null) ...[
               const SizedBox(height: 10),
-              _TrainingImpactSummaryCard(impact: summary.trainingImpact!),
+              _TrainingImpactSummaryCard(impact: widget.summary.trainingImpact!),
             ],
             const SizedBox(height: 10),
-            _WorkoutStretchingCard(focus: stretchingFocus),
+            _WorkoutStretchingCard(focus: widget.stretchingFocus),
+            const SizedBox(height: 10),
+            // Etap 17: karta analizy AI
+            _AiWorkoutAnalysisCard(
+              analysis: analysis,
+              loading: _aiLoading,
+              error: _aiError,
+              onAnalyze: _runAiAnalysis,
+            ),
             const SizedBox(height: 18),
             FilledButton.icon(
               onPressed: () => Navigator.of(context).pop(),
@@ -7475,6 +7665,137 @@ class WorkoutSummaryPage extends StatelessWidget {
             ),
           ],
         ),
+      ),
+    );
+  }
+}
+
+class _AiWorkoutAnalysisCard extends StatelessWidget {
+  const _AiWorkoutAnalysisCard({
+    required this.analysis,
+    required this.loading,
+    required this.error,
+    required this.onAnalyze,
+  });
+
+  final WorkoutAiAnalysis? analysis;
+  final bool loading;
+  final String? error;
+  final VoidCallback onAnalyze;
+
+  @override
+  Widget build(BuildContext context) {
+    final theme = Theme.of(context);
+    final scheme = theme.colorScheme;
+
+    return Card(
+      child: Padding(
+        padding: const EdgeInsets.all(16),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.stretch,
+          children: [
+            Row(
+              children: [
+                Icon(Icons.auto_awesome_rounded, color: scheme.primary),
+                const SizedBox(width: 8),
+                Expanded(child: Text('Analiza AI trenera', style: theme.textTheme.titleMedium?.copyWith(fontWeight: FontWeight.w900))),
+                if (analysis != null && !loading)
+                  IconButton(
+                    icon: const Icon(Icons.refresh_rounded),
+                    tooltip: 'Odśwież analizę',
+                    onPressed: onAnalyze,
+                    iconSize: 20,
+                  ),
+              ],
+            ),
+            if (analysis == null && !loading && error == null) ...[
+              const SizedBox(height: 10),
+              Text('Poproś AI o ocenę dzisiejszego treningu — co poszło dobrze, co poprawić i jaki jest następny krok.', style: theme.textTheme.bodySmall?.copyWith(color: scheme.onSurfaceVariant)),
+              const SizedBox(height: 12),
+              OutlinedButton.icon(
+                onPressed: onAnalyze,
+                icon: const Icon(Icons.auto_awesome_rounded),
+                label: const Text('Analiza AI'),
+              ),
+            ],
+            if (loading) ...[
+              const SizedBox(height: 12),
+              const Center(child: CircularProgressIndicator()),
+              const SizedBox(height: 8),
+              Text('AI analizuje Twój trening…', textAlign: TextAlign.center, style: theme.textTheme.bodySmall?.copyWith(color: scheme.onSurfaceVariant)),
+            ],
+            if (error != null && !loading) ...[
+              const SizedBox(height: 10),
+              Container(
+                padding: const EdgeInsets.all(12),
+                decoration: BoxDecoration(color: scheme.errorContainer, borderRadius: BorderRadius.circular(12)),
+                child: Text(error!, style: TextStyle(color: scheme.onErrorContainer, fontSize: 13)),
+              ),
+              const SizedBox(height: 10),
+              OutlinedButton.icon(
+                onPressed: onAnalyze,
+                icon: const Icon(Icons.refresh_rounded),
+                label: const Text('Spróbuj ponownie'),
+              ),
+            ],
+            if (analysis != null && !loading) ...[
+              const SizedBox(height: 12),
+              _AiAnalysisRow(icon: Icons.star_rounded, color: scheme.primary, label: 'Ocena', text: analysis!.rating.isNotEmpty ? analysis!.rating : '—'),
+              _AiAnalysisRow(icon: Icons.thumb_up_rounded, color: Colors.green, label: 'Co poszło dobrze', text: analysis!.wentWell.isNotEmpty ? analysis!.wentWell : '—'),
+              _AiAnalysisRow(icon: Icons.build_rounded, color: Colors.orange, label: 'Co poprawić', text: analysis!.improvable.isNotEmpty ? analysis!.improvable : '—'),
+              _AiAnalysisRow(icon: Icons.trending_up_rounded, color: scheme.secondary, label: 'Czy zwiększyć ciężar', text: analysis!.increaseWeight.isNotEmpty ? analysis!.increaseWeight : '—'),
+              if (analysis!.fatigueWarning.isNotEmpty)
+                _AiAnalysisRow(icon: Icons.warning_amber_rounded, color: Colors.deepOrange, label: 'Zmęczenie / regeneracja', text: analysis!.fatigueWarning),
+              _AiAnalysisRow(icon: Icons.arrow_forward_rounded, color: scheme.primary, label: 'Następny krok', text: analysis!.nextStep.isNotEmpty ? analysis!.nextStep : '—'),
+              if (analysis!.rawSummary.isNotEmpty &&
+                  analysis!.wentWell.isEmpty &&
+                  analysis!.rating.isEmpty) ...[
+                const SizedBox(height: 8),
+                Container(
+                  padding: const EdgeInsets.all(12),
+                  decoration: BoxDecoration(color: scheme.surfaceContainerHighest, borderRadius: BorderRadius.circular(12)),
+                  child: Text(analysis!.rawSummary, style: theme.textTheme.bodyMedium?.copyWith(height: 1.5)),
+                ),
+              ],
+              const SizedBox(height: 6),
+              Text('AI nie zmienia planu automatycznie. Zmiany wymagają Twojego potwierdzenia.', style: theme.textTheme.bodySmall?.copyWith(color: scheme.onSurfaceVariant, fontStyle: FontStyle.italic)),
+            ],
+          ],
+        ),
+      ),
+    );
+  }
+}
+
+class _AiAnalysisRow extends StatelessWidget {
+  const _AiAnalysisRow({required this.icon, required this.color, required this.label, required this.text});
+
+  final IconData icon;
+  final Color color;
+  final String label;
+  final String text;
+
+  @override
+  Widget build(BuildContext context) {
+    final theme = Theme.of(context);
+    return Padding(
+      padding: const EdgeInsets.only(bottom: 10),
+      child: Row(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Icon(icon, size: 18, color: color),
+          const SizedBox(width: 8),
+          Expanded(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Text(label, style: theme.textTheme.labelSmall?.copyWith(color: theme.colorScheme.onSurfaceVariant)),
+                const SizedBox(height: 2),
+                Text(text, style: theme.textTheme.bodyMedium?.copyWith(height: 1.4)),
+              ],
+            ),
+          ),
+        ],
       ),
     );
   }
