@@ -11,6 +11,7 @@ class ActiveWorkoutSession {
     required this.startedAt,
     required this.currentExerciseIndex,
     required this.exercises,
+    this.dayIndex = -1,
     this.note = '',
     this.restTimerEndsAt,
     this.restTimerRemainingSeconds = 0,
@@ -23,6 +24,10 @@ class ActiveWorkoutSession {
   final String planName;
   final int weekday;
   final String dayTitle;
+
+  /// Indeks dnia w programie ([WorkoutPlan.days]) albo -1, gdy trening ad-hoc.
+  /// Pozwala oznaczyć właściwy dzień jako ukończony po zakończeniu. Etap 31.
+  final int dayIndex;
   final DateTime startedAt;
   final int currentExerciseIndex;
   final List<ActiveWorkoutExercise> exercises;
@@ -72,6 +77,7 @@ class ActiveWorkoutSession {
     String? planName,
     int? weekday,
     String? dayTitle,
+    int? dayIndex,
     DateTime? startedAt,
     int? currentExerciseIndex,
     List<ActiveWorkoutExercise>? exercises,
@@ -88,6 +94,7 @@ class ActiveWorkoutSession {
       planName: planName ?? this.planName,
       weekday: weekday ?? this.weekday,
       dayTitle: dayTitle ?? this.dayTitle,
+      dayIndex: dayIndex ?? this.dayIndex,
       startedAt: startedAt ?? this.startedAt,
       currentExerciseIndex: currentExerciseIndex ?? this.currentExerciseIndex,
       exercises: exercises ?? this.exercises,
@@ -105,6 +112,7 @@ class ActiveWorkoutSession {
         'planName': planName,
         'weekday': weekday,
         'dayTitle': dayTitle,
+        'dayIndex': dayIndex,
         'startedAt': startedAt.toIso8601String(),
         'currentExerciseIndex': currentExerciseIndex,
         'exercises': exercises.map((exercise) => exercise.toJson()).toList(),
@@ -129,6 +137,7 @@ class ActiveWorkoutSession {
       planName: json['planName']?.toString() ?? 'Trening',
       weekday: (json['weekday'] as num?)?.toInt() ?? DateTime.monday,
       dayTitle: json['dayTitle']?.toString() ?? 'Trening',
+      dayIndex: (json['dayIndex'] as num?)?.toInt() ?? -1,
       startedAt: DateTime.tryParse(json['startedAt']?.toString() ?? '') ?? DateTime.now(),
       currentExerciseIndex: exercises.isEmpty ? 0 : rawIndex.clamp(0, exercises.length - 1),
       exercises: exercises,
@@ -228,6 +237,10 @@ class CompletedWorkoutSummary {
     required this.volume,
     required this.averageRpe,
     this.trainingImpact,
+    this.planId = '',
+    this.dayIndex = -1,
+    this.dayLabel = '',
+    this.skippedCount = 0,
   });
 
   final String sessionId;
@@ -239,6 +252,14 @@ class CompletedWorkoutSummary {
   final double volume;
   final double averageRpe;
   final TrainingImpact? trainingImpact;
+
+  /// Powiązanie z programem (Etap 31) — do aktualizacji postępu i opcji „powtórz/cofnij".
+  final String planId;
+  final int dayIndex;
+  final String dayLabel;
+
+  /// Liczba pominiętych ćwiczeń w sesji.
+  final int skippedCount;
 
   Duration get duration => endedAt.difference(startedAt);
 }

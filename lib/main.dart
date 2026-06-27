@@ -1065,14 +1065,26 @@ class AppStore extends ChangeNotifier {
   Future<bool> startActiveWorkout({
     required WorkoutPlan plan,
     required WorkoutDay day,
+    int? dayIndex,
   }) async {
     if (day.items.isEmpty) return false;
+    // Wyznacz indeks dnia w programie (Etap 31): jawny → po tożsamości → po dniu+tytule.
+    var resolvedDayIndex = dayIndex ?? -1;
+    if (resolvedDayIndex < 0) {
+      resolvedDayIndex = plan.days.indexWhere((entry) => identical(entry, day));
+    }
+    if (resolvedDayIndex < 0) {
+      resolvedDayIndex = plan.days.indexWhere(
+        (entry) => entry.weekday == day.weekday && entry.title == day.title,
+      );
+    }
     activeWorkoutSession = ActiveWorkoutSession(
       id: 'workout_${idNow()}',
       planId: plan.id,
       planName: plan.name,
       weekday: day.weekday,
       dayTitle: day.title,
+      dayIndex: resolvedDayIndex,
       startedAt: DateTime.now(),
       currentExerciseIndex: 0,
       exercises: day.items
@@ -1351,6 +1363,23 @@ class AppStore extends ChangeNotifier {
       endedAt: endedAt,
     );
     await upsertTrainingImpact(impact);
+
+    // Etap 31: oznacz dzień programu jako ukończony (postęp + odblokowanie kolejnego).
+    final skippedCount = session.exercises.where((exercise) => exercise.isSkipped).length;
+    final dayIndex = session.dayIndex;
+    var dayLabel = session.dayTitle;
+    if (dayIndex >= 0) {
+      final planIndex = plans.indexWhere((plan) => plan.id == session.planId);
+      if (planIndex >= 0 && dayIndex < plans[planIndex].days.length) {
+        dayLabel = 'Dzień ${dayIndex + 1}';
+        final plan = plans[planIndex];
+        if (!plan.completedDays.contains(dayIndex)) {
+          plans[planIndex] = plan.copyWith(completedDays: {...plan.completedDays, dayIndex});
+          await savePlans();
+        }
+      }
+    }
+
     final summary = CompletedWorkoutSummary(
       sessionId: session.id,
       name: sessionName,
@@ -1361,11 +1390,35 @@ class AppStore extends ChangeNotifier {
       volume: session.volume,
       averageRpe: session.averageRpe,
       trainingImpact: impact,
+      planId: session.planId,
+      dayIndex: dayIndex,
+      dayLabel: dayLabel,
+      skippedCount: skippedCount,
     );
     activeWorkoutSession = null;
     await saveActiveWorkoutSession();
     notifyListeners();
     return summary;
+  }
+
+  /// Etap 31: dopisuje informację zwrotną (ocena / ból) do notatki sesji w historii.
+  Future<void> appendWorkoutSessionNote(String sessionId, String addition) async {
+    final trimmed = addition.trim();
+    if (trimmed.isEmpty) return;
+    var changed = false;
+    for (var index = 0; index < logs.length; index++) {
+      final log = logs[index];
+      if (log.sessionId != sessionId) continue;
+      final existing = log.sessionNote.trim();
+      if (existing.contains(trimmed)) continue;
+      final combined = existing.isEmpty ? trimmed : '$existing\n$trimmed';
+      logs[index] = log.copyWith(sessionNote: combined);
+      changed = true;
+    }
+    if (changed) {
+      await saveLogs();
+      notifyListeners();
+    }
   }
 
   List<WorkoutLog> logsForDay(DateTime day) {
@@ -7657,6 +7710,7 @@ Future<void> startWorkoutForDay(
   BuildContext context, {
   required WorkoutPlan plan,
   required WorkoutDay day,
+  int? dayIndex,
 }) async {
   final store = AppScope.read(context);
   if (day.items.isEmpty) {
@@ -7690,7 +7744,7 @@ Future<void> startWorkoutForDay(
     }
     await store.discardActiveWorkout();
   }
-  final started = await store.startActiveWorkout(plan: plan, day: day);
+  final started = await store.startActiveWorkout(plan: plan, day: day, dayIndex: dayIndex);
   if (!context.mounted) return;
   if (!started) {
     showError(context, 'Nie udało się rozpocząć pustego treningu.');
@@ -9504,6 +9558,228 @@ class _WorkoutSummaryPageState extends State<WorkoutSummaryPage> {
   bool _aiLoading = false;
   String? _aiError;
 
+  // Etap 31: ocena treningu, pytanie o ból, cofnięcie ukończenia.
+  String? _rating;
+  bool _painChecked = false;
+  final TextEditingController _painCtrl = TextEditingController();
+  bool _painSaved = false;
+  bool _undone = false;
+
+  static const List<(String, IconData)> _ratingOptions = [
+    ('Łatwy', Icons.sentiment_satisfied_rounded),
+    ('Średni', Icons.sentiment_neutral_rounded),
+    ('Ciężki', Icons.sentiment_dissatisfied_rounded),
+    ('Za ciężki', Icons.sentiment_very_dissatisfied_rounded),
+  ];
+
+  static const List<(IconData, String, String)> _afterTips = [
+    (Icons.local_drink_outlined, 'Wypij wodę', 'Uzupełnij płyny po wysiłku.'),
+    (Icons.egg_alt_outlined, 'Zjedz białko', 'Posiłek z białkiem wspiera regenerację mięśni.'),
+    (Icons.self_improvement_rounded, 'Zrób stretching', 'Krótkie rozciąganie zmniejszy napięcie.'),
+    (Icons.bedtime_outlined, 'Odpocznij', 'Sen i regeneracja budują formę.'),
+  ];
+
+  Widget _buildRatingCard(ThemeData theme) {
+    return Card(
+      child: Padding(
+        padding: const EdgeInsets.all(16),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Text('Jak oceniasz trening?', style: theme.textTheme.titleMedium?.copyWith(fontWeight: FontWeight.w900)),
+            const SizedBox(height: 10),
+            Wrap(
+              spacing: 8,
+              runSpacing: 8,
+              children: [
+                for (final option in _ratingOptions)
+                  ChoiceChip(
+                    avatar: Icon(option.$2, size: 18),
+                    label: Text(option.$1),
+                    selected: _rating == option.$1,
+                    onSelected: (_) => _selectRating(option.$1),
+                  ),
+              ],
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  Widget _buildPainCard(ThemeData theme) {
+    return Card(
+      child: Padding(
+        padding: const EdgeInsets.all(16),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Row(
+              children: [
+                Icon(Icons.healing_outlined, color: theme.colorScheme.primary),
+                const SizedBox(width: 8),
+                Expanded(child: Text('Czy coś bolało?', style: theme.textTheme.titleMedium?.copyWith(fontWeight: FontWeight.w900))),
+              ],
+            ),
+            SwitchListTile(
+              contentPadding: EdgeInsets.zero,
+              value: _painChecked,
+              title: const Text('Tak, chcę zapisać dolegliwość'),
+              onChanged: (value) => setState(() => _painChecked = value),
+            ),
+            if (_painChecked) ...[
+              TextField(
+                controller: _painCtrl,
+                minLines: 2,
+                maxLines: 4,
+                decoration: const InputDecoration(
+                  labelText: 'Gdzie/co bolało?',
+                  hintText: 'np. lewy bark przy wyciskaniu',
+                ),
+              ),
+              const SizedBox(height: 8),
+              Row(
+                children: [
+                  if (_painSaved)
+                    Text('Zapisano w notatce sesji.', style: theme.textTheme.bodySmall?.copyWith(color: theme.colorScheme.primary, fontWeight: FontWeight.w700)),
+                  const Spacer(),
+                  FilledButton.tonalIcon(
+                    onPressed: _savePain,
+                    icon: const Icon(Icons.save_outlined),
+                    label: const Text('Zapisz uwagę'),
+                  ),
+                ],
+              ),
+            ],
+          ],
+        ),
+      ),
+    );
+  }
+
+  Widget _buildSuggestionsCard(ThemeData theme) {
+    return Card(
+      child: Padding(
+        padding: const EdgeInsets.all(16),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Text('Po treningu', style: theme.textTheme.titleMedium?.copyWith(fontWeight: FontWeight.w900)),
+            const SizedBox(height: 10),
+            for (final tip in _afterTips)
+              Padding(
+                padding: const EdgeInsets.only(bottom: 8),
+                child: Row(
+                  children: [
+                    CircleAvatar(
+                      radius: 18,
+                      backgroundColor: theme.colorScheme.primaryContainer,
+                      foregroundColor: theme.colorScheme.onPrimaryContainer,
+                      child: Icon(tip.$1, size: 18),
+                    ),
+                    const SizedBox(width: 12),
+                    Expanded(
+                      child: Column(
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        children: [
+                          Text(tip.$2, style: theme.textTheme.bodyMedium?.copyWith(fontWeight: FontWeight.w800)),
+                          Text(tip.$3, style: theme.textTheme.bodySmall?.copyWith(color: theme.colorScheme.onSurfaceVariant)),
+                        ],
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  Widget _buildProgramActionsCard(ThemeData theme, bool dayCompleted) {
+    return Card(
+      child: Padding(
+        padding: const EdgeInsets.all(16),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.stretch,
+          children: [
+            Row(
+              children: [
+                Icon(Icons.event_available_rounded, color: theme.colorScheme.primary),
+                const SizedBox(width: 8),
+                Expanded(child: Text('Postęp programu', style: theme.textTheme.titleMedium?.copyWith(fontWeight: FontWeight.w900))),
+              ],
+            ),
+            const SizedBox(height: 10),
+            OutlinedButton.icon(
+              onPressed: _repeatDay,
+              icon: const Icon(Icons.replay_rounded),
+              label: const Text('Powtórz dzień'),
+            ),
+            if (dayCompleted && !_undone) ...[
+              const SizedBox(height: 8),
+              TextButton.icon(
+                onPressed: _undoCompletion,
+                icon: const Icon(Icons.undo_rounded),
+                label: const Text('Cofnij ukończenie dnia'),
+              ),
+            ] else if (_undone) ...[
+              const SizedBox(height: 8),
+              Text('Cofnięto ukończenie dnia.', style: theme.textTheme.bodySmall?.copyWith(color: theme.colorScheme.onSurfaceVariant)),
+            ],
+          ],
+        ),
+      ),
+    );
+  }
+
+  @override
+  void dispose() {
+    _painCtrl.dispose();
+    super.dispose();
+  }
+
+  Future<void> _selectRating(String rating) async {
+    setState(() => _rating = rating);
+    await AppScope.read(context).appendWorkoutSessionNote(
+      widget.summary.sessionId,
+      'Ocena treningu: $rating',
+    );
+  }
+
+  Future<void> _savePain() async {
+    final text = _painCtrl.text.trim();
+    if (text.isEmpty) return;
+    await AppScope.read(context).appendWorkoutSessionNote(
+      widget.summary.sessionId,
+      'Ból/uwaga: $text',
+    );
+    if (mounted) setState(() => _painSaved = true);
+  }
+
+  Future<void> _undoCompletion() async {
+    final store = AppScope.read(context);
+    final confirmed = await showDialog<bool>(
+      context: context,
+      builder: (dialogContext) => AlertDialog(
+        title: const Text('Cofnąć ukończenie dnia?'),
+        content: const Text('Dzień przestanie być oznaczony jako ukończony, a postęp programu się zmniejszy. Zapisany trening w historii pozostanie.'),
+        actions: [
+          TextButton(onPressed: () => Navigator.pop(dialogContext, false), child: const Text('Anuluj')),
+          FilledButton(onPressed: () => Navigator.pop(dialogContext, true), child: const Text('Cofnij')),
+        ],
+      ),
+    );
+    if (confirmed != true) return;
+    await store.setPlanDayCompleted(widget.summary.planId, widget.summary.dayIndex, completed: false);
+    if (mounted) setState(() => _undone = true);
+  }
+
+  void _repeatDay() {
+    if (widget.summary.planId.isEmpty || widget.summary.dayIndex < 0) return;
+    openWorkoutDayDetails(context, widget.summary.planId, widget.summary.dayIndex);
+  }
+
   Future<void> _runAiAnalysis() async {
     final store = AppScope.of(context);
     setState(() {
@@ -9522,7 +9798,25 @@ class _WorkoutSummaryPageState extends State<WorkoutSummaryPage> {
   @override
   Widget build(BuildContext context) {
     final store = AppScope.of(context);
-    final analysis = store.workoutAiAnalysisFor(widget.summary.sessionId);
+    final theme = Theme.of(context);
+    final summary = widget.summary;
+    final analysis = store.workoutAiAnalysisFor(summary.sessionId);
+    final kcal = summary.trainingImpact?.estimatedBurnedKcal ?? 0;
+
+    WorkoutPlan? programPlan;
+    if (summary.planId.isNotEmpty) {
+      for (final plan in store.plans) {
+        if (plan.id == summary.planId) {
+          programPlan = plan;
+          break;
+        }
+      }
+    }
+    final dayCompleted = programPlan != null && summary.dayIndex >= 0 && programPlan.isDayCompleted(summary.dayIndex);
+    final headerTitle = (summary.dayLabel.isNotEmpty && summary.dayIndex >= 0)
+        ? '${summary.dayLabel} ukończony'
+        : 'Trening zakończony';
+
     return Scaffold(
       appBar: AppBar(
         automaticallyImplyLeading: false,
@@ -9532,12 +9826,49 @@ class _WorkoutSummaryPageState extends State<WorkoutSummaryPage> {
         child: ListView(
           padding: const EdgeInsets.fromLTRB(16, 16, 16, 28),
           children: [
-            Icon(Icons.emoji_events_rounded, size: 72, color: Theme.of(context).colorScheme.primary),
-            const SizedBox(height: 12),
-            Text('Trening zakończony', textAlign: TextAlign.center, style: Theme.of(context).textTheme.headlineMedium?.copyWith(fontWeight: FontWeight.w900)),
-            const SizedBox(height: 6),
-            Text(widget.summary.name, textAlign: TextAlign.center, style: Theme.of(context).textTheme.bodyLarge?.copyWith(color: Theme.of(context).colorScheme.onSurfaceVariant)),
-            const SizedBox(height: 20),
+            // Etap 31: ekran sukcesu.
+            Container(
+              padding: const EdgeInsets.all(20),
+              decoration: BoxDecoration(
+                gradient: LinearGradient(
+                  begin: Alignment.topLeft,
+                  end: Alignment.bottomRight,
+                  colors: [theme.colorScheme.primaryContainer, theme.colorScheme.surfaceContainerHighest],
+                ),
+                borderRadius: BorderRadius.circular(24),
+              ),
+              child: Column(
+                children: [
+                  Icon(Icons.emoji_events_rounded, size: 64, color: theme.colorScheme.primary),
+                  const SizedBox(height: 10),
+                  Text(headerTitle, textAlign: TextAlign.center, style: theme.textTheme.headlineSmall?.copyWith(fontWeight: FontWeight.w900)),
+                  const SizedBox(height: 4),
+                  Text('Dobra robota!', textAlign: TextAlign.center, style: theme.textTheme.titleMedium?.copyWith(color: theme.colorScheme.onSurfaceVariant, fontWeight: FontWeight.w700)),
+                  const SizedBox(height: 4),
+                  Text(summary.name, textAlign: TextAlign.center, style: theme.textTheme.bodyMedium?.copyWith(color: theme.colorScheme.onSurfaceVariant)),
+                  if (programPlan != null) ...[
+                    const SizedBox(height: 16),
+                    Row(
+                      children: [
+                        Text('${programPlan.completedCount}/${programPlan.days.length} dni', style: theme.textTheme.labelLarge?.copyWith(fontWeight: FontWeight.w900)),
+                        const SizedBox(width: 10),
+                        Expanded(
+                          child: ClipRRect(
+                            borderRadius: BorderRadius.circular(8),
+                            child: LinearProgressIndicator(
+                              value: programPlan.progress,
+                              minHeight: 8,
+                              backgroundColor: theme.colorScheme.surface.withValues(alpha: 0.5),
+                            ),
+                          ),
+                        ),
+                      ],
+                    ),
+                  ],
+                ],
+              ),
+            ),
+            const SizedBox(height: 16),
             GridView.count(
               crossAxisCount: 2,
               shrinkWrap: true,
@@ -9546,10 +9877,12 @@ class _WorkoutSummaryPageState extends State<WorkoutSummaryPage> {
               crossAxisSpacing: 10,
               childAspectRatio: 1.12,
               children: [
-                _WorkoutSummaryStat(label: 'Czas', value: formatWorkoutDuration(widget.summary.duration), icon: Icons.timer_outlined),
-                _WorkoutSummaryStat(label: 'Ćwiczenia', value: '${widget.summary.exerciseCount}', icon: Icons.fitness_center_rounded),
-                _WorkoutSummaryStat(label: 'Serie', value: '${widget.summary.setCount}', icon: Icons.repeat_rounded),
-                _WorkoutSummaryStat(label: 'Objętość', value: '${widget.summary.volume.round()} kg', icon: Icons.monitor_weight_outlined),
+                _WorkoutSummaryStat(label: 'Czas', value: formatWorkoutDuration(summary.duration), icon: Icons.timer_outlined),
+                _WorkoutSummaryStat(label: 'Ćwiczenia', value: '${summary.exerciseCount}', icon: Icons.fitness_center_rounded),
+                _WorkoutSummaryStat(label: 'Serie', value: '${summary.setCount}', icon: Icons.repeat_rounded),
+                _WorkoutSummaryStat(label: 'Spalone', value: '$kcal kcal', icon: Icons.local_fire_department_outlined),
+                _WorkoutSummaryStat(label: 'Objętość', value: '${summary.volume.round()} kg', icon: Icons.monitor_weight_outlined),
+                _WorkoutSummaryStat(label: 'Pominięte', value: '${summary.skippedCount}', icon: Icons.skip_next_rounded),
               ],
             ),
             const SizedBox(height: 10),
@@ -9557,9 +9890,19 @@ class _WorkoutSummaryPageState extends State<WorkoutSummaryPage> {
               child: ListTile(
                 leading: const Icon(Icons.speed_rounded),
                 title: const Text('Średnie RPE'),
-                trailing: Text(widget.summary.averageRpe == 0 ? '—' : widget.summary.averageRpe.toStringAsFixed(1), style: Theme.of(context).textTheme.titleLarge?.copyWith(fontWeight: FontWeight.w900)),
+                trailing: Text(summary.averageRpe == 0 ? '—' : summary.averageRpe.toStringAsFixed(1), style: theme.textTheme.titleLarge?.copyWith(fontWeight: FontWeight.w900)),
               ),
             ),
+            const SizedBox(height: 10),
+            _buildRatingCard(theme),
+            const SizedBox(height: 10),
+            _buildPainCard(theme),
+            const SizedBox(height: 10),
+            _buildSuggestionsCard(theme),
+            if (summary.planId.isNotEmpty && summary.dayIndex >= 0) ...[
+              const SizedBox(height: 10),
+              _buildProgramActionsCard(theme, dayCompleted),
+            ],
             if (widget.summary.trainingImpact != null) ...[
               const SizedBox(height: 10),
               _TrainingImpactSummaryCard(impact: widget.summary.trainingImpact!),
@@ -11825,7 +12168,7 @@ class _DayStartBar extends StatelessWidget {
       );
     } else {
       button = FilledButton.icon(
-        onPressed: day.items.isEmpty ? null : () => startWorkoutForDay(context, plan: plan, day: day),
+        onPressed: day.items.isEmpty ? null : () => startWorkoutForDay(context, plan: plan, day: day, dayIndex: dayIndex),
         icon: Icon(isCompleted ? Icons.replay_rounded : Icons.play_arrow_rounded),
         label: Text(isCompleted ? 'Powtórz trening' : 'START'),
       );

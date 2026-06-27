@@ -290,6 +290,7 @@ void main() {
         planName: 'Plan testowy',
         weekday: DateTime.monday,
         dayTitle: 'Góra',
+        dayIndex: 2,
         startedAt: DateTime(2026, 6, 23, 18),
         currentExerciseIndex: 0,
         note: 'Dobra energia',
@@ -321,6 +322,7 @@ void main() {
 
       final restored = ActiveWorkoutSession.fromJson(session.toJson());
 
+      expect(restored.dayIndex, 2);
       expect(restored.completedSetCount, 1);
       expect(restored.completedExerciseCount, 1);
       expect(restored.volume, 120);
