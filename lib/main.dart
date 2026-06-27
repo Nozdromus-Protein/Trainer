@@ -7574,6 +7574,18 @@ Future<void> openActiveWorkoutPage(BuildContext context) async {
   if (AppScope.read(context).activeWorkoutSession == null) return;
   await Navigator.of(context).push(
     MaterialPageRoute<void>(
+      // Etap 30: pełnoekranowy tryb „Aktywne ćwiczenie".
+      builder: (_) => const ActiveExercisePlayerPage(),
+    ),
+  );
+}
+
+/// Etap 30: szczegółowy widok treningu (serie, ciężar, RPE, lista, rozgrzewka).
+/// Dostępny z menu pełnoekranowego odtwarzacza jako „wysuwana sekcja danych siłowych".
+Future<void> openDetailedWorkoutView(BuildContext context) async {
+  if (AppScope.read(context).activeWorkoutSession == null) return;
+  await Navigator.of(context).push(
+    MaterialPageRoute<void>(
       builder: (_) => const ActiveWorkoutPage(),
     ),
   );
@@ -8022,6 +8034,837 @@ class _ActiveWorkoutPageState extends State<ActiveWorkoutPage> {
                 onPressed: () => finishWorkout(store),
                 icon: const Icon(Icons.flag_rounded),
                 label: const Text('Zakończ trening'),
+              ),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+// ============================================================================
+// ETAP 30 — Pełnoekranowy tryb „Aktywne ćwiczenie".
+// ============================================================================
+
+String _fmtClock(int totalSeconds) {
+  final s = totalSeconds.clamp(0, 359999);
+  final m = s ~/ 60;
+  final sec = s % 60;
+  return '${m.toString().padLeft(2, '0')}:${sec.toString().padLeft(2, '0')}';
+}
+
+/// Slide-up z danymi siłowymi (ciężar / powtórzenia / RPE) bieżącego ćwiczenia.
+/// Zachowuje istniejący zapis serii ([AppStore.saveActiveWorkoutSet]). Etap 30.
+Future<void> showActiveStrengthSheet(BuildContext context) async {
+  final store = AppScope.read(context);
+  final session = store.activeWorkoutSession;
+  final active = session?.currentExercise;
+  if (session == null || active == null) return;
+  final exercise = ExerciseRepo.byId(active.exerciseId, store.customExercises);
+  final lastSet = active.completedSets.isEmpty ? null : active.completedSets.last;
+  final weightCtrl = TextEditingController(text: _formatPlanWeight(lastSet?.weightKg ?? active.suggestedWeightKg));
+  final repsCtrl = TextEditingController(text: '${lastSet?.repetitions ?? active.plannedReps}');
+  var rpe = lastSet?.rpe ?? 7;
+
+  await showModalBottomSheet<void>(
+    context: context,
+    isScrollControlled: true,
+    useSafeArea: true,
+    showDragHandle: true,
+    builder: (sheetContext) => StatefulBuilder(
+      builder: (context, setSheetState) {
+        final current = store.activeWorkoutSession?.currentExercise ?? active;
+        final setLimitReached = current.completedSets.length >= current.plannedSets;
+        return Padding(
+          padding: EdgeInsets.fromLTRB(16, 0, 16, 16 + MediaQuery.of(context).viewInsets.bottom + MediaQuery.of(context).viewPadding.bottom),
+          child: SingleChildScrollView(
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              crossAxisAlignment: CrossAxisAlignment.stretch,
+              children: [
+                Text('Dane siłowe', style: Theme.of(context).textTheme.titleLarge?.copyWith(fontWeight: FontWeight.w900)),
+                const SizedBox(height: 2),
+                Text(exercise.name, style: Theme.of(context).textTheme.bodyMedium?.copyWith(color: Theme.of(context).colorScheme.onSurfaceVariant)),
+                const SizedBox(height: 14),
+                Row(
+                  children: [
+                    Expanded(
+                      child: TextField(
+                        controller: weightCtrl,
+                        keyboardType: const TextInputType.numberWithOptions(decimal: true),
+                        decoration: const InputDecoration(labelText: 'Ciężar (kg)'),
+                      ),
+                    ),
+                    const SizedBox(width: 10),
+                    Expanded(
+                      child: TextField(
+                        controller: repsCtrl,
+                        keyboardType: TextInputType.number,
+                        decoration: const InputDecoration(labelText: 'Powtórzenia'),
+                      ),
+                    ),
+                  ],
+                ),
+                const SizedBox(height: 10),
+                DropdownButtonFormField<int>(
+                  initialValue: rpe,
+                  decoration: const InputDecoration(labelText: 'RPE'),
+                  items: [for (var v = 1; v <= 10; v++) DropdownMenuItem(value: v, child: Text('$v / 10'))],
+                  onChanged: (value) => setSheetState(() => rpe = value ?? rpe),
+                ),
+                if (current.completedSets.isNotEmpty) ...[
+                  const SizedBox(height: 14),
+                  Text('Zapisane serie', style: Theme.of(context).textTheme.titleSmall?.copyWith(fontWeight: FontWeight.w900)),
+                  const SizedBox(height: 6),
+                  for (var i = 0; i < current.completedSets.length; i++)
+                    Builder(builder: (context) {
+                      final set = current.completedSets[i];
+                      return Padding(
+                        padding: const EdgeInsets.only(bottom: 4),
+                        child: Text(
+                          'Seria ${i + 1}: ${_formatPlanWeight(set.weightKg)} kg × ${set.repetitions} · RPE ${set.rpe}',
+                          style: Theme.of(context).textTheme.bodySmall?.copyWith(color: Theme.of(context).colorScheme.onSurfaceVariant),
+                        ),
+                      );
+                    }),
+                ],
+                const SizedBox(height: 16),
+                FilledButton.icon(
+                  onPressed: setLimitReached
+                      ? null
+                      : () async {
+                          final parsedWeight = double.tryParse(weightCtrl.text.trim().replaceAll(',', '.'));
+                          final parsedReps = int.tryParse(repsCtrl.text.trim());
+                          if (parsedWeight == null || parsedWeight < 0 || parsedWeight > 9999) {
+                            showError(context, 'Podaj poprawny ciężar.');
+                            return;
+                          }
+                          if (parsedReps == null || parsedReps < 1 || parsedReps > 999) {
+                            showError(context, 'Powtórzenia muszą mieścić się w zakresie 1–999.');
+                            return;
+                          }
+                          final saved = await store.saveActiveWorkoutSet(weightKg: parsedWeight, repetitions: parsedReps, rpe: rpe);
+                          if (!sheetContext.mounted) return;
+                          if (!saved) {
+                            showError(context, 'Wszystkie zaplanowane serie są już zapisane.');
+                            return;
+                          }
+                          Navigator.of(sheetContext).pop();
+                        },
+                  icon: const Icon(Icons.check_rounded),
+                  label: Text(setLimitReached ? 'Wszystkie serie zapisane' : 'Zapisz serię'),
+                ),
+              ],
+            ),
+          ),
+        );
+      },
+    ),
+  );
+  weightCtrl.dispose();
+  repsCtrl.dispose();
+}
+
+class ActiveExercisePlayerPage extends StatefulWidget {
+  const ActiveExercisePlayerPage({super.key});
+
+  @override
+  State<ActiveExercisePlayerPage> createState() => _ActiveExercisePlayerPageState();
+}
+
+class _ActiveExercisePlayerPageState extends State<ActiveExercisePlayerPage> {
+  Timer? _ticker;
+  bool _leaving = false;
+  bool _muted = false;
+  bool _workRunning = false;
+  int _workSecondsLeft = 0;
+  bool _wasResting = false;
+  String? _loadedExId;
+  int? _loadedExIndex;
+
+  @override
+  void initState() {
+    super.initState();
+    _ticker = Timer.periodic(const Duration(seconds: 1), (_) => _onTick());
+  }
+
+  @override
+  void dispose() {
+    _ticker?.cancel();
+    super.dispose();
+  }
+
+  void _onTick() {
+    if (!mounted) return;
+    final store = AppScope.read(context);
+    final session = store.activeWorkoutSession;
+    if (session == null) {
+      setState(() {});
+      return;
+    }
+    final resting = session.hasActiveRestTimer;
+    if (_wasResting && !resting) {
+      final active = session.currentExercise;
+      if (active != null) {
+        final ex = ExerciseRepo.byId(active.exerciseId, store.customExercises);
+        if (ex.defaultDurationSec > 0 && active.completedSets.length < active.plannedSets) {
+          _workSecondsLeft = ex.defaultDurationSec;
+          _workRunning = false;
+        }
+      }
+    }
+    _wasResting = resting;
+    if (!resting && _workRunning && _workSecondsLeft > 0) {
+      _workSecondsLeft--;
+      if (_workSecondsLeft <= 0) {
+        _workRunning = false;
+        _completeTimedSet(store);
+      }
+    }
+    setState(() {});
+  }
+
+  void _syncExercise(ActiveWorkoutSession session, Exercise exercise, ActiveWorkoutExercise active) {
+    if (_loadedExId == active.exerciseId && _loadedExIndex == session.currentExerciseIndex) return;
+    _loadedExId = active.exerciseId;
+    _loadedExIndex = session.currentExerciseIndex;
+    _workRunning = false;
+    _workSecondsLeft = exercise.defaultDurationSec > 0 ? exercise.defaultDurationSec : 0;
+  }
+
+  Future<void> _completeTimedSet(AppStore store) async {
+    final session = store.activeWorkoutSession;
+    final active = session?.currentExercise;
+    if (session == null || active == null) return;
+    if (active.completedSets.length >= active.plannedSets) return;
+    await store.saveActiveWorkoutSet(
+      weightKg: active.suggestedWeightKg,
+      repetitions: active.plannedReps > 0 ? active.plannedReps : 1,
+      rpe: 7,
+    );
+  }
+
+  Future<void> _finishNow(AppStore store) async {
+    final session = store.activeWorkoutSession;
+    if (session == null) return;
+    final focus = warmupFocusForSession(session, store.customExercises);
+    final summary = await store.finishActiveWorkout();
+    if (!mounted || summary == null) return;
+    _leaving = true;
+    await Navigator.of(context).pushReplacement(
+      MaterialPageRoute<void>(
+        builder: (_) => WorkoutSummaryPage(summary: summary, stretchingFocus: focus),
+      ),
+    );
+  }
+
+  Future<void> _handleExit() async {
+    if (_leaving) return;
+    final store = AppScope.read(context);
+    final session = store.activeWorkoutSession;
+    final hasSets = (session?.completedSetCount ?? 0) > 0;
+    final action = await showDialog<String>(
+      context: context,
+      builder: (dialogContext) => AlertDialog(
+        title: const Text('Czy zakończyć trening?'),
+        content: Text(hasSets
+            ? 'Zapisz trening w historii, odrzuć postęp albo wróć do ćwiczenia.'
+            : 'Nie zapisano jeszcze żadnej serii. Możesz zachować trening do wznowienia, odrzucić go albo wrócić.'),
+        actions: [
+          TextButton(onPressed: () => Navigator.pop(dialogContext, 'cancel'), child: const Text('Anuluj')),
+          TextButton(onPressed: () => Navigator.pop(dialogContext, 'discard'), child: const Text('Odrzuć')),
+          FilledButton(onPressed: () => Navigator.pop(dialogContext, hasSets ? 'save' : 'keep'), child: Text(hasSets ? 'Zapisz i wyjdź' : 'Zachowaj i wyjdź')),
+        ],
+      ),
+    );
+    if (!mounted || action == null || action == 'cancel') return;
+    if (action == 'discard') {
+      await store.discardActiveWorkout();
+      if (!mounted) return;
+      _leaving = true;
+      Navigator.of(context).pop();
+      return;
+    }
+    if (action == 'keep') {
+      _leaving = true;
+      Navigator.of(context).pop();
+      return;
+    }
+    await _finishNow(store);
+  }
+
+  Future<void> _openMenu(AppStore store) async {
+    final value = await showModalBottomSheet<String>(
+      context: context,
+      showDragHandle: true,
+      builder: (sheetContext) => SafeArea(
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            ListTile(
+              leading: const Icon(Icons.fitness_center_rounded),
+              title: const Text('Dane siłowe (seria, ciężar, RPE)'),
+              onTap: () => Navigator.pop(sheetContext, 'strength'),
+            ),
+            ListTile(
+              leading: const Icon(Icons.swap_horiz_rounded),
+              title: const Text('Zamień ćwiczenie'),
+              onTap: () => Navigator.pop(sheetContext, 'swap'),
+            ),
+            ListTile(
+              leading: const Icon(Icons.note_alt_outlined),
+              title: const Text('Notatka do ćwiczenia'),
+              onTap: () => Navigator.pop(sheetContext, 'note'),
+            ),
+            ListTile(
+              leading: Icon(_muted ? Icons.volume_off_rounded : Icons.volume_up_rounded),
+              title: Text(_muted ? 'Włącz komunikaty' : 'Wycisz komunikaty'),
+              onTap: () => Navigator.pop(sheetContext, 'mute'),
+            ),
+            ListTile(
+              leading: const Icon(Icons.view_list_rounded),
+              title: const Text('Widok szczegółowy'),
+              onTap: () => Navigator.pop(sheetContext, 'detailed'),
+            ),
+            const Divider(height: 1),
+            ListTile(
+              leading: Icon(Icons.flag_rounded, color: Theme.of(sheetContext).colorScheme.error),
+              title: Text('Zakończ trening', style: TextStyle(color: Theme.of(sheetContext).colorScheme.error, fontWeight: FontWeight.w800)),
+              onTap: () => Navigator.pop(sheetContext, 'finish'),
+            ),
+          ],
+        ),
+      ),
+    );
+    if (!mounted || value == null) return;
+    switch (value) {
+      case 'strength':
+        await showActiveStrengthSheet(context);
+        break;
+      case 'swap':
+        await showReplaceActiveExerciseSheet(context);
+        break;
+      case 'note':
+        await showActiveExerciseNoteSheet(context);
+        break;
+      case 'mute':
+        setState(() => _muted = !_muted);
+        break;
+      case 'detailed':
+        await openDetailedWorkoutView(context);
+        break;
+      case 'finish':
+        await _handleExit();
+        break;
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final store = AppScope.of(context);
+    final session = store.activeWorkoutSession;
+    if (session == null || session.currentExercise == null) {
+      return const Scaffold(body: Center(child: Text('Brak aktywnego treningu')));
+    }
+    final theme = Theme.of(context);
+    final active = session.currentExercise!;
+    final exercise = ExerciseRepo.byId(active.exerciseId, store.customExercises);
+    _syncExercise(session, exercise, active);
+
+    final total = session.exercises.length;
+    final index = session.currentExerciseIndex;
+    final resting = session.hasActiveRestTimer;
+    final setsDone = active.completedSets.length;
+    final setFrac = active.plannedSets == 0 ? 0.0 : (setsDone / active.plannedSets).clamp(0.0, 1.0);
+    final progress = total == 0 ? 0.0 : ((index + setFrac) / total).clamp(0.0, 1.0);
+    final elapsed = DateTime.now().difference(session.startedAt);
+
+    return PopScope(
+      canPop: _leaving,
+      onPopInvokedWithResult: (didPop, _) async {
+        if (!didPop) await _handleExit();
+      },
+      child: Scaffold(
+        body: SafeArea(
+          child: Column(
+            children: [
+              _buildTopBar(context, store, theme, index, total, elapsed),
+              LinearProgressIndicator(
+                value: progress,
+                minHeight: 5,
+                backgroundColor: theme.colorScheme.surfaceContainerHighest,
+              ),
+              Expanded(
+                child: resting
+                    ? _buildRestState(context, store, theme, session, index, total)
+                    : _buildExerciseState(context, store, theme, session, exercise, active, index, total),
+              ),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+
+  Widget _buildTopBar(BuildContext context, AppStore store, ThemeData theme, int index, int total, Duration elapsed) {
+    return Padding(
+      padding: const EdgeInsets.fromLTRB(4, 4, 4, 4),
+      child: Row(
+        children: [
+          IconButton(
+            tooltip: 'Wyjdź',
+            onPressed: _handleExit,
+            icon: const Icon(Icons.close_rounded),
+          ),
+          Expanded(
+            child: Text(
+              'Ćwiczenie ${index + 1}/$total',
+              style: theme.textTheme.titleMedium?.copyWith(fontWeight: FontWeight.w900),
+            ),
+          ),
+          Container(
+            padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 5),
+            decoration: BoxDecoration(
+              color: theme.colorScheme.surfaceContainerHighest,
+              borderRadius: BorderRadius.circular(12),
+            ),
+            child: Row(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                Icon(Icons.timer_outlined, size: 15, color: theme.colorScheme.onSurfaceVariant),
+                const SizedBox(width: 4),
+                Text(_fmtClock(elapsed.inSeconds), style: theme.textTheme.labelLarge?.copyWith(fontWeight: FontWeight.w900)),
+              ],
+            ),
+          ),
+          IconButton(
+            tooltip: 'Menu',
+            onPressed: () => _openMenu(store),
+            icon: const Icon(Icons.more_vert_rounded),
+          ),
+        ],
+      ),
+    );
+  }
+
+  Widget _buildExerciseState(
+    BuildContext context,
+    AppStore store,
+    ThemeData theme,
+    ActiveWorkoutSession session,
+    Exercise exercise,
+    ActiveWorkoutExercise active,
+    int index,
+    int total,
+  ) {
+    final media = AnimatedSwitcher(
+      duration: const Duration(milliseconds: 320),
+      switchInCurve: Curves.easeOut,
+      transitionBuilder: (child, animation) => FadeTransition(
+        opacity: animation,
+        child: SlideTransition(
+          position: Tween<Offset>(begin: const Offset(0.06, 0), end: Offset.zero).animate(animation),
+          child: child,
+        ),
+      ),
+      child: _PlayerExerciseMedia(
+        key: ValueKey('${active.exerciseId}_$index'),
+        exercise: exercise,
+        paused: !_workRunning && exercise.defaultDurationSec > 0,
+      ),
+    );
+
+    final panel = _buildInfoPanel(context, store, theme, exercise, active, index, total);
+
+    return LayoutBuilder(
+      builder: (context, constraints) {
+        final landscape = constraints.maxWidth > constraints.maxHeight;
+        if (landscape) {
+          return Row(
+            children: [
+              Expanded(child: Padding(padding: const EdgeInsets.all(12), child: media)),
+              SizedBox(
+                width: math.min(360, constraints.maxWidth * 0.46),
+                child: SingleChildScrollView(
+                  padding: const EdgeInsets.fromLTRB(8, 8, 16, 16),
+                  child: panel,
+                ),
+              ),
+            ],
+          );
+        }
+        return Column(
+          children: [
+            Expanded(child: Padding(padding: const EdgeInsets.fromLTRB(16, 12, 16, 8), child: media)),
+            Padding(padding: const EdgeInsets.fromLTRB(16, 0, 16, 16), child: panel),
+          ],
+        );
+      },
+    );
+  }
+
+  Widget _buildInfoPanel(
+    BuildContext context,
+    AppStore store,
+    ThemeData theme,
+    Exercise exercise,
+    ActiveWorkoutExercise active,
+    int index,
+    int total,
+  ) {
+    final isTimed = exercise.defaultDurationSec > 0;
+    final setsDone = active.completedSets.length;
+    final allSetsDone = setsDone >= active.plannedSets;
+    final isLast = index >= total - 1;
+    final coach = _coachMessage(exercise, active, isTimed, allSetsDone);
+
+    Widget bigDisplay;
+    if (isTimed && !allSetsDone) {
+      bigDisplay = Text(
+        _fmtClock(_workSecondsLeft),
+        style: theme.textTheme.displayMedium?.copyWith(fontWeight: FontWeight.w900, height: 1),
+      );
+    } else {
+      bigDisplay = Column(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          Text(
+            'Seria ${math.min(setsDone + (allSetsDone ? 0 : 1), active.plannedSets)}/${active.plannedSets}',
+            style: theme.textTheme.displaySmall?.copyWith(fontWeight: FontWeight.w900, height: 1),
+          ),
+          const SizedBox(height: 4),
+          Text(
+            allSetsDone
+                ? 'Ćwiczenie ukończone'
+                : '${active.plannedReps} powt.${active.suggestedWeightKg > 0 ? ' · ${_formatPlanWeight(active.suggestedWeightKg)} kg' : ''}',
+            style: theme.textTheme.titleMedium?.copyWith(color: theme.colorScheme.onSurfaceVariant),
+          ),
+        ],
+      );
+    }
+
+    // Główny przycisk akcji (zależny od typu ćwiczenia / stanu).
+    Widget primary;
+    if (allSetsDone) {
+      primary = FilledButton.icon(
+        onPressed: () => _advance(store, index, total),
+        icon: Icon(isLast ? Icons.flag_rounded : Icons.arrow_forward_rounded),
+        label: Text(isLast ? 'Zakończ trening' : 'Następne ćwiczenie'),
+      );
+    } else if (isTimed) {
+      primary = FilledButton.icon(
+        onPressed: () => setState(() => _workRunning = !_workRunning),
+        icon: Icon(_workRunning ? Icons.pause_rounded : Icons.play_arrow_rounded),
+        label: Text(_workRunning
+            ? 'Pauza'
+            : (_workSecondsLeft >= exercise.defaultDurationSec ? 'Start' : 'Wznów')),
+      );
+    } else {
+      primary = FilledButton.icon(
+        onPressed: () => showActiveStrengthSheet(context),
+        icon: const Icon(Icons.add_rounded),
+        label: const Text('Zapisz serię'),
+      );
+    }
+
+    return Column(
+      mainAxisSize: MainAxisSize.min,
+      crossAxisAlignment: CrossAxisAlignment.stretch,
+      children: [
+        Text(
+          exercise.name,
+          textAlign: TextAlign.center,
+          maxLines: 2,
+          overflow: TextOverflow.ellipsis,
+          style: theme.textTheme.headlineSmall?.copyWith(fontWeight: FontWeight.w900),
+        ),
+        const SizedBox(height: 6),
+        SizedBox(
+          height: 22,
+          child: Center(
+            child: coach.isEmpty
+                ? const SizedBox.shrink()
+                : Text(
+                    coach,
+                    style: theme.textTheme.titleSmall?.copyWith(color: theme.colorScheme.primary, fontWeight: FontWeight.w900),
+                  ),
+          ),
+        ),
+        const SizedBox(height: 8),
+        Center(child: bigDisplay),
+        const SizedBox(height: 8),
+        // Kropki postępu serii.
+        if (active.plannedSets > 0)
+          Wrap(
+            alignment: WrapAlignment.center,
+            spacing: 6,
+            children: [
+              for (var i = 0; i < active.plannedSets; i++)
+                Icon(
+                  i < setsDone ? Icons.circle : Icons.circle_outlined,
+                  size: 12,
+                  color: i < setsDone ? theme.colorScheme.primary : theme.colorScheme.outlineVariant,
+                ),
+            ],
+          ),
+        const SizedBox(height: 14),
+        primary,
+        const SizedBox(height: 10),
+        Row(
+          mainAxisAlignment: MainAxisAlignment.spaceEvenly,
+          children: [
+            _RoundControl(
+              icon: Icons.skip_previous_rounded,
+              label: 'Poprzedni',
+              onPressed: index <= 0 ? null : () => store.selectActiveWorkoutExercise(index - 1),
+            ),
+            _RoundControl(
+              icon: Icons.skip_next_rounded,
+              label: 'Pomiń',
+              onPressed: active.isSkipped ? null : () => store.moveToNextActiveExercise(skipCurrent: true),
+            ),
+            if (isTimed)
+              _RoundControl(
+                icon: Icons.fitness_center_rounded,
+                label: 'Dane',
+                onPressed: () => showActiveStrengthSheet(context),
+              ),
+            _RoundControl(
+              icon: isLast ? Icons.flag_rounded : Icons.arrow_forward_rounded,
+              label: isLast ? 'Zakończ' : 'Następne',
+              onPressed: () => _advance(store, index, total),
+            ),
+          ],
+        ),
+      ],
+    );
+  }
+
+  Future<void> _advance(AppStore store, int index, int total) async {
+    if (index >= total - 1) {
+      await _handleExit();
+      return;
+    }
+    await store.moveToNextActiveExercise();
+  }
+
+  String _coachMessage(Exercise exercise, ActiveWorkoutExercise active, bool isTimed, bool allSetsDone) {
+    if (allSetsDone) return 'Gotowe';
+    if (!isTimed) return '';
+    final total = exercise.defaultDurationSec;
+    if (!_workRunning) return 'Przygotuj się';
+    if (_workSecondsLeft <= 10) return 'Ostatnie 10 sekund';
+    if (_workSecondsLeft >= total) return 'Start';
+    if (_workSecondsLeft == (total / 2).round()) return 'Połowa czasu';
+    return '';
+  }
+
+  Widget _buildRestState(
+    BuildContext context,
+    AppStore store,
+    ThemeData theme,
+    ActiveWorkoutSession session,
+    int index,
+    int total,
+  ) {
+    final remaining = session.restSecondsRemaining();
+    final paused = session.isRestTimerPaused;
+    final nextIndex = math.min(index + 1, total - 1);
+    final hasNext = nextIndex != index;
+    final nextActive = session.exercises[nextIndex];
+    final nextExercise = ExerciseRepo.byId(nextActive.exerciseId, store.customExercises);
+
+    return Padding(
+      padding: const EdgeInsets.all(20),
+      child: Column(
+        mainAxisAlignment: MainAxisAlignment.center,
+        crossAxisAlignment: CrossAxisAlignment.stretch,
+        children: [
+          Text('ODPOCZYNEK', textAlign: TextAlign.center, style: theme.textTheme.titleMedium?.copyWith(color: theme.colorScheme.primary, fontWeight: FontWeight.w900, letterSpacing: 1)),
+          const SizedBox(height: 8),
+          Text(_fmtClock(remaining), textAlign: TextAlign.center, style: theme.textTheme.displayLarge?.copyWith(fontWeight: FontWeight.w900, height: 1)),
+          const SizedBox(height: 16),
+          if (hasNext)
+            Container(
+              padding: const EdgeInsets.all(14),
+              decoration: BoxDecoration(
+                color: theme.colorScheme.surfaceContainerHighest.withValues(alpha: 0.5),
+                borderRadius: BorderRadius.circular(16),
+              ),
+              child: Row(
+                children: [
+                  SizedBox(width: 48, height: 48, child: ClipRRect(borderRadius: BorderRadius.circular(12), child: ExerciseVisual(exercise: nextExercise))),
+                  const SizedBox(width: 12),
+                  Expanded(
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        Text('Następne ćwiczenie', style: theme.textTheme.labelMedium?.copyWith(color: theme.colorScheme.onSurfaceVariant, fontWeight: FontWeight.w800)),
+                        Text(nextExercise.name, maxLines: 2, overflow: TextOverflow.ellipsis, style: theme.textTheme.titleMedium?.copyWith(fontWeight: FontWeight.w900)),
+                      ],
+                    ),
+                  ),
+                ],
+              ),
+            ),
+          const SizedBox(height: 18),
+          Row(
+            children: [
+              Expanded(
+                child: OutlinedButton(
+                  onPressed: () => store.adjustActiveRestTimer(15),
+                  child: const Text('+15 s'),
+                ),
+              ),
+              const SizedBox(width: 10),
+              Expanded(
+                child: OutlinedButton(
+                  onPressed: () => store.adjustActiveRestTimer(30),
+                  child: const Text('+30 s'),
+                ),
+              ),
+              const SizedBox(width: 10),
+              Expanded(
+                child: OutlinedButton.icon(
+                  onPressed: () => paused ? store.resumeActiveRestTimer() : store.pauseActiveRestTimer(),
+                  icon: Icon(paused ? Icons.play_arrow_rounded : Icons.pause_rounded),
+                  label: Text(paused ? 'Wznów' : 'Pauza'),
+                ),
+              ),
+            ],
+          ),
+          const SizedBox(height: 12),
+          FilledButton.icon(
+            onPressed: () => store.skipActiveRestTimer(),
+            icon: const Icon(Icons.skip_next_rounded),
+            label: const Text('Pomiń odpoczynek'),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+/// Duże medium ćwiczenia w trybie aktywnym: GIF (loop), zdjęcie, poster wideo
+/// albo estetyczny fallback. Etap 30.
+class _PlayerExerciseMedia extends StatelessWidget {
+  const _PlayerExerciseMedia({super.key, required this.exercise, this.paused = false});
+
+  final Exercise exercise;
+  final bool paused;
+
+  @override
+  Widget build(BuildContext context) {
+    final theme = Theme.of(context);
+    final animated = exercise.animatedMediaPath;
+    final staticPath = exercise.staticMediaPath;
+    final fallback = ExercisePlaceholder(exercise: exercise);
+
+    Widget media;
+    Widget? badge;
+    if (animated != null) {
+      media = buildExerciseMediaImage(animated, fit: BoxFit.contain, fallback: fallback);
+      badge = _badge(theme, Icons.gif_box_outlined, 'Animacja');
+    } else if (staticPath != null) {
+      media = buildExerciseMediaImage(staticPath, fit: BoxFit.contain, fallback: fallback);
+      badge = _badge(theme, Icons.image_outlined, 'Zdjęcie');
+    } else if (exercise.hasVideo) {
+      // Odtwarzacz wideo pojawi się później — pokaż poster + ikonę odtwarzania.
+      final poster = exercise.thumbnailMediaPath;
+      media = Stack(
+        fit: StackFit.expand,
+        children: [
+          if (poster != null) buildExerciseMediaImage(poster, fit: BoxFit.contain, fallback: fallback) else fallback,
+          Container(
+            color: Colors.black.withValues(alpha: 0.25),
+            alignment: Alignment.center,
+            child: const Icon(Icons.play_circle_fill_rounded, size: 64, color: Colors.white),
+          ),
+        ],
+      );
+      badge = _badge(theme, Icons.movie_outlined, 'Wideo');
+    } else {
+      media = fallback;
+    }
+
+    return Container(
+      decoration: BoxDecoration(
+        color: theme.colorScheme.surfaceContainerHighest,
+        borderRadius: BorderRadius.circular(24),
+        border: Border.all(color: theme.colorScheme.outlineVariant.withValues(alpha: 0.4)),
+      ),
+      clipBehavior: Clip.antiAlias,
+      child: Stack(
+        fit: StackFit.expand,
+        children: [
+          Padding(padding: const EdgeInsets.all(10), child: media),
+          if (badge != null) Positioned(left: 12, top: 12, child: badge),
+          if (paused)
+            Container(
+              color: Colors.black.withValues(alpha: 0.35),
+              alignment: Alignment.center,
+              child: Icon(Icons.pause_circle_filled_rounded, size: 72, color: Colors.white.withValues(alpha: 0.9)),
+            ),
+        ],
+      ),
+    );
+  }
+
+  Widget _badge(ThemeData theme, IconData icon, String label) {
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 5),
+      decoration: BoxDecoration(color: theme.colorScheme.primary, borderRadius: BorderRadius.circular(12)),
+      child: Row(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          Icon(icon, size: 14, color: theme.colorScheme.onPrimary),
+          const SizedBox(width: 4),
+          Text(label, style: TextStyle(fontSize: 11, fontWeight: FontWeight.w800, color: theme.colorScheme.onPrimary)),
+        ],
+      ),
+    );
+  }
+}
+
+/// Okrągły przycisk sterujący z etykietą (poprzedni/pomiń/następne itd.). Etap 30.
+class _RoundControl extends StatelessWidget {
+  const _RoundControl({required this.icon, required this.label, this.onPressed});
+
+  final IconData icon;
+  final String label;
+  final VoidCallback? onPressed;
+
+  @override
+  Widget build(BuildContext context) {
+    final theme = Theme.of(context);
+    final enabled = onPressed != null;
+    return Opacity(
+      opacity: enabled ? 1 : 0.4,
+      child: InkWell(
+        onTap: onPressed,
+        borderRadius: BorderRadius.circular(16),
+        child: Padding(
+          padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 6),
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              Container(
+                width: 48,
+                height: 48,
+                decoration: BoxDecoration(
+                  color: theme.colorScheme.surfaceContainerHighest,
+                  shape: BoxShape.circle,
+                ),
+                child: Icon(icon, color: theme.colorScheme.onSurface),
+              ),
+              const SizedBox(height: 4),
+              Text(
+                label,
+                style: theme.textTheme.labelSmall?.copyWith(
+                  color: theme.colorScheme.onSurfaceVariant,
+                  fontWeight: FontWeight.w700,
+                ),
               ),
             ],
           ),
