@@ -2,6 +2,7 @@ export 'activity_credit.dart';
 export 'active_workout_session.dart';
 export 'body_measurement.dart';
 export 'exercise.dart';
+export 'exercise_media.dart';
 export 'exercise_library_preferences.dart';
 export 'health_connect_snapshot.dart';
 export 'trainer_enums.dart';

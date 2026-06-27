@@ -48,6 +48,115 @@ void main() {
       expect(restored.harderVersion, 'Przysiad z obciążeniem.');
     });
 
+    test('ExerciseMedia round-trips through JSON', () {
+      final media = ExerciseMedia(
+        id: 'media-1',
+        exerciseId: 'pushup',
+        type: MediaType.gif,
+        localPath: 'assets/exercises/pushup.gif',
+        thumbnailPath: 'assets/exercises/pushup_thumb.png',
+        title: 'Animacja pompki',
+        description: 'Pełny zakres ruchu.',
+        isPrimary: true,
+        createdAt: DateTime(2026, 6, 27, 12),
+      );
+
+      final restored = ExerciseMedia.fromJson(media.toJson());
+
+      expect(restored.id, 'media-1');
+      expect(restored.exerciseId, 'pushup');
+      expect(restored.type, MediaType.gif);
+      expect(restored.effectivePath, 'assets/exercises/pushup.gif');
+      expect(restored.thumbnail, 'assets/exercises/pushup_thumb.png');
+      expect(restored.isPrimary, isTrue);
+      expect(restored.isRemote, isFalse);
+      expect(restored.createdAt, DateTime(2026, 6, 27, 12));
+    });
+
+    test('MediaType.fromKey is crash-safe for unknown values', () {
+      expect(MediaType.fromKey('gif'), MediaType.gif);
+      expect(MediaType.fromKey('youtube'), MediaType.url);
+      expect(MediaType.fromKey(null), MediaType.none);
+      expect(MediaType.fromKey('totally-unknown'), MediaType.none);
+    });
+
+    test('Exercise resolves primary media for thumbnail and animation', () {
+      const exercise = Exercise(
+        id: 'pushup',
+        name: 'Pompka',
+        category: 'Klatka i ręce',
+        muscles: ['klatka piersiowa', 'triceps'],
+        equipment: 'masa ciała',
+        level: 'Początkujący',
+        illustrationType: 'pushup',
+        description: 'Opis',
+        tips: [],
+        commonMistakes: [],
+        defaultSets: 4,
+        defaultReps: 12,
+        defaultDurationSec: 0,
+        met: 4,
+        mediaItems: [
+          ExerciseMedia(
+            id: 'photo',
+            exerciseId: 'pushup',
+            type: MediaType.image,
+            localPath: 'assets/exercises/pushup_bottom.png',
+          ),
+          ExerciseMedia(
+            id: 'gif',
+            exerciseId: 'pushup',
+            type: MediaType.gif,
+            localPath: 'assets/exercises/pushup.gif',
+            thumbnailPath: 'assets/exercises/pushup_thumb.png',
+            isPrimary: true,
+          ),
+          ExerciseMedia(
+            id: 'video',
+            exerciseId: 'pushup',
+            type: MediaType.url,
+            remoteUrl: 'https://example.com/pushup',
+          ),
+        ],
+      );
+
+      final restored = Exercise.fromJson(exercise.toJson());
+
+      expect(restored.mediaItems, hasLength(3));
+      expect(restored.primaryMedia?.id, 'gif');
+      expect(restored.animatedMediaPath, 'assets/exercises/pushup.gif');
+      expect(restored.staticMediaPath, 'assets/exercises/pushup_bottom.png');
+      expect(restored.thumbnailMediaPath, 'assets/exercises/pushup_thumb.png');
+      expect(restored.videoMediaPath, 'https://example.com/pushup');
+      expect(restored.hasMedia, isTrue);
+      expect(restored.hasVideo, isTrue);
+    });
+
+    test('Exercise without media exposes no paths and never crashes', () {
+      const exercise = Exercise(
+        id: 'rest',
+        name: 'Bez mediów',
+        category: 'Inne',
+        muscles: ['całe ciało'],
+        equipment: 'masa ciała',
+        level: 'Początkujący',
+        illustrationType: 'generic',
+        description: '',
+        tips: [],
+        commonMistakes: [],
+        defaultSets: 1,
+        defaultReps: 1,
+        defaultDurationSec: 0,
+        met: 3,
+      );
+
+      expect(exercise.hasMedia, isFalse);
+      expect(exercise.hasVideo, isFalse);
+      expect(exercise.primaryMedia, isNull);
+      expect(exercise.animatedMediaPath, isNull);
+      expect(exercise.thumbnailMediaPath, isNull);
+    });
+
     test('WorkoutSession calculates volume from explicit sets', () {
       final session = WorkoutSession(
         id: 'session-1',
@@ -173,7 +282,9 @@ void main() {
       expect(restored.isRestTimerPaused, isTrue);
     });
 
-    test('BodyMeasurement preserves body metrics and progress photo placeholders', () {
+    test(
+        'BodyMeasurement preserves body metrics and progress photo placeholders',
+        () {
       final measurement = BodyMeasurement(
         id: 'measurement-1',
         date: DateTime(2026, 6, 24),
@@ -204,7 +315,8 @@ void main() {
       expect(restored.progressPhotoPaths, contains('front-placeholder.jpg'));
     });
 
-    test('TrainingImpact exposes calorie bridge payload and deduplication key', () {
+    test('TrainingImpact exposes calorie bridge payload and deduplication key',
+        () {
       final impact = TrainingImpact(
         id: 'impact-session-1',
         sessionId: 'session-1',
@@ -236,7 +348,8 @@ void main() {
       expect(bridgePayload['suggestedExtraProteinG'], 32);
     });
 
-    test('activity crediting keeps ordinary steps separate from measured walk', () {
+    test('activity crediting keeps ordinary steps separate from measured walk',
+        () {
       final steps = TrainerActivityEntry(
         id: 'steps-1',
         date: DateTime(2026, 6, 24, 9),
@@ -262,11 +375,14 @@ void main() {
 
       final decisions = resolveActivityCredits([steps, walk]);
 
-      expect(decisions.where((decision) => decision.includedInCalories), hasLength(2));
+      expect(decisions.where((decision) => decision.includedInCalories),
+          hasLength(2));
       expect(totalCreditedActivityKcal(decisions), 320);
     });
 
-    test('activity crediting skips measured walk when the same interval is a run', () {
+    test(
+        'activity crediting skips measured walk when the same interval is a run',
+        () {
       final measuredWalk = TrainerActivityEntry(
         id: 'walk-1',
         date: DateTime(2026, 6, 24, 10),
@@ -293,15 +409,19 @@ void main() {
       );
 
       final decisions = resolveActivityCredits([measuredWalk, run]);
-      final runDecision = decisions.singleWhere((decision) => decision.entry.type == TrainerActivityType.run);
-      final walkDecision = decisions.singleWhere((decision) => decision.entry.type == TrainerActivityType.measuredWalk);
+      final runDecision = decisions.singleWhere(
+          (decision) => decision.entry.type == TrainerActivityType.run);
+      final walkDecision = decisions.singleWhere((decision) =>
+          decision.entry.type == TrainerActivityType.measuredWalk);
 
       expect(runDecision.includedInCalories, isTrue);
       expect(walkDecision.skippedAsDuplicate, isTrue);
       expect(totalCreditedActivityKcal(decisions), 360);
     });
 
-    test('activity crediting skips the same external activity from another source', () {
+    test(
+        'activity crediting skips the same external activity from another source',
+        () {
       final healthRun = TrainerActivityEntry(
         id: 'run-health',
         date: DateTime(2026, 6, 24, 18),
@@ -319,8 +439,10 @@ void main() {
 
       final decisions = resolveActivityCredits([healthRun, watchRun]);
 
-      expect(decisions.where((decision) => decision.includedInCalories), hasLength(1));
-      expect(decisions.where((decision) => decision.skippedAsDuplicate), hasLength(1));
+      expect(decisions.where((decision) => decision.includedInCalories),
+          hasLength(1));
+      expect(decisions.where((decision) => decision.skippedAsDuplicate),
+          hasLength(1));
     });
 
     test('Health Connect snapshot preserves diagnostics in JSON', () {

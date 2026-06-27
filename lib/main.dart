@@ -2051,6 +2051,10 @@ class ExerciseRepo {
       defaultReps: 10,
       defaultDurationSec: 0,
       met: 5.0,
+      // Etap 26: przykładowe multimedia (asset). Pliki dodamy w kolejnym etapie —
+      // do tego czasu ExerciseMediaPreview pokazuje estetyczny fallback bez crasha.
+      gifPath: 'assets/exercises/squat.gif',
+      thumbnailPath: 'assets/exercises/squat_thumb.png',
     ),
     Exercise(
       id: 'goblet_squat',
@@ -2195,6 +2199,36 @@ class ExerciseRepo {
       defaultReps: 12,
       defaultDurationSec: 0,
       met: 4.0,
+      // Etap 26: pełny przykład listy multimediów (galeria). Element `isPrimary`
+      // jest źródłem miniatury i głównej animacji w treningu. Ścieżki to placeholdery.
+      mediaItems: const [
+        ExerciseMedia(
+          id: 'pushup_gif',
+          exerciseId: 'pushup',
+          type: MediaType.gif,
+          localPath: 'assets/exercises/pushup.gif',
+          thumbnailPath: 'assets/exercises/pushup_thumb.png',
+          title: 'Animacja pompki',
+          description: 'Pełny zakres ruchu z boku.',
+          isPrimary: true,
+        ),
+        ExerciseMedia(
+          id: 'pushup_photo',
+          exerciseId: 'pushup',
+          type: MediaType.image,
+          localPath: 'assets/exercises/pushup_bottom.png',
+          title: 'Pozycja dolna',
+          description: 'Kontrola w najniższym punkcie.',
+        ),
+        ExerciseMedia(
+          id: 'pushup_video',
+          exerciseId: 'pushup',
+          type: MediaType.url,
+          remoteUrl: 'https://www.youtube.com/watch?v=IODxDxX7oi4',
+          title: 'Instruktaż wideo',
+          description: 'Zewnętrzny poradnik techniki.',
+        ),
+      ],
     ),
     Exercise(
       id: 'incline_pushup',
@@ -2403,6 +2437,9 @@ class ExerciseRepo {
       defaultReps: 0,
       defaultDurationSec: 45,
       met: 3.3,
+      // Etap 26: przykład samego statycznego obrazu (asset). Placeholder do czasu
+      // dodania pliku — fallback działa offline i bez crasha.
+      imagePath: 'assets/exercises/plank.png',
     ),
     Exercise(
       id: 'side_plank',
@@ -5726,6 +5763,9 @@ class _ExercisesPageState extends State<ExercisesPage> {
       final painOk = !avoidLimitations || limitationSafe(exercise, store.settings.limitations);
       return equipmentOk && painOk;
     }).toList();
+    final fullLibrary = ExerciseRepo.combined(store.customExercises);
+    final recentExercises = _recentExercises(store);
+    final showRecent = !_hasActiveFilters && search.text.trim().isEmpty && recentExercises.isNotEmpty;
     return PageFrame(
       title: 'Baza ćwiczeń',
       subtitle: '${items.length} ćwiczeń · technika, bezpieczeństwo i lokalne preferencje',
@@ -5926,12 +5966,39 @@ class _ExercisesPageState extends State<ExercisesPage> {
               ),
             ),
           ),
+          // Etap 24: szybki dostęp do ostatnio używanych ćwiczeń (realne dane z logów).
+          if (showRecent) ...[
+            const SizedBox(height: 14),
+            Text(
+              'Ostatnio używane',
+              style: Theme.of(context).textTheme.titleLarge?.copyWith(fontWeight: FontWeight.w900),
+            ),
+            const SizedBox(height: 10),
+            SizedBox(
+              height: 40,
+              child: ListView.separated(
+                scrollDirection: Axis.horizontal,
+                itemCount: recentExercises.length,
+                separatorBuilder: (_, __) => const SizedBox(width: 8),
+                itemBuilder: (context, index) {
+                  final exercise = recentExercises[index];
+                  return ActionChip(
+                    avatar: Icon(ExercisePlaceholder.iconForExercise(exercise), size: 18),
+                    label: Text(exercise.name, overflow: TextOverflow.ellipsis),
+                    onPressed: () => Navigator.of(context).push(
+                      MaterialPageRoute(builder: (_) => ExerciseDetailsPage(exerciseId: exercise.id)),
+                    ),
+                  );
+                },
+              ),
+            ),
+          ],
           const SizedBox(height: 14),
           Row(
             children: [
               Expanded(
                 child: Text(
-                  showHidden ? 'Ukryte ćwiczenia' : 'Ćwiczenia',
+                  showHidden ? 'Ukryte ćwiczenia' : 'Wszystkie ćwiczenia',
                   style: Theme.of(context).textTheme.titleLarge?.copyWith(fontWeight: FontWeight.w900),
                 ),
               ),
@@ -5948,6 +6015,8 @@ class _ExercisesPageState extends State<ExercisesPage> {
           if (items.isEmpty)
             _ExerciseLibraryEmptyState(
               showingHidden: showHidden,
+              query: search.text,
+              baseEmpty: fullLibrary.isEmpty,
               onAdd: () => showCreateExerciseSheet(context),
               onClearFilters: () {
                 search.clear();
@@ -5986,6 +6055,21 @@ class _ExercisesPageState extends State<ExercisesPage> {
   }
 
   bool get _hasActiveFilters => muscleGroup != 'Wszystkie' || equipmentType != 'Wszystkie' || level != 'Wszystkie' || trainingGoal != 'Wszystkie' || onlyFavorites || showHidden || onlyAvailableEquipment || avoidLimitations;
+
+  /// Etap 24: ostatnio używane ćwiczenia z historii treningów (realne dane).
+  /// Zwraca maks. 8 unikalnych ćwiczeń od najnowszego wpisu.
+  List<Exercise> _recentExercises(AppStore store) {
+    final sortedLogs = [...store.logs]..sort((a, b) => b.date.compareTo(a.date));
+    final seen = <String>{};
+    final result = <Exercise>[];
+    for (final log in sortedLogs) {
+      if (seen.add(log.exerciseId)) {
+        result.add(ExerciseRepo.byId(log.exerciseId, store.customExercises));
+        if (result.length >= 8) break;
+      }
+    }
+    return result;
+  }
 }
 
 class _ExerciseFilterDropdown extends StatelessWidget {
@@ -6032,34 +6116,58 @@ class _ExerciseLibraryEmptyState extends StatelessWidget {
     required this.showingHidden,
     required this.onAdd,
     required this.onClearFilters,
+    this.query = '',
+    this.baseEmpty = false,
   });
 
   final bool showingHidden;
   final VoidCallback onAdd;
   final VoidCallback onClearFilters;
+  final String query;
+  final bool baseEmpty;
 
   @override
   Widget build(BuildContext context) {
     final theme = Theme.of(context);
+    final hasQuery = query.trim().isNotEmpty;
+
+    // Dobór komunikatu zależnie od przyczyny pustej listy.
+    final IconData icon;
+    final String title;
+    final String message;
+    if (baseEmpty) {
+      icon = Icons.fitness_center_rounded;
+      title = 'Baza ćwiczeń jest pusta';
+      message = 'Dodaj pierwsze ćwiczenie albo zaimportuj je z zewnętrznej bazy.';
+    } else if (showingHidden) {
+      icon = Icons.visibility_outlined;
+      title = 'Brak ukrytych ćwiczeń';
+      message = 'Ukryte pozycje pojawią się tutaj i będzie można je przywrócić.';
+    } else if (hasQuery) {
+      icon = Icons.search_off_rounded;
+      title = 'Brak wyników dla „${query.trim()}"';
+      message = 'Sprawdź pisownię, wyczyść filtry albo dodaj własne ćwiczenie.';
+    } else {
+      icon = Icons.search_off_rounded;
+      title = 'Brak ćwiczeń dla wybranych filtrów';
+      message = 'Wyczyść filtry albo dodaj własne ćwiczenie.';
+    }
+
     return Card(
       child: Padding(
         padding: const EdgeInsets.all(24),
         child: Column(
           children: [
-            Icon(
-              showingHidden ? Icons.visibility_outlined : Icons.search_off_rounded,
-              size: 46,
-              color: theme.colorScheme.primary,
-            ),
+            Icon(icon, size: 46, color: theme.colorScheme.primary),
             const SizedBox(height: 12),
             Text(
-              showingHidden ? 'Brak ukrytych ćwiczeń' : 'Brak ćwiczeń dla wybranych filtrów',
+              title,
               textAlign: TextAlign.center,
               style: theme.textTheme.titleMedium?.copyWith(fontWeight: FontWeight.w900),
             ),
             const SizedBox(height: 6),
             Text(
-              showingHidden ? 'Ukryte pozycje pojawią się tutaj i będzie można je przywrócić.' : 'Wyczyść filtry albo dodaj własne ćwiczenie.',
+              message,
               textAlign: TextAlign.center,
               style: theme.textTheme.bodyMedium?.copyWith(color: theme.colorScheme.onSurfaceVariant),
             ),
@@ -6069,10 +6177,11 @@ class _ExerciseLibraryEmptyState extends StatelessWidget {
               spacing: 8,
               runSpacing: 8,
               children: [
-                OutlinedButton(
-                  onPressed: onClearFilters,
-                  child: const Text('Wyczyść filtry'),
-                ),
+                if (!baseEmpty)
+                  OutlinedButton(
+                    onPressed: onClearFilters,
+                    child: const Text('Wyczyść filtry'),
+                  ),
                 FilledButton.icon(
                   onPressed: onAdd,
                   icon: const Icon(Icons.add_rounded),
@@ -6244,16 +6353,36 @@ class ExerciseCard extends StatelessWidget {
           child: Row(
             crossAxisAlignment: CrossAxisAlignment.start,
             children: [
-              Container(
+              SizedBox(
                 width: 78,
                 height: 92,
-                decoration: BoxDecoration(
-                  color: theme.colorScheme.primaryContainer.withValues(
-                    alpha: 0.35,
-                  ),
-                  borderRadius: BorderRadius.circular(20),
+                child: Stack(
+                  children: [
+                    Container(
+                      width: 78,
+                      height: 92,
+                      decoration: BoxDecoration(
+                        color: theme.colorScheme.primaryContainer.withValues(alpha: 0.35),
+                        borderRadius: BorderRadius.circular(20),
+                      ),
+                      child: ExerciseVisual(exercise: exercise),
+                    ),
+                    // Etap 24: znacznik animacji na miniaturze, gdy ćwiczenie ma GIF.
+                    if (exercise.animatedMediaPath != null)
+                      Positioned(
+                        left: 6,
+                        top: 6,
+                        child: Container(
+                          padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
+                          decoration: BoxDecoration(
+                            color: theme.colorScheme.primary,
+                            borderRadius: BorderRadius.circular(8),
+                          ),
+                          child: Icon(Icons.gif_box_rounded, size: 14, color: theme.colorScheme.onPrimary),
+                        ),
+                      ),
+                  ],
                 ),
-                child: ExerciseVisual(exercise: exercise),
               ),
               const SizedBox(width: 12),
               Expanded(
@@ -11772,6 +11901,65 @@ class _MoreNavCard extends StatelessWidget {
   }
 }
 
+/// Etap 25: karta „Wygląd aplikacji" — tryb nocny i kolor akcentu.
+/// Zmiany zapisują się od razu (store.updateSettings) i działają na żywo.
+class AppearanceCard extends StatelessWidget {
+  const AppearanceCard({super.key, required this.store});
+
+  final AppStore store;
+
+  @override
+  Widget build(BuildContext context) {
+    final theme = Theme.of(context);
+    return Card(
+      child: Padding(
+        padding: const EdgeInsets.fromLTRB(4, 4, 4, 12),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            SwitchListTile(
+              secondary: const Icon(Icons.dark_mode_outlined),
+              title: const Text('Tryb nocny'),
+              subtitle: const Text('Ciemny, premium styl podobny do aplikacji licznika'),
+              value: store.settings.darkMode,
+              onChanged: (v) => store.updateSettings(store.settings.copyWith(darkMode: v)),
+            ),
+            const Divider(height: 8),
+            Padding(
+              padding: const EdgeInsets.fromLTRB(16, 8, 16, 0),
+              child: Row(
+                children: [
+                  Icon(Icons.palette_outlined, color: theme.colorScheme.primary, size: 20),
+                  const SizedBox(width: 8),
+                  Text('Kolor akcentu', style: theme.textTheme.titleSmall?.copyWith(fontWeight: FontWeight.w800)),
+                ],
+              ),
+            ),
+            const SizedBox(height: 8),
+            Padding(
+              padding: const EdgeInsets.symmetric(horizontal: 16),
+              child: Wrap(
+                spacing: 8,
+                runSpacing: 8,
+                children: kAccentPalette.entries.map((entry) {
+                  final selected = store.settings.accentColorValue == entry.value;
+                  final color = Color(entry.value);
+                  return ChoiceChip(
+                    avatar: CircleAvatar(backgroundColor: color, radius: 9),
+                    label: Text(entry.key),
+                    selected: selected,
+                    onSelected: (_) => store.updateSettings(store.settings.copyWith(accentColorValue: entry.value)),
+                  );
+                }).toList(),
+              ),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+}
+
 class MorePage extends StatelessWidget {
   const MorePage({super.key});
 
@@ -11780,11 +11968,11 @@ class MorePage extends StatelessWidget {
     final store = AppScope.of(context);
     return PageFrame(
       title: 'Więcej',
-      subtitle: 'Integracje, zdrowie, ustawienia i dane aplikacji',
+      subtitle: 'Integracje, zdrowie, cele, wygląd i dane aplikacji',
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.stretch,
         children: [
-          // Trener AI — przeniesiony z dolnego paska, wciąż łatwo dostępny.
+          // Trener AI — wyróżniony skrót (nie ukrywamy ważnej funkcji).
           _MoreNavCard(
             tiles: [
               FeatureActionTile(
@@ -11797,14 +11985,15 @@ class MorePage extends StatelessWidget {
           ),
           const SizedBox(height: 16),
 
+          // === 1. Integracje ===
           const SectionHeader(title: 'Integracje'),
           const SizedBox(height: 10),
           _MoreNavCard(
             tiles: [
               FeatureActionTile(
                 icon: Icons.health_and_safety_outlined,
-                title: 'Health Connect',
-                subtitle: 'Dostępność, uprawnienia i dzienny odczyt',
+                title: 'Health Connect / Samsung Health',
+                subtitle: 'Połączenie, uprawnienia i dzienny odczyt',
                 onTap: () => Navigator.of(context).push(MaterialPageRoute(builder: (_) => const HealthConnectSettingsPage())),
               ),
               FeatureActionTile(
@@ -11817,10 +12006,17 @@ class MorePage extends StatelessWidget {
           ),
           const SizedBox(height: 16),
 
+          // === 2. Zdrowie i aktywność ===
           const SectionHeader(title: 'Zdrowie i aktywność'),
           const SizedBox(height: 10),
           _MoreNavCard(
             tiles: [
+              FeatureActionTile(
+                icon: Icons.monitor_heart_outlined,
+                title: 'Dane Health Connect',
+                subtitle: 'Kroki, dystans, aktywne kcal, sen i tętno',
+                onTap: () => Navigator.of(context).push(MaterialPageRoute(builder: (_) => const HealthConnectSettingsPage())),
+              ),
               FeatureActionTile(
                 icon: Icons.straighten_rounded,
                 title: 'Pomiary sylwetki',
@@ -11830,7 +12026,7 @@ class MorePage extends StatelessWidget {
               FeatureActionTile(
                 icon: Icons.rule_rounded,
                 title: 'Anty-dublowanie aktywności',
-                subtitle: 'Kroki, chód, bieg i trening siłowy',
+                subtitle: 'Kroki, chód, bieg i trening siłowy osobno',
                 onTap: () => Navigator.of(context).push(MaterialPageRoute(builder: (_) => const ActivityDeduplicationPage())),
               ),
               FeatureActionTile(
@@ -11843,44 +12039,44 @@ class MorePage extends StatelessWidget {
           ),
           const SizedBox(height: 16),
 
-          const SectionHeader(title: 'Cele i ustawienia'),
+          // === 3. Cele treningowe ===
+          const SectionHeader(title: 'Cele treningowe'),
           const SizedBox(height: 10),
           SettingsCard(settings: store.settings, onSave: store.updateSettings),
-          const SizedBox(height: 12),
-          Card(
-            child: SwitchListTile(
-              secondary: const Icon(Icons.dark_mode_outlined),
-              title: const Text('Tryb nocny'),
-              subtitle: const Text('Ciemny, premium styl podobny do aplikacji licznika'),
-              value: store.settings.darkMode,
-              onChanged: (v) => store.updateSettings(store.settings.copyWith(darkMode: v)),
-            ),
-          ),
           const SizedBox(height: 16),
 
-          const SectionHeader(title: 'Dane aplikacji'),
+          // === 4. Wygląd aplikacji ===
+          const SectionHeader(title: 'Wygląd aplikacji'),
           const SizedBox(height: 10),
-          BackupRestoreCard(store: store),
-          const SizedBox(height: 12),
-          ExportCard(),
+          AppearanceCard(store: store),
           const SizedBox(height: 16),
 
-          const SectionHeader(title: 'Pomoc / diagnostyka'),
+          // === 5. Dane i diagnostyka ===
+          const SectionHeader(title: 'Dane i diagnostyka'),
           const SizedBox(height: 10),
           _MoreNavCard(
             tiles: [
               FeatureActionTile(
                 icon: Icons.monitor_heart_outlined,
                 title: 'Diagnostyka',
-                subtitle: 'Stan danych, Health Connect, AI i błędne wpisy',
+                subtitle: 'Status zgód, dane dostępne/brakujące i błędy integracji',
                 onTap: () => Navigator.of(context).push(MaterialPageRoute(builder: (_) => const DiagnosticsPage())),
               ),
             ],
           ),
           const SizedBox(height: 12),
+          BackupRestoreCard(store: store),
+          const SizedBox(height: 12),
+          ExportCard(),
+          const SizedBox(height: 16),
+
+          // === 6. Informacje o aplikacji ===
+          const SectionHeader(title: 'Informacje o aplikacji'),
+          const SizedBox(height: 10),
           AboutCard(),
           const SizedBox(height: 16),
 
+          // Pełna lista funkcji i analiz (nie ukrywamy żadnej funkcji).
           const SectionHeader(title: 'Wszystkie funkcje i analizy'),
           const SizedBox(height: 10),
           TrainerFeaturesHub(store: store),

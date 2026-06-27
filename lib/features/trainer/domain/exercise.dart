@@ -1,4 +1,7 @@
+import 'exercise_media.dart';
 import 'trainer_enums.dart';
+
+export 'exercise_media.dart';
 
 class Exercise {
   const Exercise({
@@ -26,8 +29,12 @@ class Exercise {
     this.harderVersion = '',
     this.imageUrl,
     this.imagePath,
+    this.thumbnailPath,
     this.gifPath,
+    this.animationAssetPath,
     this.videoPath,
+    this.videoUrl,
+    this.mediaItems = const [],
     this.source = 'local',
   });
 
@@ -61,31 +68,116 @@ class Exercise {
   /// albo ścieżka URL. Ma pierwszeństwo nad zdalnym [imageUrl] przy statycznym podglądzie.
   final String? imagePath;
 
+  /// Miniatura ćwiczenia używana na listach/kafelkach. Asset albo URL.
+  /// Gdy pusta, miniatura jest wyprowadzana z pozostałych multimediów.
+  final String? thumbnailPath;
+
   /// Animacja / GIF ćwiczenia. Asset albo URL. Ma najwyższy priorytet w podglądzie.
   final String? gifPath;
 
-  /// Ścieżka wideo ćwiczenia. Na razie tylko struktura pod przyszłą obsługę odtwarzacza.
+  /// Spakowana animacja ćwiczenia (asset, np. GIF dołączony do aplikacji).
+  /// Traktowana jak animowane medium, gdy brak [gifPath].
+  final String? animationAssetPath;
+
+  /// Ścieżka wideo ćwiczenia (plik lokalny albo asset). Pod obsługę odtwarzacza.
   final String? videoPath;
+
+  /// Zdalny link do wideo (np. instruktaż). Pod obsługę odtwarzacza/linku.
+  final String? videoUrl;
+
+  /// Pełna lista multimediów ćwiczenia ([ExerciseMedia]).
+  /// Opcjonalna — brak elementów oznacza powrót do pól [imagePath]/[gifPath]/...
+  final List<ExerciseMedia> mediaItems;
 
   final String source;
 
   String get primaryMuscle => muscles.isEmpty ? category : muscles.first;
 
-  /// Ścieżka do animowanego multimediów (GIF) albo null.
-  String? get animatedMediaPath => (gifPath != null && gifPath!.trim().isNotEmpty) ? gifPath!.trim() : null;
+  /// Główne medium ćwiczenia: oznaczone [ExerciseMedia.isPrimary],
+  /// a gdy żadne nie jest oznaczone — pierwsze z [mediaItems]. `null`, gdy lista pusta.
+  ExerciseMedia? get primaryMedia {
+    if (mediaItems.isEmpty) return null;
+    for (final media in mediaItems) {
+      if (media.isPrimary && media.hasContent) return media;
+    }
+    for (final media in mediaItems) {
+      if (media.hasContent) return media;
+    }
+    return mediaItems.first;
+  }
 
-  /// Ścieżka do statycznego obrazu (lokalny albo zdalny) albo null.
-  String? get staticMediaPath {
-    if (imagePath != null && imagePath!.trim().isNotEmpty) return imagePath!.trim();
-    if (imageUrl != null && imageUrl!.trim().isNotEmpty) return imageUrl!.trim();
+  ExerciseMedia? _firstMediaOfType(bool Function(MediaType) test) {
+    for (final media in mediaItems) {
+      if (test(media.type) && media.hasContent) return media;
+    }
     return null;
   }
 
-  /// Czy ćwiczenie ma jakiekolwiek multimedia (GIF, obraz lokalny, obraz zdalny).
+  static String? _clean(String? value) {
+    final text = value?.trim() ?? '';
+    return text.isEmpty ? null : text;
+  }
+
+  /// Ścieżka do animowanego medium (GIF) albo null.
+  /// Priorytet: główne medium (jeśli animowane) > [gifPath] > [animationAssetPath]
+  /// > pierwszy animowany element z [mediaItems].
+  String? get animatedMediaPath {
+    final primary = primaryMedia;
+    if (primary != null && primary.type.isAnimated) {
+      final path = primary.effectivePath;
+      if (path != null) return path;
+    }
+    final gif = _clean(gifPath);
+    if (gif != null) return gif;
+    final asset = _clean(animationAssetPath);
+    if (asset != null) return asset;
+    return _firstMediaOfType((type) => type.isAnimated)?.effectivePath;
+  }
+
+  /// Ścieżka do statycznego obrazu (lokalny albo zdalny) albo null.
+  /// Priorytet: główne medium (jeśli obraz) > [imagePath] > [imageUrl]
+  /// > pierwszy obraz z [mediaItems].
+  String? get staticMediaPath {
+    final primary = primaryMedia;
+    if (primary != null && primary.type.isImage) {
+      final path = primary.effectivePath;
+      if (path != null) return path;
+    }
+    final local = _clean(imagePath);
+    if (local != null) return local;
+    final remote = _clean(imageUrl);
+    if (remote != null) return remote;
+    return _firstMediaOfType((type) => type.isImage)?.effectivePath;
+  }
+
+  /// Ścieżka do miniatury używanej na listach. Najpierw jawna [thumbnailPath],
+  /// potem miniatura/medium głównego elementu, na końcu obraz/animacja ćwiczenia.
+  String? get thumbnailMediaPath {
+    final thumb = _clean(thumbnailPath);
+    if (thumb != null) return thumb;
+    final primary = primaryMedia;
+    if (primary != null) {
+      final primaryThumb = primary.thumbnail;
+      if (primaryThumb != null) return primaryThumb;
+    }
+    return staticMediaPath ?? animatedMediaPath;
+  }
+
+  /// Ścieżka/URL wideo ćwiczenia. Priorytet: [videoPath] (lokalny) > [videoUrl]
+  /// > pierwsze wideo/link z [mediaItems].
+  String? get videoMediaPath {
+    final local = _clean(videoPath);
+    if (local != null) return local;
+    final remote = _clean(videoUrl);
+    if (remote != null) return remote;
+    return _firstMediaOfType((type) => type.isVideo)?.effectivePath;
+  }
+
+  /// Czy ćwiczenie ma jakiekolwiek multimedia (GIF, obraz lokalny/zdalny, lista mediów).
   bool get hasMedia => animatedMediaPath != null || staticMediaPath != null;
 
-  /// Czy ćwiczenie ma wideo (na przyszłość).
-  bool get hasVideo => videoPath != null && videoPath!.trim().isNotEmpty;
+  /// Czy ćwiczenie ma wideo (lokalne, zdalne albo w [mediaItems]).
+  bool get hasVideo => videoMediaPath != null;
 
   List<String> get supportingMuscles =>
       muscles.length <= 1 ? const [] : muscles.skip(1).toList();
@@ -127,8 +219,12 @@ class Exercise {
     String? harderVersion,
     String? imageUrl,
     String? imagePath,
+    String? thumbnailPath,
     String? gifPath,
+    String? animationAssetPath,
     String? videoPath,
+    String? videoUrl,
+    List<ExerciseMedia>? mediaItems,
     String? source,
   }) {
     return Exercise(
@@ -156,8 +252,12 @@ class Exercise {
       harderVersion: harderVersion ?? this.harderVersion,
       imageUrl: imageUrl ?? this.imageUrl,
       imagePath: imagePath ?? this.imagePath,
+      thumbnailPath: thumbnailPath ?? this.thumbnailPath,
       gifPath: gifPath ?? this.gifPath,
+      animationAssetPath: animationAssetPath ?? this.animationAssetPath,
       videoPath: videoPath ?? this.videoPath,
+      videoUrl: videoUrl ?? this.videoUrl,
+      mediaItems: mediaItems ?? this.mediaItems,
       source: source ?? this.source,
     );
   }
@@ -187,8 +287,12 @@ class Exercise {
         'harderVersion': harderVersion,
         'imageUrl': imageUrl,
         'imagePath': imagePath,
+        'thumbnailPath': thumbnailPath,
         'gifPath': gifPath,
+        'animationAssetPath': animationAssetPath,
         'videoPath': videoPath,
+        'videoUrl': videoUrl,
+        'mediaItems': mediaItems.map((media) => media.toJson()).toList(),
         'source': source,
       };
 
@@ -225,10 +329,25 @@ class Exercise {
         harderVersion: json['harderVersion']?.toString() ?? '',
         imageUrl: _nullableText(json['imageUrl']),
         imagePath: _nullableText(json['imagePath']),
+        thumbnailPath: _nullableText(json['thumbnailPath']),
         gifPath: _nullableText(json['gifPath']),
+        animationAssetPath: _nullableText(json['animationAssetPath']),
         videoPath: _nullableText(json['videoPath']),
+        videoUrl: _nullableText(json['videoUrl']),
+        mediaItems: _mediaList(json['mediaItems']),
         source: json['source']?.toString() ?? 'custom',
       );
+}
+
+List<ExerciseMedia> _mediaList(Object? value) {
+  if (value is! List) return const [];
+  final result = <ExerciseMedia>[];
+  for (final item in value) {
+    if (item is Map) {
+      result.add(ExerciseMedia.fromJson(Map<String, dynamic>.from(item)));
+    }
+  }
+  return result;
 }
 
 String normalizeTrainingLevel(String value) {
