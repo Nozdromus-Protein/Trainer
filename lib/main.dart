@@ -519,6 +519,24 @@ class AppStore extends ChangeNotifier {
     notifyListeners();
   }
 
+  /// Podmienia listę ćwiczeń konkretnego dnia (po indeksie — bezpieczne dla
+  /// programów liniowych, gdzie dni mogą powtarzać dzień tygodnia). Etap 29.
+  Future<void> updatePlanDayItems(
+    String planId,
+    int dayIndex,
+    List<PlanItem> items,
+  ) async {
+    final index = plans.indexWhere((plan) => plan.id == planId);
+    if (index < 0) return;
+    final plan = plans[index];
+    if (dayIndex < 0 || dayIndex >= plan.days.length) return;
+    final days = [...plan.days];
+    days[dayIndex] = days[dayIndex].copyWith(items: items);
+    plans[index] = plan.copyWith(days: days);
+    await savePlans();
+    notifyListeners();
+  }
+
   Future<void> saveSettings() async {
     final prefs = await SharedPreferences.getInstance();
     await prefs.setString(_settingsKey, jsonEncode(settings.toJson()));
@@ -9825,9 +9843,7 @@ class _ProgramTodayCard extends StatelessWidget {
               )
             else
               FilledButton.icon(
-                onPressed: day.items.isEmpty
-                    ? null
-                    : () => startWorkoutForDay(context, plan: plan, day: day),
+                onPressed: () => openWorkoutDayDetails(context, plan.id, index),
                 icon: const Icon(Icons.play_arrow_rounded),
                 label: const Text('START'),
               ),
@@ -9941,14 +9957,11 @@ class _ProgramDayCard extends StatelessWidget {
       ),
     );
 
-    if (isLocked) {
-      return InkWell(
-        borderRadius: BorderRadius.circular(18),
-        onTap: onWarnLocked,
-        child: card,
-      );
-    }
-    return card;
+    return InkWell(
+      borderRadius: BorderRadius.circular(18),
+      onTap: isLocked ? onWarnLocked : () => openWorkoutDayDetails(context, plan.id, index),
+      child: card,
+    );
   }
 
   Widget _buildAction(
@@ -9977,7 +9990,7 @@ class _ProgramDayCard extends StatelessWidget {
           children: [
             Expanded(
               child: OutlinedButton.icon(
-                onPressed: day.items.isEmpty ? null : () => startWorkoutForDay(context, plan: plan, day: day),
+                onPressed: () => openWorkoutDayDetails(context, plan.id, index),
                 icon: const Icon(Icons.replay_rounded, size: 18),
                 label: const Text('Powtórz'),
               ),
@@ -10001,7 +10014,7 @@ class _ProgramDayCard extends StatelessWidget {
           crossAxisAlignment: CrossAxisAlignment.stretch,
           children: [
             FilledButton.icon(
-              onPressed: day.items.isEmpty ? null : () => startWorkoutForDay(context, plan: plan, day: day),
+              onPressed: () => openWorkoutDayDetails(context, plan.id, index),
               icon: const Icon(Icons.play_arrow_rounded),
               label: Text(status == WorkoutDayStatus.active ? 'START' : 'Rozpocznij trening'),
             ),
@@ -10076,6 +10089,919 @@ class _StatusIcon extends StatelessWidget {
       case WorkoutDayStatus.available:
         return Icon(Icons.radio_button_unchecked_rounded, color: scheme.onSurfaceVariant);
     }
+  }
+}
+
+// ============================================================================
+// ETAP 29 — Ekran szczegółów dnia treningowego.
+// ============================================================================
+
+/// Wspólny wybór ćwiczenia z biblioteki (zwraca wybrane [Exercise] albo null).
+/// Używane m.in. do podmiany ćwiczenia w dniu. Etap 29.
+Future<Exercise?> pickExerciseFromLibrary(
+  BuildContext context, {
+  String title = 'Wybierz ćwiczenie',
+  String? subtitle,
+  Set<String> excludeIds = const {},
+}) async {
+  final store = AppScope.read(context);
+  var query = '';
+  return showModalBottomSheet<Exercise>(
+    context: context,
+    isScrollControlled: true,
+    useSafeArea: true,
+    showDragHandle: true,
+    builder: (sheetContext) => StatefulBuilder(
+      builder: (context, setSheetState) {
+        final exercises = ExerciseRepo.combined(store.customExercises).where((exercise) {
+          if (excludeIds.contains(exercise.id) || store.isExerciseHidden(exercise.id)) return false;
+          return query.isEmpty || exercise.name.toLowerCase().contains(query);
+        }).toList();
+        return FractionallySizedBox(
+          heightFactor: 0.86,
+          child: Column(
+            children: [
+              Padding(
+                padding: const EdgeInsets.fromLTRB(16, 0, 16, 12),
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.stretch,
+                  children: [
+                    Text(title, style: Theme.of(context).textTheme.titleLarge?.copyWith(fontWeight: FontWeight.w900)),
+                    if (subtitle != null) ...[
+                      const SizedBox(height: 4),
+                      Text(subtitle, style: Theme.of(context).textTheme.bodyMedium?.copyWith(color: Theme.of(context).colorScheme.onSurfaceVariant)),
+                    ],
+                    const SizedBox(height: 12),
+                    TextField(
+                      autofocus: true,
+                      decoration: const InputDecoration(prefixIcon: Icon(Icons.search_rounded), labelText: 'Szukaj po nazwie'),
+                      onChanged: (value) => setSheetState(() => query = value.trim().toLowerCase()),
+                    ),
+                  ],
+                ),
+              ),
+              Expanded(
+                child: exercises.isEmpty
+                    ? const Center(child: Text('Brak pasujących ćwiczeń'))
+                    : ListView.builder(
+                        padding: const EdgeInsets.fromLTRB(16, 0, 16, 20),
+                        itemCount: exercises.length,
+                        itemBuilder: (context, index) {
+                          final exercise = exercises[index];
+                          return Card(
+                            margin: const EdgeInsets.only(bottom: 8),
+                            child: ListTile(
+                              leading: SizedBox(width: 48, height: 48, child: ExerciseVisual(exercise: exercise)),
+                              title: Text(exercise.name, maxLines: 2, overflow: TextOverflow.ellipsis),
+                              subtitle: Text('${exercise.primaryMuscle} · ${exercise.equipment}', maxLines: 2, overflow: TextOverflow.ellipsis),
+                              trailing: const Icon(Icons.check_circle_outline_rounded),
+                              onTap: () => Navigator.pop(sheetContext, exercise),
+                            ),
+                          );
+                        },
+                      ),
+              ),
+            ],
+          ),
+        );
+      },
+    ),
+  );
+}
+
+Future<void> openWorkoutDayDetails(BuildContext context, String planId, int dayIndex) async {
+  await Navigator.of(context).push(
+    MaterialPageRoute<void>(
+      builder: (_) => WorkoutDayDetailsPage(planId: planId, dayIndex: dayIndex),
+    ),
+  );
+}
+
+/// Ikona typu ćwiczenia: czasowe / siłowe / powtórzeniowe.
+IconData planItemTypeIcon(PlanItem item, Exercise exercise) {
+  if (item.suggestedWeightKg > 0) return Icons.fitness_center_rounded;
+  if (item.durationSec > 0 || (exercise.defaultDurationSec > 0 && item.reps == 0)) {
+    return Icons.timer_outlined;
+  }
+  return Icons.repeat_rounded;
+}
+
+/// Krótki opis parametrów pozycji planu (czas albo serie × powtórzenia [+ ciężar]).
+String planItemMetaText(PlanItem item, Exercise exercise) {
+  if (item.durationSec > 0) return '${item.sets} × ${item.durationSec}s';
+  if (item.reps == 0 && exercise.defaultDurationSec > 0) {
+    return '${item.sets} × ${exercise.defaultDurationSec}s';
+  }
+  final weight = item.suggestedWeightKg > 0 ? ' · ${_formatPlanWeight(item.suggestedWeightKg)} kg' : '';
+  return '${item.sets} × ${item.reps} powt.$weight';
+}
+
+class WorkoutDayDetailsPage extends StatefulWidget {
+  const WorkoutDayDetailsPage({super.key, required this.planId, required this.dayIndex});
+
+  final String planId;
+  final int dayIndex;
+
+  @override
+  State<WorkoutDayDetailsPage> createState() => _WorkoutDayDetailsPageState();
+}
+
+class _WorkoutDayDetailsPageState extends State<WorkoutDayDetailsPage> {
+  bool _compact = false;
+
+  WorkoutPlan? _findPlan(AppStore store) {
+    for (final plan in store.plans) {
+      if (plan.id == widget.planId) return plan;
+    }
+    return null;
+  }
+
+  Future<void> _swapItem(AppStore store, WorkoutPlan plan, WorkoutDay day, int itemIndex) async {
+    final item = day.items[itemIndex];
+    final picked = await pickExerciseFromLibrary(
+      context,
+      title: 'Zamień ćwiczenie',
+      subtitle: 'Parametry serii/powtórzeń zostaną zachowane.',
+      excludeIds: day.items.map((entry) => entry.exerciseId).toSet(),
+    );
+    if (picked == null) return;
+    final items = [...day.items];
+    items[itemIndex] = item.copyWith(exerciseId: picked.id);
+    await store.updatePlanDayItems(plan.id, widget.dayIndex, items);
+  }
+
+  Future<void> _removeItem(AppStore store, WorkoutPlan plan, WorkoutDay day, int itemIndex) async {
+    final items = [...day.items]..removeAt(itemIndex);
+    await store.updatePlanDayItems(plan.id, widget.dayIndex, items);
+  }
+
+  void _openTechnique(Exercise exercise) {
+    Navigator.of(context).push(
+      MaterialPageRoute<void>(builder: (_) => ExerciseDetailsPage(exerciseId: exercise.id)),
+    );
+  }
+
+  Future<void> _openGuide(WorkoutPlan plan, WorkoutDay day) async {
+    final store = AppScope.read(context);
+    if (day.items.isEmpty) return;
+    final exercise = await showModalBottomSheet<Exercise>(
+      context: context,
+      showDragHandle: true,
+      isScrollControlled: true,
+      useSafeArea: true,
+      builder: (sheetContext) => SafeArea(
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            const Padding(
+              padding: EdgeInsets.fromLTRB(16, 4, 16, 8),
+              child: Align(alignment: Alignment.centerLeft, child: Text('Technika ćwiczeń', style: TextStyle(fontWeight: FontWeight.w900, fontSize: 16))),
+            ),
+            Flexible(
+              child: ListView(
+                shrinkWrap: true,
+                children: [
+                  for (final item in day.items)
+                    Builder(builder: (context) {
+                      final exercise = item.exerciseFrom(store.customExercises);
+                      return ListTile(
+                        leading: SizedBox(width: 44, height: 44, child: ExerciseVisual(exercise: exercise)),
+                        title: Text(exercise.name, maxLines: 1, overflow: TextOverflow.ellipsis),
+                        trailing: const Icon(Icons.chevron_right_rounded),
+                        onTap: () => Navigator.pop(sheetContext, exercise),
+                      );
+                    }),
+                ],
+              ),
+            ),
+          ],
+        ),
+      ),
+    );
+    if (exercise != null && mounted) _openTechnique(exercise);
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final store = AppScope.of(context);
+    final plan = _findPlan(store);
+    final theme = Theme.of(context);
+
+    if (plan == null || widget.dayIndex < 0 || widget.dayIndex >= plan.days.length) {
+      return Scaffold(
+        appBar: AppBar(title: const Text('Szczegóły dnia')),
+        body: const _ProgramEmptyState(),
+      );
+    }
+
+    final day = plan.days[widget.dayIndex];
+    final status = plan.statusForDay(widget.dayIndex);
+    final isRest = status == WorkoutDayStatus.rest || (plan.isRestDay(day) && status != WorkoutDayStatus.completed);
+    final isLocked = status == WorkoutDayStatus.locked;
+    final estimate = estimatePlanDay(day, store.customExercises, store.settings.bodyWeightKg);
+
+    final equipment = <EquipmentType>{};
+    final muscles = <MuscleGroup>{};
+    for (final item in day.items) {
+      final exercise = item.exerciseFrom(store.customExercises);
+      equipment.addAll(exercise.equipmentTypes);
+      muscles.addAll(exercise.muscleGroups);
+    }
+
+    return Scaffold(
+      body: ListView(
+        padding: EdgeInsets.zero,
+        children: [
+          _DayDetailsHeader(
+            plan: plan,
+            dayIndex: widget.dayIndex,
+            estimate: estimate,
+            status: status,
+            isRest: isRest,
+            onBack: () => Navigator.of(context).maybePop(),
+            menu: _buildMenu(store, plan, day),
+          ),
+          Padding(
+            padding: const EdgeInsets.fromLTRB(16, 16, 16, 24),
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.stretch,
+              children: [
+                _DayGuideCard(
+                  hasExercises: day.items.isNotEmpty,
+                  onOpen: () => _openGuide(plan, day),
+                ),
+                const SizedBox(height: 16),
+                if (isRest)
+                  const _RestDayView()
+                else if (day.items.isEmpty)
+                  EmptyCard(
+                    icon: Icons.fitness_center_rounded,
+                    title: 'Brak ćwiczeń w tym dniu',
+                    text: 'Dodaj ćwiczenia, aby rozpocząć trening.',
+                    buttonLabel: 'Dodaj ćwiczenie',
+                    onPressed: () => showPlanExercisePicker(context, plan: plan, day: day),
+                  )
+                else ...[
+                  if (equipment.isNotEmpty)
+                    _TagSection(
+                      icon: Icons.fitness_center_outlined,
+                      title: 'Sprzęt potrzebny',
+                      labels: equipment.map((type) => type.label).toList(),
+                    ),
+                  if (muscles.isNotEmpty) ...[
+                    const SizedBox(height: 12),
+                    _TagSection(
+                      icon: Icons.accessibility_new_rounded,
+                      title: 'Partie trenowane',
+                      labels: muscles.map((group) => group.label).toList(),
+                    ),
+                  ],
+                  const SizedBox(height: 18),
+                  Row(
+                    children: [
+                      Expanded(
+                        child: Text('${day.items.length} ćwiczeń', style: theme.textTheme.titleMedium?.copyWith(fontWeight: FontWeight.w900)),
+                      ),
+                    ],
+                  ),
+                  const SizedBox(height: 10),
+                  Align(
+                    alignment: Alignment.centerLeft,
+                    child: SegmentedButton<bool>(
+                      showSelectedIcon: false,
+                      style: SegmentedButton.styleFrom(
+                        visualDensity: VisualDensity.compact,
+                        padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
+                        tapTargetSize: MaterialTapTargetSize.shrinkWrap,
+                      ),
+                      segments: const [
+                        ButtonSegment(value: false, icon: Icon(Icons.view_list_rounded, size: 18), label: Text('Lista')),
+                        ButtonSegment(value: true, icon: Icon(Icons.view_agenda_outlined, size: 18), label: Text('Kompakt')),
+                      ],
+                      selected: {_compact},
+                      onSelectionChanged: (selection) => setState(() => _compact = selection.first),
+                    ),
+                  ),
+                  const SizedBox(height: 12),
+                  for (var i = 0; i < day.items.length; i++)
+                    _DayExerciseTile(
+                      exercise: day.items[i].exerciseFrom(store.customExercises),
+                      item: day.items[i],
+                      position: i + 1,
+                      compact: _compact,
+                      onTechnique: () => _openTechnique(day.items[i].exerciseFrom(store.customExercises)),
+                      onSwap: () => _swapItem(store, plan, day, i),
+                      onRemove: () => _removeItem(store, plan, day, i),
+                    ),
+                ],
+              ],
+            ),
+          ),
+        ],
+      ),
+      bottomNavigationBar: _DayStartBar(
+        plan: plan,
+        dayIndex: widget.dayIndex,
+        day: day,
+        status: status,
+        isRest: isRest,
+        isLocked: isLocked,
+      ),
+    );
+  }
+
+  Widget _buildMenu(AppStore store, WorkoutPlan plan, WorkoutDay day) {
+    return PopupMenuButton<String>(
+      icon: const Icon(Icons.more_vert_rounded, color: Colors.white),
+      tooltip: 'Opcje dnia',
+      onSelected: (value) async {
+        switch (value) {
+          case 'add':
+            await showPlanExercisePicker(context, plan: plan, day: day);
+            break;
+          case 'editPlan':
+            await showWorkoutPlanEditor(context, plan: plan);
+            break;
+          case 'guide':
+            await _openGuide(plan, day);
+            break;
+        }
+      },
+      itemBuilder: (context) => const [
+        PopupMenuItem(value: 'add', child: ListTile(contentPadding: EdgeInsets.zero, leading: Icon(Icons.playlist_add_rounded), title: Text('Dodaj ćwiczenie'))),
+        PopupMenuItem(value: 'guide', child: ListTile(contentPadding: EdgeInsets.zero, leading: Icon(Icons.menu_book_outlined), title: Text('Przewodnik / technika'))),
+        PopupMenuItem(value: 'editPlan', child: ListTile(contentPadding: EdgeInsets.zero, leading: Icon(Icons.edit_calendar_outlined), title: Text('Edytuj plan'))),
+      ],
+    );
+  }
+}
+
+/// Nagłówek szczegółów dnia: obraz/gradient, powrót, menu, program + poziom,
+/// „Dzień X", czas, kcal, liczba ćwiczeń, status.
+class _DayDetailsHeader extends StatelessWidget {
+  const _DayDetailsHeader({
+    required this.plan,
+    required this.dayIndex,
+    required this.estimate,
+    required this.status,
+    required this.isRest,
+    required this.onBack,
+    required this.menu,
+  });
+
+  final WorkoutPlan plan;
+  final int dayIndex;
+  final PlanDayEstimate estimate;
+  final WorkoutDayStatus status;
+  final bool isRest;
+  final VoidCallback onBack;
+  final Widget menu;
+
+  @override
+  Widget build(BuildContext context) {
+    final theme = Theme.of(context);
+    final scheme = theme.colorScheme;
+    final level = plan.level.trim();
+    final day = plan.days[dayIndex];
+    return SizedBox(
+      height: 270,
+      child: Stack(
+        fit: StackFit.expand,
+        children: [
+          if (plan.imageAsset != null && plan.imageAsset!.trim().isNotEmpty)
+            buildExerciseMediaImage(plan.imageAsset!, fit: BoxFit.cover, fallback: _gradient(scheme))
+          else
+            _gradient(scheme),
+          DecoratedBox(
+            decoration: BoxDecoration(
+              gradient: LinearGradient(
+                begin: Alignment.topCenter,
+                end: Alignment.bottomCenter,
+                colors: [Colors.black.withValues(alpha: 0.15), Colors.black.withValues(alpha: 0.74)],
+              ),
+            ),
+          ),
+          SafeArea(
+            bottom: false,
+            child: Padding(
+              padding: const EdgeInsets.symmetric(horizontal: 4),
+              child: Row(
+                children: [
+                  IconButton(onPressed: onBack, icon: const Icon(Icons.arrow_back_rounded, color: Colors.white), tooltip: 'Wstecz'),
+                  const Spacer(),
+                  menu,
+                ],
+              ),
+            ),
+          ),
+          Positioned(
+            left: 18,
+            right: 18,
+            bottom: 18,
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                Text(
+                  [plan.name, if (level.isNotEmpty) level].join(' · '),
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
+                  style: const TextStyle(color: Colors.white70, fontWeight: FontWeight.w700),
+                ),
+                const SizedBox(height: 4),
+                Row(
+                  crossAxisAlignment: CrossAxisAlignment.center,
+                  children: [
+                    Expanded(
+                      child: Text(
+                        'Dzień ${dayIndex + 1}',
+                        maxLines: 1,
+                        overflow: TextOverflow.ellipsis,
+                        style: theme.textTheme.headlineMedium?.copyWith(color: Colors.white, fontWeight: FontWeight.w900),
+                      ),
+                    ),
+                    _DayStatusBadge(status: status),
+                  ],
+                ),
+                const SizedBox(height: 4),
+                Text(
+                  isRest ? 'Dzień odpoczynku' : day.title,
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
+                  style: theme.textTheme.titleMedium?.copyWith(color: Colors.white, fontWeight: FontWeight.w700),
+                ),
+                const SizedBox(height: 12),
+                Wrap(
+                  spacing: 8,
+                  runSpacing: 8,
+                  children: isRest
+                      ? const [_HeaderChip(icon: Icons.self_improvement_rounded, label: 'Regeneracja')]
+                      : [
+                          _HeaderChip(icon: Icons.timer_outlined, label: '~${estimate.minutes} min'),
+                          _HeaderChip(icon: Icons.local_fire_department_outlined, label: '${estimate.kcal} kcal'),
+                          _HeaderChip(icon: Icons.format_list_numbered_rounded, label: '${estimate.exerciseCount} ćw.'),
+                        ],
+                ),
+              ],
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
+  Widget _gradient(ColorScheme scheme) => DecoratedBox(
+        decoration: BoxDecoration(
+          gradient: LinearGradient(
+            begin: Alignment.topLeft,
+            end: Alignment.bottomRight,
+            colors: [scheme.primary, scheme.primaryContainer, scheme.surfaceContainerHighest],
+          ),
+        ),
+      );
+}
+
+class _DayStatusBadge extends StatelessWidget {
+  const _DayStatusBadge({required this.status});
+
+  final WorkoutDayStatus status;
+
+  @override
+  Widget build(BuildContext context) {
+    late final IconData icon;
+    late final String label;
+    switch (status) {
+      case WorkoutDayStatus.completed:
+        icon = Icons.check_circle_rounded;
+        label = 'Ukończony';
+        break;
+      case WorkoutDayStatus.locked:
+        icon = Icons.lock_rounded;
+        label = 'Zablokowany';
+        break;
+      case WorkoutDayStatus.rest:
+        icon = Icons.local_cafe_rounded;
+        label = 'Odpoczynek';
+        break;
+      case WorkoutDayStatus.active:
+        icon = Icons.bolt_rounded;
+        label = 'Dostępny';
+        break;
+      case WorkoutDayStatus.available:
+        icon = Icons.check_circle_outline_rounded;
+        label = 'Dostępny';
+        break;
+    }
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 5),
+      decoration: BoxDecoration(
+        color: Colors.white.withValues(alpha: 0.2),
+        borderRadius: BorderRadius.circular(12),
+        border: Border.all(color: Colors.white30),
+      ),
+      child: Row(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          Icon(icon, size: 14, color: Colors.white),
+          const SizedBox(width: 5),
+          Text(label, style: const TextStyle(color: Colors.white, fontSize: 12, fontWeight: FontWeight.w800)),
+        ],
+      ),
+    );
+  }
+}
+
+/// Sekcja „Przewodnik": avatar trenera + opis + przejście do techniki.
+class _DayGuideCard extends StatelessWidget {
+  const _DayGuideCard({required this.hasExercises, required this.onOpen});
+
+  final bool hasExercises;
+  final VoidCallback onOpen;
+
+  @override
+  Widget build(BuildContext context) {
+    final theme = Theme.of(context);
+    return Card(
+      clipBehavior: Clip.antiAlias,
+      child: InkWell(
+        onTap: hasExercises ? onOpen : null,
+        child: Padding(
+          padding: const EdgeInsets.all(14),
+          child: Row(
+            children: [
+              CircleAvatar(
+                radius: 22,
+                backgroundColor: theme.colorScheme.primaryContainer,
+                foregroundColor: theme.colorScheme.onPrimaryContainer,
+                child: const Icon(Icons.sports_rounded),
+              ),
+              const SizedBox(width: 12),
+              Expanded(
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Text('Przewodnik', style: theme.textTheme.titleMedium?.copyWith(fontWeight: FontWeight.w900)),
+                    const SizedBox(height: 2),
+                    Text(
+                      hasExercises ? 'Instrukcje ćwiczeń i wideo trenera' : 'Dodaj ćwiczenia, aby zobaczyć instrukcje',
+                      maxLines: 2,
+                      overflow: TextOverflow.ellipsis,
+                      style: theme.textTheme.bodySmall?.copyWith(color: theme.colorScheme.onSurfaceVariant),
+                    ),
+                  ],
+                ),
+              ),
+              if (hasExercises) Icon(Icons.chevron_right_rounded, color: theme.colorScheme.onSurfaceVariant),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+/// Sekcja z chipami (sprzęt / partie trenowane).
+class _TagSection extends StatelessWidget {
+  const _TagSection({required this.icon, required this.title, required this.labels});
+
+  final IconData icon;
+  final String title;
+  final List<String> labels;
+
+  @override
+  Widget build(BuildContext context) {
+    final theme = Theme.of(context);
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        Row(
+          children: [
+            Icon(icon, size: 18, color: theme.colorScheme.primary),
+            const SizedBox(width: 8),
+            Text(title, style: theme.textTheme.titleSmall?.copyWith(fontWeight: FontWeight.w900)),
+          ],
+        ),
+        const SizedBox(height: 8),
+        Wrap(
+          spacing: 8,
+          runSpacing: 8,
+          children: [for (final label in labels) MiniTag(text: label)],
+        ),
+      ],
+    );
+  }
+}
+
+/// Miniatura ćwiczenia na liście dnia z bezpiecznym fallbackiem i znacznikiem mediów.
+class _ExerciseListThumb extends StatelessWidget {
+  const _ExerciseListThumb({required this.exercise, this.size = 56});
+
+  final Exercise exercise;
+  final double size;
+
+  @override
+  Widget build(BuildContext context) {
+    final theme = Theme.of(context);
+    final hasMedia = exercise.hasMedia || exercise.hasVideo;
+    final badgeIcon = exercise.animatedMediaPath != null
+        ? Icons.gif_box_rounded
+        : exercise.hasVideo
+            ? Icons.movie_rounded
+            : Icons.image_rounded;
+    return SizedBox(
+      width: size,
+      height: size,
+      child: Stack(
+        children: [
+          Positioned.fill(
+            child: ClipRRect(
+              borderRadius: BorderRadius.circular(14),
+              child: ExerciseVisual(exercise: exercise),
+            ),
+          ),
+          if (hasMedia)
+            Positioned(
+              right: 3,
+              bottom: 3,
+              child: Container(
+                padding: const EdgeInsets.all(3),
+                decoration: BoxDecoration(
+                  color: theme.colorScheme.primary,
+                  borderRadius: BorderRadius.circular(7),
+                ),
+                child: Icon(badgeIcon, size: 11, color: theme.colorScheme.onPrimary),
+              ),
+            ),
+        ],
+      ),
+    );
+  }
+}
+
+/// Kafelek ćwiczenia na liście dnia (tryb listy i kompaktowy).
+class _DayExerciseTile extends StatelessWidget {
+  const _DayExerciseTile({
+    required this.exercise,
+    required this.item,
+    required this.position,
+    required this.compact,
+    required this.onTechnique,
+    required this.onSwap,
+    required this.onRemove,
+  });
+
+  final Exercise exercise;
+  final PlanItem item;
+  final int position;
+  final bool compact;
+  final VoidCallback onTechnique;
+  final VoidCallback onSwap;
+  final VoidCallback onRemove;
+
+  @override
+  Widget build(BuildContext context) {
+    final theme = Theme.of(context);
+    final scheme = theme.colorScheme;
+    final meta = planItemMetaText(item, exercise);
+    final typeIcon = planItemTypeIcon(item, exercise);
+
+    final menu = PopupMenuButton<String>(
+      tooltip: 'Szybkie opcje',
+      onSelected: (value) {
+        switch (value) {
+          case 'technique':
+            onTechnique();
+            break;
+          case 'swap':
+            onSwap();
+            break;
+          case 'remove':
+            onRemove();
+            break;
+        }
+      },
+      itemBuilder: (context) => const [
+        PopupMenuItem(value: 'technique', child: ListTile(contentPadding: EdgeInsets.zero, leading: Icon(Icons.menu_book_outlined), title: Text('Zobacz technikę'))),
+        PopupMenuItem(value: 'swap', child: ListTile(contentPadding: EdgeInsets.zero, leading: Icon(Icons.swap_horiz_rounded), title: Text('Zamień ćwiczenie'))),
+        PopupMenuItem(value: 'remove', child: ListTile(contentPadding: EdgeInsets.zero, leading: Icon(Icons.delete_outline_rounded), title: Text('Usuń z tego dnia'))),
+      ],
+    );
+
+    if (compact) {
+      return Container(
+        margin: const EdgeInsets.only(bottom: 8),
+        padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 8),
+        decoration: BoxDecoration(
+          color: scheme.surfaceContainerHighest.withValues(alpha: 0.5),
+          borderRadius: BorderRadius.circular(14),
+        ),
+        child: Row(
+          children: [
+            _ExerciseListThumb(exercise: exercise, size: 40),
+            const SizedBox(width: 10),
+            Expanded(
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Text('$position. ${exercise.name}', maxLines: 1, overflow: TextOverflow.ellipsis, style: theme.textTheme.bodyMedium?.copyWith(fontWeight: FontWeight.w800)),
+                  Row(
+                    children: [
+                      Icon(typeIcon, size: 13, color: scheme.onSurfaceVariant),
+                      const SizedBox(width: 4),
+                      Expanded(child: Text(meta, maxLines: 1, overflow: TextOverflow.ellipsis, style: theme.textTheme.bodySmall?.copyWith(color: scheme.onSurfaceVariant))),
+                    ],
+                  ),
+                ],
+              ),
+            ),
+            menu,
+          ],
+        ),
+      );
+    }
+
+    return Container(
+      margin: const EdgeInsets.only(bottom: 10),
+      padding: const EdgeInsets.all(12),
+      decoration: BoxDecoration(
+        color: scheme.surfaceContainerHighest.withValues(alpha: 0.5),
+        borderRadius: BorderRadius.circular(16),
+        border: Border.all(color: scheme.outlineVariant.withValues(alpha: 0.4)),
+      ),
+      child: Row(
+        children: [
+          _ExerciseListThumb(exercise: exercise, size: 60),
+          const SizedBox(width: 12),
+          Expanded(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Text('$position. ${exercise.name}', maxLines: 2, overflow: TextOverflow.ellipsis, style: theme.textTheme.bodyLarge?.copyWith(fontWeight: FontWeight.w800)),
+                const SizedBox(height: 6),
+                Row(
+                  children: [
+                    Icon(typeIcon, size: 15, color: scheme.primary),
+                    const SizedBox(width: 4),
+                    Expanded(
+                      child: Text(
+                        meta,
+                        maxLines: 1,
+                        overflow: TextOverflow.ellipsis,
+                        style: theme.textTheme.bodySmall?.copyWith(color: scheme.onSurfaceVariant, fontWeight: FontWeight.w600),
+                      ),
+                    ),
+                    if (exercise.hasMedia || exercise.hasVideo) ...[
+                      const SizedBox(width: 8),
+                      Icon(Icons.play_circle_outline_rounded, size: 14, color: scheme.onSurfaceVariant),
+                    ],
+                  ],
+                ),
+              ],
+            ),
+          ),
+          menu,
+        ],
+      ),
+    );
+  }
+}
+
+/// Ekran dnia odpoczynku zamiast listy ćwiczeń.
+class _RestDayView extends StatelessWidget {
+  const _RestDayView();
+
+  @override
+  Widget build(BuildContext context) {
+    const tips = [
+      (Icons.bedtime_outlined, 'Regeneracja', 'Daj mięśniom czas na odbudowę — sen i lekki dzień robią różnicę.'),
+      (Icons.directions_walk_rounded, 'Spacer', 'Lekki spacer 20–30 min poprawia krążenie i przyspiesza regenerację.'),
+      (Icons.self_improvement_rounded, 'Mobilność', 'Krótka sesja rozciągania/mobility utrzyma zakres ruchu.'),
+      (Icons.local_drink_outlined, 'Nawodnienie', 'Pij wodę regularnie — wspiera regenerację i samopoczucie.'),
+    ];
+    final theme = Theme.of(context);
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.stretch,
+      children: [
+        Text('Dziś odpoczywasz', style: theme.textTheme.titleLarge?.copyWith(fontWeight: FontWeight.w900)),
+        const SizedBox(height: 4),
+        Text('Wykorzystaj ten dzień na regenerację, aby wrócić silniejszym.', style: theme.textTheme.bodyMedium?.copyWith(color: theme.colorScheme.onSurfaceVariant)),
+        const SizedBox(height: 14),
+        for (final tip in tips)
+          Container(
+            margin: const EdgeInsets.only(bottom: 10),
+            padding: const EdgeInsets.all(14),
+            decoration: BoxDecoration(
+              color: theme.colorScheme.surfaceContainerHighest.withValues(alpha: 0.5),
+              borderRadius: BorderRadius.circular(16),
+            ),
+            child: Row(
+              children: [
+                CircleAvatar(
+                  backgroundColor: theme.colorScheme.primaryContainer,
+                  foregroundColor: theme.colorScheme.onPrimaryContainer,
+                  child: Icon(tip.$1),
+                ),
+                const SizedBox(width: 12),
+                Expanded(
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Text(tip.$2, style: theme.textTheme.titleSmall?.copyWith(fontWeight: FontWeight.w900)),
+                      const SizedBox(height: 2),
+                      Text(tip.$3, style: theme.textTheme.bodySmall?.copyWith(color: theme.colorScheme.onSurfaceVariant)),
+                    ],
+                  ),
+                ),
+              ],
+            ),
+          ),
+      ],
+    );
+  }
+}
+
+/// Dolny, „przyklejony" pasek z głównym przyciskiem (START / odpoczynek / zablokowane).
+class _DayStartBar extends StatelessWidget {
+  const _DayStartBar({
+    required this.plan,
+    required this.dayIndex,
+    required this.day,
+    required this.status,
+    required this.isRest,
+    required this.isLocked,
+  });
+
+  final WorkoutPlan plan;
+  final int dayIndex;
+  final WorkoutDay day;
+  final WorkoutDayStatus status;
+  final bool isRest;
+  final bool isLocked;
+
+  @override
+  Widget build(BuildContext context) {
+    final theme = Theme.of(context);
+    final store = AppScope.of(context);
+    final isCompleted = status == WorkoutDayStatus.completed;
+
+    Widget button;
+    if (isLocked) {
+      button = Column(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          Row(
+            mainAxisAlignment: MainAxisAlignment.center,
+            children: [
+              Icon(Icons.lock_outline_rounded, size: 16, color: theme.colorScheme.onSurfaceVariant),
+              const SizedBox(width: 6),
+              Flexible(
+                child: Text(
+                  'Odblokuje się po ukończeniu poprzedniego dnia',
+                  textAlign: TextAlign.center,
+                  style: theme.textTheme.bodySmall?.copyWith(color: theme.colorScheme.onSurfaceVariant),
+                ),
+              ),
+            ],
+          ),
+          const SizedBox(height: 8),
+          FilledButton.icon(
+            onPressed: null,
+            icon: const Icon(Icons.lock_rounded),
+            label: const Text('Zablokowane'),
+          ),
+        ],
+      );
+    } else if (isRest) {
+      button = FilledButton.tonalIcon(
+        onPressed: () async {
+          await store.setPlanDayCompleted(plan.id, dayIndex);
+          if (context.mounted) Navigator.of(context).maybePop();
+        },
+        icon: const Icon(Icons.check_rounded),
+        label: const Text('Zalicz dzień odpoczynku'),
+      );
+    } else {
+      button = FilledButton.icon(
+        onPressed: day.items.isEmpty ? null : () => startWorkoutForDay(context, plan: plan, day: day),
+        icon: Icon(isCompleted ? Icons.replay_rounded : Icons.play_arrow_rounded),
+        label: Text(isCompleted ? 'Powtórz trening' : 'START'),
+      );
+    }
+
+    return Material(
+      elevation: 8,
+      color: theme.colorScheme.surface,
+      child: SafeArea(
+        top: false,
+        child: Padding(
+          padding: const EdgeInsets.fromLTRB(16, 10, 16, 10),
+          child: SizedBox(
+            width: double.infinity,
+            child: button,
+          ),
+        ),
+      ),
+    );
   }
 }
 
