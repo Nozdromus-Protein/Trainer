@@ -166,9 +166,12 @@ class ExerciseMedia {
   }
 
   /// Ścieżka do miniatury: najpierw [thumbnailPath], potem [effectivePath].
+  /// Dla wideo/linku nie zwraca samego pliku wideo (nie da się go pokazać jako
+  /// obraz) — jeśli brak osobnej miniatury, zwraca `null` i UI użyje fallbacku.
   String? get thumbnail {
     final thumb = thumbnailPath?.trim();
     if (thumb != null && thumb.isNotEmpty) return thumb;
+    if (type.isVideo) return null;
     return effectivePath;
   }
 

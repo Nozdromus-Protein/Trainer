@@ -18282,27 +18282,53 @@ class ExercisePlaceholder extends StatelessWidget {
   }
 }
 
+/// Neutralny stan ładowania medium (sieciowego) — spójny z motywem. Etap 32.
+class _MediaLoadingBox extends StatelessWidget {
+  const _MediaLoadingBox();
+
+  @override
+  Widget build(BuildContext context) {
+    final scheme = Theme.of(context).colorScheme;
+    return Container(
+      color: scheme.surfaceContainerHighest,
+      alignment: Alignment.center,
+      child: SizedBox(
+        width: 22,
+        height: 22,
+        child: CircularProgressIndicator(strokeWidth: 2, color: scheme.primary),
+      ),
+    );
+  }
+}
+
 /// Crash-safe budowniczy obrazu/GIF-a z dowolnego źródła:
-/// * URL (`http`/`https`) → [Image.network],
+/// * URL (`http`/`https`) → [Image.network] (ze stanem ładowania i błędu),
 /// * asset (`assets/...`) → [Image.asset],
 /// * ścieżka pliku z dysku (np. z galerii/aparatu) → [Image.file].
 ///
-/// Każdy wariant ma `errorBuilder`, więc brakujący/uszkodzony plik nie crashuje
-/// aplikacji — pokazywany jest [fallback]. Etap 27.
+/// Każdy wariant ma `errorBuilder`, więc brak pliku / błędna ścieżka / usunięty plik /
+/// pusty URL / brak uprawnień nie crashują aplikacji — pokazywany jest [fallback].
+/// [loading] to stan ładowania dla zasobów sieciowych (domyślnie spinner).
+/// [cacheWidth] ogranicza rozmiar dekodowanej bitmapy (cache miniatur → mniej pamięci).
+/// Etap 27, rozszerzone w etapie 32.
 Widget buildExerciseMediaImage(
   String path, {
   BoxFit fit = BoxFit.cover,
   required Widget fallback,
+  Widget? loading,
+  int? cacheWidth,
 }) {
   final trimmed = path.trim();
   if (trimmed.isEmpty) return fallback;
   final lower = trimmed.toLowerCase();
+  final loadingWidget = loading ?? const _MediaLoadingBox();
   if (lower.startsWith('http://') || lower.startsWith('https://')) {
     return Image.network(
       trimmed,
       fit: fit,
+      cacheWidth: cacheWidth,
       errorBuilder: (_, __, ___) => fallback,
-      loadingBuilder: (context, child, progress) => progress == null ? child : fallback,
+      loadingBuilder: (context, child, progress) => progress == null ? child : loadingWidget,
     );
   }
   if (trimmed.startsWith('assets/')) {
@@ -18310,6 +18336,7 @@ Widget buildExerciseMediaImage(
       trimmed,
       fit: fit,
       gaplessPlayback: true,
+      cacheWidth: cacheWidth,
       errorBuilder: (_, __, ___) => fallback,
     );
   }
@@ -18319,6 +18346,7 @@ Widget buildExerciseMediaImage(
     File(trimmed),
     fit: fit,
     gaplessPlayback: true,
+    cacheWidth: cacheWidth,
     errorBuilder: (_, __, ___) => fallback,
   );
 }
@@ -18371,6 +18399,8 @@ class ExerciseMediaThumbnail extends StatelessWidget {
     final theme = Theme.of(context);
     final radius = BorderRadius.circular(borderRadius);
     final iconTile = _iconTile(theme);
+    // Cache miniatur: dekoduj bitmapę najwyżej do ~3× rozmiaru kafelka (mniej pamięci).
+    final cacheWidth = (size * 3).round();
 
     Widget content;
     if (media.type.isVideo) {
@@ -18382,7 +18412,7 @@ class ExerciseMediaThumbnail extends StatelessWidget {
         fit: StackFit.expand,
         children: [
           if (hasThumb)
-            buildExerciseMediaImage(explicitThumb, fallback: iconTile)
+            buildExerciseMediaImage(explicitThumb, fallback: iconTile, cacheWidth: cacheWidth)
           else
             iconTile,
           Container(
@@ -18394,7 +18424,9 @@ class ExerciseMediaThumbnail extends StatelessWidget {
       );
     } else {
       final thumb = media.thumbnail;
-      content = thumb != null ? buildExerciseMediaImage(thumb, fallback: iconTile) : iconTile;
+      content = thumb != null
+          ? buildExerciseMediaImage(thumb, fallback: iconTile, cacheWidth: cacheWidth)
+          : iconTile;
     }
 
     return SizedBox(
