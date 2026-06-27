@@ -116,4 +116,51 @@ void main() {
     expect(find.text('Plan mobilny'), findsOneWidget);
     expect(tester.takeException(), isNull);
   });
+
+  testWidgets('workout program page renders progress and days without overflow', (tester) async {
+    SharedPreferences.setMockInitialValues({});
+    final store = AppStore();
+    await store.load();
+
+    const program = WorkoutPlan(
+      id: 'prog-test',
+      name: 'Pogromca mięśni brzucha',
+      note: 'Program testowy z dniami i odpoczynkiem.',
+      goal: 'Sylwetka',
+      isActive: true,
+      level: 'Zaawansowany',
+      completedDays: {0},
+      days: [
+        WorkoutDay(weekday: 1, title: 'Dzień 1', items: [
+          PlanItem(exerciseId: 'pushup', sets: 3, reps: 12, durationSec: 0, note: ''),
+        ]),
+        WorkoutDay(weekday: 2, title: 'Dzień 2', items: [
+          PlanItem(exerciseId: 'squat', sets: 3, reps: 10, durationSec: 0, note: ''),
+        ]),
+        WorkoutDay(weekday: 3, title: 'Dzień odpoczynku', items: []),
+      ],
+    );
+    await store.addWorkoutPlan(program);
+
+    await tester.binding.setSurfaceSize(const Size(320, 720));
+    addTearDown(() => tester.binding.setSurfaceSize(null));
+
+    for (final isDark in [true, false]) {
+      await tester.pumpWidget(
+        MaterialApp(
+          theme: buildTheme(const Color(0xFF24D6A3), isDark),
+          home: AppScope(
+            store: store,
+            child: const WorkoutProgramPage(planId: 'prog-test'),
+          ),
+        ),
+      );
+      await tester.pumpAndSettle();
+
+      expect(find.text('DZISIAJ'), findsOneWidget);
+      expect(find.text('Pogromca mięśni brzucha'), findsOneWidget);
+      expect(find.textContaining('dni ukończono'), findsOneWidget);
+      expect(tester.takeException(), isNull);
+    }
+  });
 }

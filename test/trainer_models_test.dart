@@ -234,6 +234,55 @@ void main() {
       expect(restored.days.single.items.single.restSeconds, 120);
     });
 
+    test('WorkoutPlan progression: lock, complete, rest and JSON round-trip', () {
+      const trainingItem = PlanItem(
+        exerciseId: 'pushup',
+        sets: 3,
+        reps: 12,
+        durationSec: 0,
+        note: '',
+      );
+      const plan = WorkoutPlan(
+        id: 'program-1',
+        name: 'Pogromca brzucha',
+        note: 'Opis',
+        goal: 'Sylwetka',
+        isActive: true,
+        level: 'Zaawansowany',
+        imageAsset: 'assets/programs/abs.png',
+        completedDays: {0},
+        days: [
+          WorkoutDay(weekday: 1, title: 'Dzień 1', items: [trainingItem]),
+          WorkoutDay(weekday: 2, title: 'Dzień 2', items: [trainingItem]),
+          WorkoutDay(weekday: 3, title: 'Dzień odpoczynku', items: []),
+          WorkoutDay(weekday: 4, title: 'Dzień 4', items: [trainingItem]),
+        ],
+      );
+
+      // Dzień 0 ukończony, 1 aktywny, 2 (rest)/3 zablokowane w trybie liniowym.
+      expect(plan.completedCount, 1);
+      expect(plan.currentDayIndex, 1);
+      expect(plan.statusForDay(0), WorkoutDayStatus.completed);
+      expect(plan.statusForDay(1), WorkoutDayStatus.active);
+      expect(plan.statusForDay(2), WorkoutDayStatus.locked);
+      expect(plan.statusForDay(3), WorkoutDayStatus.locked);
+      expect(plan.isRestDay(plan.days[2]), isTrue);
+      expect(plan.progress, closeTo(0.25, 0.001));
+
+      // Tryb „dowolny dzień" odblokowuje wszystko (rest pozostaje osobnym statusem).
+      final anyDay = plan.copyWith(allowAnyDay: true);
+      expect(anyDay.statusForDay(3), WorkoutDayStatus.available);
+      expect(anyDay.statusForDay(2), WorkoutDayStatus.rest);
+
+      // JSON round-trip zachowuje nowe pola programu.
+      final restored = WorkoutPlan.fromJson(plan.toJson());
+      expect(restored.level, 'Zaawansowany');
+      expect(restored.imageAsset, 'assets/programs/abs.png');
+      expect(restored.completedDays, {0});
+      expect(restored.allowAnyDay, isFalse);
+      expect(restored.statusForDay(1), WorkoutDayStatus.active);
+    });
+
     test('ActiveWorkoutSession restores completed sets and progress', () {
       final session = ActiveWorkoutSession(
         id: 'active-1',

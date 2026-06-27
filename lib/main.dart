@@ -1,9 +1,12 @@
 import 'dart:async';
 import 'dart:convert';
+import 'dart:io';
 import 'dart:math' as math;
 
+import 'package:flutter/foundation.dart' show kIsWeb;
 import 'package:flutter/material.dart';
 import 'package:http/http.dart' as http;
+import 'package:image_picker/image_picker.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
 import 'features/trainer/application/exercise_library_filter.dart';
@@ -462,6 +465,56 @@ class AppStore extends ChangeNotifier {
       items: day.items.where((item) => item.exerciseId != exerciseId).toList(),
     );
     plans[planIndex] = plan.copyWith(days: days);
+    await savePlans();
+    notifyListeners();
+  }
+
+  // ===== Etap 28: postęp programu treningowego =====
+
+  /// Oznacza/odznacza dzień programu jako ukończony i zapisuje postęp.
+  Future<void> setPlanDayCompleted(
+    String planId,
+    int dayIndex, {
+    bool completed = true,
+  }) async {
+    final index = plans.indexWhere((plan) => plan.id == planId);
+    if (index < 0) return;
+    final plan = plans[index];
+    if (dayIndex < 0 || dayIndex >= plan.days.length) return;
+    final updated = {...plan.completedDays};
+    if (completed) {
+      updated.add(dayIndex);
+    } else {
+      updated.remove(dayIndex);
+    }
+    plans[index] = plan.copyWith(completedDays: updated);
+    await savePlans();
+    notifyListeners();
+  }
+
+  /// Czyści cały postęp programu (wszystkie dni stają się ponownie do zrobienia).
+  Future<void> resetPlanProgress(String planId) async {
+    final index = plans.indexWhere((plan) => plan.id == planId);
+    if (index < 0) return;
+    plans[index] = plans[index].copyWith(completedDays: const <int>{});
+    await savePlans();
+    notifyListeners();
+  }
+
+  /// Ustawia poziom programu (metadana nagłówka).
+  Future<void> setPlanLevel(String planId, String level) async {
+    final index = plans.indexWhere((plan) => plan.id == planId);
+    if (index < 0) return;
+    plans[index] = plans[index].copyWith(level: level);
+    await savePlans();
+    notifyListeners();
+  }
+
+  /// Włącza/wyłącza tryb „pozwól trenować dowolny dzień" (wyłącza blokowanie).
+  Future<void> setPlanAllowAnyDay(String planId, bool value) async {
+    final index = plans.indexWhere((plan) => plan.id == planId);
+    if (index < 0) return;
+    plans[index] = plans[index].copyWith(allowAnyDay: value);
     await savePlans();
     notifyListeners();
   }
@@ -6562,7 +6615,11 @@ class ExerciseDetailsPage extends StatelessWidget {
           ),
           const SizedBox(height: 16),
           // Etap 15: podgląd multimediów (GIF/zdjęcie) gdy ćwiczenie je ma.
-          if (exercise.hasMedia) ...[
+          // Etap 27: galeria multimediów (główne medium + pozioma lista) gdy są mediaItems.
+          if (exercise.mediaItems.any((media) => media.hasContent)) ...[
+            ExerciseMediaGallery(exercise: exercise),
+            const SizedBox(height: 12),
+          ] else if (exercise.hasMedia) ...[
             _ExerciseMediaHero(exercise: exercise),
             const SizedBox(height: 12),
           ],
@@ -7405,43 +7462,88 @@ class _ActivePlanSummary extends StatelessWidget {
   Widget build(BuildContext context) {
     final theme = Theme.of(context);
     final exerciseCount = plan.days.fold<int>(0, (sum, day) => sum + day.items.length);
+    final level = plan.level.trim();
     return Card(
       color: theme.colorScheme.primaryContainer.withValues(alpha: 0.45),
-      child: Padding(
-        padding: const EdgeInsets.all(18),
-        child: Column(
-          crossAxisAlignment: CrossAxisAlignment.stretch,
-          children: [
-            Row(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                CircleAvatar(
-                  backgroundColor: theme.colorScheme.primary,
-                  foregroundColor: theme.colorScheme.onPrimary,
-                  child: const Icon(Icons.bolt_rounded),
-                ),
-                const SizedBox(width: 12),
-                Expanded(
-                  child: Column(
-                    crossAxisAlignment: CrossAxisAlignment.start,
-                    children: [
-                      Text('Aktywny plan', style: theme.textTheme.labelLarge?.copyWith(color: theme.colorScheme.primary, fontWeight: FontWeight.w900)),
-                      const SizedBox(height: 3),
-                      Text(plan.name, maxLines: 2, overflow: TextOverflow.ellipsis, style: theme.textTheme.titleLarge?.copyWith(fontWeight: FontWeight.w900)),
-                      const SizedBox(height: 4),
-                      Text('${plan.goal} · ${plan.days.length} dni · $exerciseCount ćwiczeń', style: theme.textTheme.bodyMedium?.copyWith(color: theme.colorScheme.onSurfaceVariant)),
-                    ],
+      clipBehavior: Clip.antiAlias,
+      child: InkWell(
+        onTap: () => openWorkoutProgram(context, plan.id),
+        child: Padding(
+          padding: const EdgeInsets.all(18),
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.stretch,
+            children: [
+              Row(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  CircleAvatar(
+                    backgroundColor: theme.colorScheme.primary,
+                    foregroundColor: theme.colorScheme.onPrimary,
+                    child: const Icon(Icons.bolt_rounded),
                   ),
-                ),
-              ],
-            ),
-            const SizedBox(height: 14),
-            FilledButton.icon(
-              onPressed: () => startWorkoutFromActivePlan(context, plan),
-              icon: Icon(AppScope.of(context).activeWorkoutSession == null ? Icons.play_arrow_rounded : Icons.play_circle_outline_rounded),
-              label: Text(AppScope.of(context).activeWorkoutSession == null ? 'Rozpocznij trening' : 'Wznów trening'),
-            ),
-          ],
+                  const SizedBox(width: 12),
+                  Expanded(
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        Text('Aktywny plan', style: theme.textTheme.labelLarge?.copyWith(color: theme.colorScheme.primary, fontWeight: FontWeight.w900)),
+                        const SizedBox(height: 3),
+                        Text(plan.name, maxLines: 2, overflow: TextOverflow.ellipsis, style: theme.textTheme.titleLarge?.copyWith(fontWeight: FontWeight.w900)),
+                        const SizedBox(height: 4),
+                        Text(
+                          [
+                            plan.goal,
+                            if (level.isNotEmpty) level,
+                            '${plan.days.length} dni',
+                            '$exerciseCount ćwiczeń',
+                          ].join(' · '),
+                          style: theme.textTheme.bodyMedium?.copyWith(color: theme.colorScheme.onSurfaceVariant),
+                        ),
+                      ],
+                    ),
+                  ),
+                  Icon(Icons.chevron_right_rounded, color: theme.colorScheme.onSurfaceVariant),
+                ],
+              ),
+              const SizedBox(height: 14),
+              Row(
+                children: [
+                  Expanded(
+                    child: ClipRRect(
+                      borderRadius: BorderRadius.circular(8),
+                      child: LinearProgressIndicator(
+                        value: plan.progress,
+                        minHeight: 8,
+                        backgroundColor: theme.colorScheme.surfaceContainerHighest,
+                      ),
+                    ),
+                  ),
+                  const SizedBox(width: 10),
+                  Text('${plan.completedCount}/${plan.days.length} dni', style: theme.textTheme.labelLarge?.copyWith(fontWeight: FontWeight.w800)),
+                ],
+              ),
+              const SizedBox(height: 14),
+              Row(
+                children: [
+                  Expanded(
+                    child: OutlinedButton.icon(
+                      onPressed: () => openWorkoutProgram(context, plan.id),
+                      icon: const Icon(Icons.dashboard_customize_outlined),
+                      label: const Text('Otwórz program'),
+                    ),
+                  ),
+                  const SizedBox(width: 10),
+                  Expanded(
+                    child: FilledButton.icon(
+                      onPressed: () => startWorkoutFromActivePlan(context, plan),
+                      icon: Icon(AppScope.of(context).activeWorkoutSession == null ? Icons.play_arrow_rounded : Icons.play_circle_outline_rounded),
+                      label: Text(AppScope.of(context).activeWorkoutSession == null ? 'Trenuj' : 'Wznów'),
+                    ),
+                  ),
+                ],
+              ),
+            ],
+          ),
         ),
       ),
     );
@@ -9173,6 +9275,807 @@ class PlanDayCard extends StatelessWidget {
     final plan = AppScope.of(context).activeWorkoutPlan;
     if (plan == null) return const SizedBox.shrink();
     return WorkoutPlanDayCard(plan: plan, day: day);
+  }
+}
+
+// ============================================================================
+// ETAP 28 — Profesjonalny widok programu treningowego (nagłówek, postęp,
+// sekcja „Dzisiaj", lista dni z blokowaniem i statusami).
+// ============================================================================
+
+/// Szacunek dnia treningowego: liczba ćwiczeń, czas (min) i kalorie.
+class PlanDayEstimate {
+  const PlanDayEstimate({
+    required this.exerciseCount,
+    required this.minutes,
+    required this.kcal,
+  });
+
+  final int exerciseCount;
+  final int minutes;
+  final int kcal;
+}
+
+/// Liczy szacunkowy czas i kalorie dnia na podstawie pozycji planu.
+PlanDayEstimate estimatePlanDay(
+  WorkoutDay day,
+  List<Exercise> customExercises,
+  double bodyWeightKg,
+) {
+  var totalMinutes = 0.0;
+  var totalKcal = 0.0;
+  for (final item in day.items) {
+    final exercise = item.exerciseFrom(customExercises);
+    final workSeconds = item.durationSec > 0
+        ? item.sets * item.durationSec
+        : item.sets * item.reps * 3;
+    final restSeconds = item.sets * item.restSeconds;
+    final minutes = math.max(1.0, (workSeconds + restSeconds) / 60);
+    totalMinutes += minutes;
+    totalKcal += estimateCalories(
+      met: exercise.met,
+      weightKg: bodyWeightKg,
+      minutes: minutes,
+    );
+  }
+  return PlanDayEstimate(
+    exerciseCount: day.items.length,
+    minutes: totalMinutes.round(),
+    kcal: totalKcal.round(),
+  );
+}
+
+Future<void> openWorkoutProgram(BuildContext context, String planId) async {
+  await Navigator.of(context).push(
+    MaterialPageRoute<void>(
+      builder: (_) => WorkoutProgramPage(planId: planId),
+    ),
+  );
+}
+
+class WorkoutProgramPage extends StatefulWidget {
+  const WorkoutProgramPage({super.key, required this.planId});
+
+  final String planId;
+
+  @override
+  State<WorkoutProgramPage> createState() => _WorkoutProgramPageState();
+}
+
+class _WorkoutProgramPageState extends State<WorkoutProgramPage> {
+  bool _showCompleted = false;
+
+  WorkoutPlan? _findPlan(AppStore store) {
+    for (final plan in store.plans) {
+      if (plan.id == widget.planId) return plan;
+    }
+    return null;
+  }
+
+  Future<void> _changeLevel(AppStore store, WorkoutPlan plan) async {
+    final selected = await showModalBottomSheet<String>(
+      context: context,
+      showDragHandle: true,
+      builder: (sheetContext) => SafeArea(
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            const Padding(
+              padding: EdgeInsets.fromLTRB(16, 4, 16, 8),
+              child: Align(
+                alignment: Alignment.centerLeft,
+                child: Text('Poziom programu', style: TextStyle(fontWeight: FontWeight.w900, fontSize: 16)),
+              ),
+            ),
+            for (final level in kTrainingLevels)
+              ListTile(
+                leading: Icon(
+                  (plan.level.isNotEmpty && normalizeLevel(plan.level) == level)
+                      ? Icons.radio_button_checked_rounded
+                      : Icons.radio_button_unchecked_rounded,
+                ),
+                title: Text(level),
+                onTap: () => Navigator.of(sheetContext).pop(level),
+              ),
+          ],
+        ),
+      ),
+    );
+    if (selected != null) await store.setPlanLevel(plan.id, selected);
+  }
+
+  Future<void> _confirmReset(AppStore store, WorkoutPlan plan) async {
+    final confirmed = await showDialog<bool>(
+      context: context,
+      builder: (dialogContext) => AlertDialog(
+        title: const Text('Zresetować postęp?'),
+        content: const Text('Wszystkie dni zostaną oznaczone jako niewykonane. Tej operacji nie można cofnąć.'),
+        actions: [
+          TextButton(onPressed: () => Navigator.of(dialogContext).pop(false), child: const Text('Anuluj')),
+          FilledButton(onPressed: () => Navigator.of(dialogContext).pop(true), child: const Text('Zresetuj')),
+        ],
+      ),
+    );
+    if (confirmed == true) await store.resetPlanProgress(plan.id);
+  }
+
+  void _warnLocked() {
+    ScaffoldMessenger.of(context).showSnackBar(
+      const SnackBar(content: Text('Ten dzień odblokuje się po ukończeniu poprzedniego treningu.')),
+    );
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final store = AppScope.of(context);
+    final plan = _findPlan(store);
+    final theme = Theme.of(context);
+
+    if (plan == null) {
+      return Scaffold(
+        appBar: AppBar(title: const Text('Program treningowy')),
+        body: const _ProgramEmptyState(),
+      );
+    }
+
+    final days = plan.days;
+    final completedIndexes = [
+      for (var i = 0; i < days.length; i++)
+        if (plan.isDayCompleted(i)) i,
+    ];
+    final hasHiddenCompleted = !_showCompleted && completedIndexes.isNotEmpty;
+
+    return Scaffold(
+      body: ListView(
+        padding: EdgeInsets.zero,
+        children: [
+          _ProgramHeader(
+            plan: plan,
+            onBack: () => Navigator.of(context).maybePop(),
+            menu: _buildMenu(store, plan),
+          ),
+          Padding(
+            padding: const EdgeInsets.fromLTRB(16, 16, 16, 0),
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.stretch,
+              children: [
+                if (plan.note.trim().isNotEmpty) ...[
+                  Text(
+                    plan.note,
+                    style: theme.textTheme.bodyMedium?.copyWith(color: theme.colorScheme.onSurfaceVariant, height: 1.4),
+                  ),
+                  const SizedBox(height: 16),
+                ],
+                _ProgramTodayCard(plan: plan, onWarnLocked: _warnLocked),
+                const SizedBox(height: 18),
+                if (days.isEmpty)
+                  EmptyCard(
+                    icon: Icons.event_note_rounded,
+                    title: 'Brak dni w programie',
+                    text: 'Dodaj dni i ćwiczenia w edytorze planu.',
+                    buttonLabel: 'Edytuj program',
+                    onPressed: () => showWorkoutPlanEditor(context, plan: plan),
+                  )
+                else ...[
+                  Row(
+                    children: [
+                      Text('Dni programu', style: theme.textTheme.titleMedium?.copyWith(fontWeight: FontWeight.w900)),
+                      const Spacer(),
+                      Text('${plan.completedCount}/${days.length}', style: theme.textTheme.labelLarge?.copyWith(color: theme.colorScheme.onSurfaceVariant, fontWeight: FontWeight.w800)),
+                    ],
+                  ),
+                  const SizedBox(height: 10),
+                  if (hasHiddenCompleted)
+                    Padding(
+                      padding: const EdgeInsets.only(bottom: 4),
+                      child: TextButton.icon(
+                        onPressed: () => setState(() => _showCompleted = true),
+                        icon: const Icon(Icons.check_circle_outline_rounded, size: 18),
+                        label: Text('Pokaż ukończone dni (${completedIndexes.length})'),
+                      ),
+                    ),
+                  for (var i = 0; i < days.length; i++)
+                    if (_showCompleted || !plan.isDayCompleted(i))
+                      _ProgramDayCard(
+                        plan: plan,
+                        index: i,
+                        onWarnLocked: _warnLocked,
+                      ),
+                ],
+                const SizedBox(height: 24),
+              ],
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
+  Widget _buildMenu(AppStore store, WorkoutPlan plan) {
+    return PopupMenuButton<String>(
+      icon: const Icon(Icons.more_vert_rounded, color: Colors.white),
+      tooltip: 'Opcje programu',
+      onSelected: (value) async {
+        switch (value) {
+          case 'edit':
+            await showWorkoutPlanEditor(context, plan: plan);
+            break;
+          case 'reset':
+            await _confirmReset(store, plan);
+            break;
+          case 'level':
+            await _changeLevel(store, plan);
+            break;
+          case 'showAll':
+            setState(() => _showCompleted = !_showCompleted);
+            break;
+          case 'anyDay':
+            await store.setPlanAllowAnyDay(plan.id, !plan.allowAnyDay);
+            break;
+        }
+      },
+      itemBuilder: (context) => [
+        const PopupMenuItem(
+          value: 'edit',
+          child: ListTile(contentPadding: EdgeInsets.zero, leading: Icon(Icons.edit_outlined), title: Text('Edytuj program')),
+        ),
+        const PopupMenuItem(
+          value: 'level',
+          child: ListTile(contentPadding: EdgeInsets.zero, leading: Icon(Icons.signal_cellular_alt_rounded), title: Text('Zmień poziom')),
+        ),
+        const PopupMenuItem(
+          value: 'reset',
+          child: ListTile(contentPadding: EdgeInsets.zero, leading: Icon(Icons.restart_alt_rounded), title: Text('Zresetuj postęp')),
+        ),
+        CheckedPopupMenuItem(
+          value: 'showAll',
+          checked: _showCompleted,
+          child: const Text('Pokaż wszystkie dni'),
+        ),
+        CheckedPopupMenuItem(
+          value: 'anyDay',
+          checked: plan.allowAnyDay,
+          child: const Text('Trenuj dowolny dzień'),
+        ),
+      ],
+    );
+  }
+}
+
+class _ProgramEmptyState extends StatelessWidget {
+  const _ProgramEmptyState();
+
+  @override
+  Widget build(BuildContext context) {
+    final theme = Theme.of(context);
+    return Center(
+      child: Padding(
+        padding: const EdgeInsets.all(28),
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            Icon(Icons.fitness_center_rounded, size: 64, color: theme.colorScheme.primary.withValues(alpha: 0.7)),
+            const SizedBox(height: 16),
+            Text('Brak aktywnego programu', textAlign: TextAlign.center, style: theme.textTheme.titleLarge?.copyWith(fontWeight: FontWeight.w900)),
+            const SizedBox(height: 8),
+            Text(
+              'Utwórz plan w zakładce „Plany treningowe", aby zobaczyć go tutaj jako program z dniami i postępem.',
+              textAlign: TextAlign.center,
+              style: theme.textTheme.bodyMedium?.copyWith(color: theme.colorScheme.onSurfaceVariant),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+}
+
+/// Duży nagłówek programu: obraz/gradient w tle, nazwa, poziom, postęp.
+class _ProgramHeader extends StatelessWidget {
+  const _ProgramHeader({required this.plan, required this.onBack, required this.menu});
+
+  final WorkoutPlan plan;
+  final VoidCallback onBack;
+  final Widget menu;
+
+  @override
+  Widget build(BuildContext context) {
+    final theme = Theme.of(context);
+    final scheme = theme.colorScheme;
+    final level = plan.level.trim();
+    return SizedBox(
+      height: 268,
+      child: Stack(
+        fit: StackFit.expand,
+        children: [
+          // Tło: obraz (jeśli jest) albo gradient marki.
+          if (plan.imageAsset != null && plan.imageAsset!.trim().isNotEmpty)
+            buildExerciseMediaImage(
+              plan.imageAsset!,
+              fit: BoxFit.cover,
+              fallback: _gradient(scheme),
+            )
+          else
+            _gradient(scheme),
+          // Scrim dla czytelności tekstu.
+          DecoratedBox(
+            decoration: BoxDecoration(
+              gradient: LinearGradient(
+                begin: Alignment.topCenter,
+                end: Alignment.bottomCenter,
+                colors: [
+                  Colors.black.withValues(alpha: 0.15),
+                  Colors.black.withValues(alpha: 0.72),
+                ],
+              ),
+            ),
+          ),
+          // Pasek górny: powrót + menu.
+          SafeArea(
+            bottom: false,
+            child: Padding(
+              padding: const EdgeInsets.symmetric(horizontal: 4),
+              child: Row(
+                children: [
+                  IconButton(
+                    onPressed: onBack,
+                    icon: const Icon(Icons.arrow_back_rounded, color: Colors.white),
+                    tooltip: 'Wstecz',
+                  ),
+                  const Spacer(),
+                  menu,
+                ],
+              ),
+            ),
+          ),
+          // Treść nagłówka.
+          Positioned(
+            left: 18,
+            right: 18,
+            bottom: 18,
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                Text(
+                  plan.name,
+                  maxLines: 2,
+                  overflow: TextOverflow.ellipsis,
+                  style: theme.textTheme.headlineSmall?.copyWith(color: Colors.white, fontWeight: FontWeight.w900, height: 1.05),
+                ),
+                const SizedBox(height: 8),
+                Wrap(
+                  spacing: 8,
+                  runSpacing: 8,
+                  children: [
+                    _HeaderChip(icon: Icons.flag_rounded, label: plan.goal),
+                    if (level.isNotEmpty) _HeaderChip(icon: Icons.signal_cellular_alt_rounded, label: level),
+                    _HeaderChip(icon: Icons.calendar_month_rounded, label: '${plan.days.length} dni'),
+                    if (plan.allowAnyDay) const _HeaderChip(icon: Icons.lock_open_rounded, label: 'Dowolny dzień'),
+                  ],
+                ),
+                const SizedBox(height: 14),
+                Row(
+                  children: [
+                    Text(
+                      '${plan.completedCount} / ${plan.days.length}',
+                      style: theme.textTheme.titleMedium?.copyWith(color: Colors.white, fontWeight: FontWeight.w900),
+                    ),
+                    const SizedBox(width: 6),
+                    const Text('dni ukończono', style: TextStyle(color: Colors.white70, fontWeight: FontWeight.w600)),
+                  ],
+                ),
+                const SizedBox(height: 8),
+                ClipRRect(
+                  borderRadius: BorderRadius.circular(8),
+                  child: LinearProgressIndicator(
+                    value: plan.progress,
+                    minHeight: 8,
+                    backgroundColor: Colors.white24,
+                    valueColor: AlwaysStoppedAnimation<Color>(scheme.primary),
+                  ),
+                ),
+              ],
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
+  Widget _gradient(ColorScheme scheme) => DecoratedBox(
+        decoration: BoxDecoration(
+          gradient: LinearGradient(
+            begin: Alignment.topLeft,
+            end: Alignment.bottomRight,
+            colors: [scheme.primary, scheme.primaryContainer, scheme.surfaceContainerHighest],
+          ),
+        ),
+      );
+}
+
+class _HeaderChip extends StatelessWidget {
+  const _HeaderChip({required this.icon, required this.label});
+
+  final IconData icon;
+  final String label;
+
+  @override
+  Widget build(BuildContext context) {
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 5),
+      decoration: BoxDecoration(
+        color: Colors.white.withValues(alpha: 0.18),
+        borderRadius: BorderRadius.circular(12),
+        border: Border.all(color: Colors.white24),
+      ),
+      child: Row(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          Icon(icon, size: 14, color: Colors.white),
+          const SizedBox(width: 5),
+          Text(label, style: const TextStyle(color: Colors.white, fontSize: 12, fontWeight: FontWeight.w800)),
+        ],
+      ),
+    );
+  }
+}
+
+/// Sekcja „Dzisiaj": co jest zaplanowane, ile potrwa, trening czy odpoczynek.
+class _ProgramTodayCard extends StatelessWidget {
+  const _ProgramTodayCard({required this.plan, required this.onWarnLocked});
+
+  final WorkoutPlan plan;
+  final VoidCallback onWarnLocked;
+
+  @override
+  Widget build(BuildContext context) {
+    final theme = Theme.of(context);
+    final store = AppScope.of(context);
+
+    if (plan.isProgramCompleted) {
+      return Card(
+        color: theme.colorScheme.primaryContainer.withValues(alpha: 0.5),
+        child: Padding(
+          padding: const EdgeInsets.all(18),
+          child: Row(
+            children: [
+              Icon(Icons.emoji_events_rounded, color: theme.colorScheme.primary, size: 32),
+              const SizedBox(width: 12),
+              Expanded(
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Text('Program ukończony!', style: theme.textTheme.titleMedium?.copyWith(fontWeight: FontWeight.w900)),
+                    const SizedBox(height: 2),
+                    Text('Świetna robota. Zresetuj postęp, aby zacząć od nowa.', style: theme.textTheme.bodySmall?.copyWith(color: theme.colorScheme.onSurfaceVariant)),
+                  ],
+                ),
+              ),
+            ],
+          ),
+        ),
+      );
+    }
+
+    if (plan.days.isEmpty) return const SizedBox.shrink();
+
+    final index = plan.currentDayIndex.clamp(0, plan.days.length - 1);
+    final day = plan.days[index];
+    final isRest = plan.isRestDay(day);
+    final estimate = estimatePlanDay(day, store.customExercises, store.settings.bodyWeightKg);
+
+    return Card(
+      color: theme.colorScheme.primaryContainer.withValues(alpha: 0.5),
+      child: Padding(
+        padding: const EdgeInsets.all(18),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.stretch,
+          children: [
+            Row(
+              children: [
+                Container(
+                  padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 4),
+                  decoration: BoxDecoration(color: theme.colorScheme.primary, borderRadius: BorderRadius.circular(10)),
+                  child: Text('DZISIAJ', style: TextStyle(color: theme.colorScheme.onPrimary, fontWeight: FontWeight.w900, fontSize: 11, letterSpacing: 0.5)),
+                ),
+                const SizedBox(width: 10),
+                Expanded(
+                  child: Text(
+                    'Dzień ${index + 1}',
+                    style: theme.textTheme.labelLarge?.copyWith(color: theme.colorScheme.onSurfaceVariant, fontWeight: FontWeight.w800),
+                  ),
+                ),
+              ],
+            ),
+            const SizedBox(height: 10),
+            Row(
+              children: [
+                Icon(isRest ? Icons.self_improvement_rounded : Icons.fitness_center_rounded, color: theme.colorScheme.primary),
+                const SizedBox(width: 10),
+                Expanded(
+                  child: Text(
+                    isRest ? 'Dzień odpoczynku' : day.title,
+                    maxLines: 2,
+                    overflow: TextOverflow.ellipsis,
+                    style: theme.textTheme.titleLarge?.copyWith(fontWeight: FontWeight.w900),
+                  ),
+                ),
+              ],
+            ),
+            const SizedBox(height: 8),
+            if (isRest)
+              Text('Odpocznij i zregeneruj się. Możesz zaliczyć ten dzień, aby przejść dalej.', style: theme.textTheme.bodyMedium?.copyWith(color: theme.colorScheme.onSurfaceVariant))
+            else
+              Wrap(
+                spacing: 14,
+                runSpacing: 6,
+                children: [
+                  _MetaPill(icon: Icons.timer_outlined, text: '~${estimate.minutes} min'),
+                  _MetaPill(icon: Icons.format_list_numbered_rounded, text: '${estimate.exerciseCount} ćw.'),
+                  _MetaPill(icon: Icons.local_fire_department_outlined, text: '${estimate.kcal} kcal'),
+                ],
+              ),
+            const SizedBox(height: 14),
+            if (isRest)
+              FilledButton.tonalIcon(
+                onPressed: () => store.setPlanDayCompleted(plan.id, index),
+                icon: const Icon(Icons.check_rounded),
+                label: const Text('Zalicz dzień odpoczynku'),
+              )
+            else
+              FilledButton.icon(
+                onPressed: day.items.isEmpty
+                    ? null
+                    : () => startWorkoutForDay(context, plan: plan, day: day),
+                icon: const Icon(Icons.play_arrow_rounded),
+                label: const Text('START'),
+              ),
+          ],
+        ),
+      ),
+    );
+  }
+}
+
+class _MetaPill extends StatelessWidget {
+  const _MetaPill({required this.icon, required this.text});
+
+  final IconData icon;
+  final String text;
+
+  @override
+  Widget build(BuildContext context) {
+    final theme = Theme.of(context);
+    return Row(
+      mainAxisSize: MainAxisSize.min,
+      children: [
+        Icon(icon, size: 16, color: theme.colorScheme.onSurfaceVariant),
+        const SizedBox(width: 4),
+        Text(text, style: theme.textTheme.bodyMedium?.copyWith(fontWeight: FontWeight.w700)),
+      ],
+    );
+  }
+}
+
+/// Karta pojedynczego dnia programu z numerem, czasem, liczbą ćwiczeń, kcal i statusem.
+class _ProgramDayCard extends StatelessWidget {
+  const _ProgramDayCard({required this.plan, required this.index, required this.onWarnLocked});
+
+  final WorkoutPlan plan;
+  final int index;
+  final VoidCallback onWarnLocked;
+
+  @override
+  Widget build(BuildContext context) {
+    final theme = Theme.of(context);
+    final scheme = theme.colorScheme;
+    final store = AppScope.of(context);
+    final day = plan.days[index];
+    final status = plan.statusForDay(index);
+    final isLocked = status == WorkoutDayStatus.locked;
+    final isCompleted = status == WorkoutDayStatus.completed;
+    final isRest = status == WorkoutDayStatus.rest || (isCompleted && plan.isRestDay(day));
+    final isActive = status == WorkoutDayStatus.active;
+    final estimate = estimatePlanDay(day, store.customExercises, store.settings.bodyWeightKg);
+
+    final Color borderColor = isActive
+        ? scheme.primary
+        : scheme.outlineVariant.withValues(alpha: 0.45);
+    final Color bgColor = isActive
+        ? scheme.primaryContainer.withValues(alpha: 0.35)
+        : scheme.surfaceContainerHighest.withValues(alpha: isLocked ? 0.3 : 0.5);
+
+    final card = Container(
+      margin: const EdgeInsets.only(bottom: 12),
+      padding: const EdgeInsets.all(14),
+      decoration: BoxDecoration(
+        color: bgColor,
+        borderRadius: BorderRadius.circular(18),
+        border: Border.all(color: borderColor, width: isActive ? 1.6 : 1),
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.stretch,
+        children: [
+          Row(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              _DayBadge(index: index, status: status),
+              const SizedBox(width: 12),
+              Expanded(
+                child: Opacity(
+                  opacity: isLocked ? 0.65 : 1,
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Text(
+                        isRest ? 'Dzień odpoczynku' : day.title,
+                        maxLines: 2,
+                        overflow: TextOverflow.ellipsis,
+                        style: theme.textTheme.titleMedium?.copyWith(fontWeight: FontWeight.w900),
+                      ),
+                      const SizedBox(height: 6),
+                      if (isRest)
+                        Text('Regeneracja', style: theme.textTheme.bodySmall?.copyWith(color: scheme.onSurfaceVariant))
+                      else
+                        Wrap(
+                          spacing: 12,
+                          runSpacing: 4,
+                          children: [
+                            _MetaPill(icon: Icons.timer_outlined, text: '~${estimate.minutes} min'),
+                            _MetaPill(icon: Icons.format_list_numbered_rounded, text: '${estimate.exerciseCount} ćw.'),
+                            _MetaPill(icon: Icons.local_fire_department_outlined, text: '${estimate.kcal} kcal'),
+                          ],
+                        ),
+                    ],
+                  ),
+                ),
+              ),
+              const SizedBox(width: 8),
+              _StatusIcon(status: status),
+            ],
+          ),
+          const SizedBox(height: 12),
+          _buildAction(context, store, theme, status, day),
+        ],
+      ),
+    );
+
+    if (isLocked) {
+      return InkWell(
+        borderRadius: BorderRadius.circular(18),
+        onTap: onWarnLocked,
+        child: card,
+      );
+    }
+    return card;
+  }
+
+  Widget _buildAction(
+    BuildContext context,
+    AppStore store,
+    ThemeData theme,
+    WorkoutDayStatus status,
+    WorkoutDay day,
+  ) {
+    switch (status) {
+      case WorkoutDayStatus.locked:
+        return Row(
+          children: [
+            Icon(Icons.lock_outline_rounded, size: 16, color: theme.colorScheme.onSurfaceVariant),
+            const SizedBox(width: 6),
+            Expanded(
+              child: Text(
+                'Zablokowane — ukończ poprzedni dzień',
+                style: theme.textTheme.bodySmall?.copyWith(color: theme.colorScheme.onSurfaceVariant),
+              ),
+            ),
+          ],
+        );
+      case WorkoutDayStatus.completed:
+        return Row(
+          children: [
+            Expanded(
+              child: OutlinedButton.icon(
+                onPressed: day.items.isEmpty ? null : () => startWorkoutForDay(context, plan: plan, day: day),
+                icon: const Icon(Icons.replay_rounded, size: 18),
+                label: const Text('Powtórz'),
+              ),
+            ),
+            const SizedBox(width: 8),
+            TextButton(
+              onPressed: () => store.setPlanDayCompleted(plan.id, index, completed: false),
+              child: const Text('Cofnij'),
+            ),
+          ],
+        );
+      case WorkoutDayStatus.rest:
+        return FilledButton.tonalIcon(
+          onPressed: () => store.setPlanDayCompleted(plan.id, index),
+          icon: const Icon(Icons.check_rounded),
+          label: const Text('Zalicz dzień odpoczynku'),
+        );
+      case WorkoutDayStatus.active:
+      case WorkoutDayStatus.available:
+        return Column(
+          crossAxisAlignment: CrossAxisAlignment.stretch,
+          children: [
+            FilledButton.icon(
+              onPressed: day.items.isEmpty ? null : () => startWorkoutForDay(context, plan: plan, day: day),
+              icon: const Icon(Icons.play_arrow_rounded),
+              label: Text(status == WorkoutDayStatus.active ? 'START' : 'Rozpocznij trening'),
+            ),
+            Align(
+              alignment: Alignment.centerRight,
+              child: TextButton.icon(
+                onPressed: () => store.setPlanDayCompleted(plan.id, index),
+                icon: const Icon(Icons.check_circle_outline_rounded, size: 18),
+                label: const Text('Oznacz jako ukończony'),
+              ),
+            ),
+          ],
+        );
+    }
+  }
+}
+
+class _DayBadge extends StatelessWidget {
+  const _DayBadge({required this.index, required this.status});
+
+  final int index;
+  final WorkoutDayStatus status;
+
+  @override
+  Widget build(BuildContext context) {
+    final theme = Theme.of(context);
+    final scheme = theme.colorScheme;
+    final isActive = status == WorkoutDayStatus.active;
+    final isCompleted = status == WorkoutDayStatus.completed;
+    final bg = isCompleted
+        ? scheme.primary
+        : isActive
+            ? scheme.primary
+            : scheme.surfaceContainerHighest;
+    final fg = (isCompleted || isActive) ? scheme.onPrimary : scheme.onSurfaceVariant;
+    return Container(
+      width: 52,
+      padding: const EdgeInsets.symmetric(vertical: 8),
+      decoration: BoxDecoration(
+        color: bg,
+        borderRadius: BorderRadius.circular(14),
+      ),
+      child: Column(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          Text('DZIEŃ', style: TextStyle(color: fg, fontSize: 9, fontWeight: FontWeight.w800, letterSpacing: 0.5)),
+          const SizedBox(height: 2),
+          Text('${index + 1}', style: TextStyle(color: fg, fontSize: 20, fontWeight: FontWeight.w900, height: 1)),
+        ],
+      ),
+    );
+  }
+}
+
+class _StatusIcon extends StatelessWidget {
+  const _StatusIcon({required this.status});
+
+  final WorkoutDayStatus status;
+
+  @override
+  Widget build(BuildContext context) {
+    final scheme = Theme.of(context).colorScheme;
+    switch (status) {
+      case WorkoutDayStatus.completed:
+        return Icon(Icons.check_circle_rounded, color: scheme.primary);
+      case WorkoutDayStatus.locked:
+        return Icon(Icons.lock_rounded, color: scheme.onSurfaceVariant);
+      case WorkoutDayStatus.rest:
+        return Icon(Icons.local_cafe_rounded, color: scheme.onSurfaceVariant);
+      case WorkoutDayStatus.active:
+        return Icon(Icons.play_circle_fill_rounded, color: scheme.primary);
+      case WorkoutDayStatus.available:
+        return Icon(Icons.radio_button_unchecked_rounded, color: scheme.onSurfaceVariant);
+    }
   }
 }
 
@@ -14278,10 +15181,17 @@ class _CreateExerciseSheetContentState extends State<CreateExerciseSheetContent>
   late String level;
   final selectedGoals = <TrainingGoal>{};
 
+  // Etap 27: robocza, edytowalna lista multimediów ćwiczenia.
+  late List<ExerciseMedia> mediaItems;
+  bool _mediaExpanded = false;
+  final ImagePicker _mediaPicker = ImagePicker();
+
   @override
   void initState() {
     super.initState();
     final exercise = widget.exercise;
+    mediaItems = List<ExerciseMedia>.from(exercise?.mediaItems ?? const <ExerciseMedia>[]);
+    _mediaExpanded = mediaItems.isNotEmpty;
     name = TextEditingController(text: exercise?.name ?? '');
     category = TextEditingController(text: exercise?.category ?? 'Inne');
     primaryMuscle = TextEditingController(
@@ -14340,8 +15250,13 @@ class _CreateExerciseSheetContentState extends State<CreateExerciseSheetContent>
     final parsedMistakes = _splitExerciseField(commonMistakes.text);
     final parsedAvoidWhen = _splitExerciseField(avoidWhen.text);
     final parsedAlternatives = _splitExerciseField(alternatives.text);
+    final exerciseId = original?.id ?? 'custom_${idNow()}';
+    // Etap 27: przypisz multimedia do tego ćwiczenia (spójne exerciseId).
+    final savedMedia = mediaItems
+        .map((media) => media.copyWith(exerciseId: exerciseId))
+        .toList();
     final ex = Exercise(
-      id: original?.id ?? 'custom_${idNow()}',
+      id: exerciseId,
       name: name.text.trim(),
       category: category.text.trim().isEmpty ? 'Inne' : category.text.trim(),
       muscles: [
@@ -14381,8 +15296,12 @@ class _CreateExerciseSheetContentState extends State<CreateExerciseSheetContent>
       harderVersion: original?.harderVersion ?? '',
       imageUrl: original?.imageUrl,
       imagePath: original?.imagePath,
+      thumbnailPath: original?.thumbnailPath,
       gifPath: original?.gifPath,
+      animationAssetPath: original?.animationAssetPath,
       videoPath: original?.videoPath,
+      videoUrl: original?.videoUrl,
+      mediaItems: savedMedia,
       source: original == null
           ? 'custom'
           : original.source == 'local'
@@ -14392,6 +15311,349 @@ class _CreateExerciseSheetContentState extends State<CreateExerciseSheetContent>
     await widget.store.addCustomExercise(ex);
     if (!mounted) return;
     Navigator.of(context).pop();
+  }
+
+  // ===== Etap 27: zarządzanie multimediami w formularzu =====
+
+  void _showMediaError(String message) {
+    if (!mounted) return;
+    ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(message)));
+  }
+
+  /// Dodaje nowe medium do listy roboczej. Pierwsze dodane staje się główne.
+  void _appendMedia({
+    String? localPath,
+    String? remoteUrl,
+    required MediaType type,
+    String title = '',
+  }) {
+    var resolved = type;
+    final lowerLocal = localPath?.toLowerCase() ?? '';
+    // Drobne dostrojenie: jeśli „zdjęcie" jest faktycznie GIF-em, oznacz jako animację.
+    if (resolved == MediaType.image && lowerLocal.endsWith('.gif')) {
+      resolved = MediaType.gif;
+    }
+    final media = ExerciseMedia(
+      id: 'media_${idNow()}_${mediaItems.length}',
+      exerciseId: widget.exercise?.id ?? '',
+      type: resolved,
+      localPath: localPath,
+      remoteUrl: remoteUrl,
+      title: title,
+      isPrimary: mediaItems.isEmpty,
+      createdAt: DateTime.now(),
+    );
+    setState(() {
+      mediaItems.add(media);
+      _mediaExpanded = true;
+    });
+  }
+
+  Future<void> _pickImageMedia({
+    required ImageSource source,
+    required MediaType type,
+    required String title,
+  }) async {
+    try {
+      final XFile? file = await _mediaPicker.pickImage(source: source, imageQuality: 85);
+      if (file == null) return; // Użytkownik anulował wybór — nic nie robimy.
+      _appendMedia(localPath: file.path, type: type, title: title);
+    } catch (_) {
+      _showMediaError('Nie udało się dodać medium. Sprawdź uprawnienia.');
+    }
+  }
+
+  Future<void> _pickVideoMedia() async {
+    try {
+      final XFile? file = await _mediaPicker.pickVideo(source: ImageSource.gallery);
+      if (file == null) return; // anulowano
+      _appendMedia(localPath: file.path, type: MediaType.video, title: 'Wideo z galerii');
+    } catch (_) {
+      _showMediaError('Nie udało się dodać wideo. Sprawdź uprawnienia.');
+    }
+  }
+
+  Future<void> _addVideoLink() async {
+    final controller = TextEditingController();
+    final formKey = GlobalKey<FormState>();
+    final url = await showDialog<String>(
+      context: context,
+      builder: (dialogContext) => AlertDialog(
+        title: const Text('Link do wideo'),
+        content: Form(
+          key: formKey,
+          child: TextFormField(
+            controller: controller,
+            autofocus: true,
+            keyboardType: TextInputType.url,
+            decoration: const InputDecoration(
+              labelText: 'Adres URL',
+              hintText: 'https://...',
+            ),
+            validator: (value) {
+              final text = value?.trim() ?? '';
+              if (text.isEmpty) return 'Podaj link do wideo.';
+              if (!text.startsWith('http://') && !text.startsWith('https://')) {
+                return 'Link musi zaczynać się od http(s).';
+              }
+              return null;
+            },
+          ),
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.of(dialogContext).pop(),
+            child: const Text('Anuluj'),
+          ),
+          FilledButton(
+            onPressed: () {
+              if (formKey.currentState?.validate() ?? false) {
+                Navigator.of(dialogContext).pop(controller.text.trim());
+              }
+            },
+            child: const Text('Dodaj'),
+          ),
+        ],
+      ),
+    );
+    controller.dispose();
+    if (url == null || url.isEmpty) return; // anulowano / puste
+    _appendMedia(remoteUrl: url, type: MediaType.url, title: 'Wideo (link)');
+  }
+
+  Future<void> _addAssetPlaceholder() async {
+    final selected = await showModalBottomSheet<({String path, MediaType type, String title})>(
+      context: context,
+      showDragHandle: true,
+      builder: (sheetContext) => SafeArea(
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            const Padding(
+              padding: EdgeInsets.fromLTRB(16, 4, 16, 8),
+              child: Align(
+                alignment: Alignment.centerLeft,
+                child: Text('Wbudowane multimedia', style: TextStyle(fontWeight: FontWeight.w900, fontSize: 16)),
+              ),
+            ),
+            for (final asset in kBuiltInExerciseMediaAssets)
+              ListTile(
+                leading: Icon(mediaTypeIcon(asset.type)),
+                title: Text(asset.title),
+                subtitle: Text(asset.path, maxLines: 1, overflow: TextOverflow.ellipsis),
+                onTap: () => Navigator.of(sheetContext).pop(asset),
+              ),
+          ],
+        ),
+      ),
+    );
+    if (selected == null) return; // anulowano
+    _appendMedia(localPath: selected.path, type: selected.type, title: selected.title);
+  }
+
+  void _setPrimaryMedia(String id) {
+    setState(() {
+      mediaItems = [
+        for (final media in mediaItems) media.copyWith(isPrimary: media.id == id),
+      ];
+    });
+  }
+
+  void _deleteMedia(String id) {
+    setState(() {
+      final removed = mediaItems.where((media) => media.id == id).toList();
+      final wasPrimary = removed.isNotEmpty && removed.first.isPrimary;
+      mediaItems.removeWhere((media) => media.id == id);
+      // Jeśli usunęliśmy główne medium — wypromuj pierwsze z pozostałych.
+      if (wasPrimary && mediaItems.isNotEmpty && !mediaItems.any((media) => media.isPrimary)) {
+        mediaItems[0] = mediaItems[0].copyWith(isPrimary: true);
+      }
+    });
+  }
+
+  Future<void> _openAddMediaSheet() async {
+    await showModalBottomSheet<void>(
+      context: context,
+      showDragHandle: true,
+      builder: (sheetContext) {
+        Widget option(IconData icon, String label, Future<void> Function() action) {
+          return ListTile(
+            leading: Icon(icon),
+            title: Text(label),
+            onTap: () async {
+              Navigator.of(sheetContext).pop();
+              await action();
+            },
+          );
+        }
+
+        return SafeArea(
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              const Padding(
+                padding: EdgeInsets.fromLTRB(16, 4, 16, 8),
+                child: Align(
+                  alignment: Alignment.centerLeft,
+                  child: Text('Dodaj multimedia', style: TextStyle(fontWeight: FontWeight.w900, fontSize: 16)),
+                ),
+              ),
+              option(Icons.photo_library_outlined, 'Zdjęcie z galerii',
+                  () => _pickImageMedia(source: ImageSource.gallery, type: MediaType.image, title: 'Zdjęcie z galerii')),
+              option(Icons.photo_camera_outlined, 'Zrób zdjęcie aparatem',
+                  () => _pickImageMedia(source: ImageSource.camera, type: MediaType.image, title: 'Zdjęcie z aparatu')),
+              option(Icons.gif_box_outlined, 'GIF z galerii',
+                  () => _pickImageMedia(source: ImageSource.gallery, type: MediaType.gif, title: 'GIF z galerii')),
+              option(Icons.movie_outlined, 'Wideo z galerii', _pickVideoMedia),
+              option(Icons.link_rounded, 'Link do wideo', _addVideoLink),
+              option(Icons.collections_bookmark_outlined, 'Asset / placeholder', _addAssetPlaceholder),
+            ],
+          ),
+        );
+      },
+    );
+  }
+
+  Widget _buildMediaSection(ThemeData theme) {
+    return Container(
+      decoration: BoxDecoration(
+        color: theme.colorScheme.surfaceContainerHighest.withValues(alpha: 0.4),
+        borderRadius: BorderRadius.circular(16),
+        border: Border.all(color: theme.colorScheme.outlineVariant.withValues(alpha: 0.4)),
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.stretch,
+        children: [
+          InkWell(
+            onTap: () => setState(() => _mediaExpanded = !_mediaExpanded),
+            borderRadius: BorderRadius.circular(16),
+            child: Padding(
+              padding: const EdgeInsets.fromLTRB(14, 12, 8, 12),
+              child: Row(
+                children: [
+                  Icon(Icons.perm_media_outlined, color: theme.colorScheme.primary),
+                  const SizedBox(width: 10),
+                  Expanded(
+                    child: Text(
+                      'Multimedia ćwiczenia',
+                      style: theme.textTheme.titleSmall?.copyWith(fontWeight: FontWeight.w900),
+                    ),
+                  ),
+                  if (mediaItems.isNotEmpty)
+                    Container(
+                      padding: const EdgeInsets.symmetric(horizontal: 9, vertical: 3),
+                      decoration: BoxDecoration(
+                        color: theme.colorScheme.primary,
+                        borderRadius: BorderRadius.circular(10),
+                      ),
+                      child: Text(
+                        '${mediaItems.length}',
+                        style: TextStyle(color: theme.colorScheme.onPrimary, fontWeight: FontWeight.w800, fontSize: 12),
+                      ),
+                    ),
+                  Icon(_mediaExpanded ? Icons.expand_less_rounded : Icons.expand_more_rounded),
+                ],
+              ),
+            ),
+          ),
+          if (_mediaExpanded) ...[
+            Divider(height: 1, color: theme.colorScheme.outlineVariant.withValues(alpha: 0.4)),
+            Padding(
+              padding: const EdgeInsets.fromLTRB(14, 12, 14, 14),
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.stretch,
+                children: [
+                  if (mediaItems.isEmpty)
+                    Padding(
+                      padding: const EdgeInsets.symmetric(vertical: 6),
+                      child: Text(
+                        'Brak multimediów — dodaj zdjęcie, GIF albo wideo, aby ćwiczenie było czytelniejsze',
+                        style: theme.textTheme.bodyMedium?.copyWith(color: theme.colorScheme.onSurfaceVariant),
+                      ),
+                    )
+                  else
+                    for (final media in mediaItems) _buildMediaTile(theme, media),
+                  const SizedBox(height: 10),
+                  FilledButton.tonalIcon(
+                    onPressed: _openAddMediaSheet,
+                    icon: const Icon(Icons.add_photo_alternate_outlined),
+                    label: const Text('Dodaj medium'),
+                  ),
+                ],
+              ),
+            ),
+          ],
+        ],
+      ),
+    );
+  }
+
+  Widget _buildMediaTile(ThemeData theme, ExerciseMedia media) {
+    return Padding(
+      padding: const EdgeInsets.only(bottom: 8),
+      child: Row(
+        children: [
+          ExerciseMediaThumbnail(media: media, size: 52),
+          const SizedBox(width: 10),
+          Expanded(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                Text(
+                  media.title.isEmpty ? media.type.label : media.title,
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
+                  style: theme.textTheme.bodyMedium?.copyWith(fontWeight: FontWeight.w800),
+                ),
+                const SizedBox(height: 2),
+                Row(
+                  children: [
+                    Text(
+                      media.type.label,
+                      style: theme.textTheme.bodySmall?.copyWith(color: theme.colorScheme.onSurfaceVariant),
+                    ),
+                    if (media.isPrimary) ...[
+                      const SizedBox(width: 6),
+                      Container(
+                        padding: const EdgeInsets.symmetric(horizontal: 7, vertical: 2),
+                        decoration: BoxDecoration(
+                          color: theme.colorScheme.primaryContainer,
+                          borderRadius: BorderRadius.circular(8),
+                        ),
+                        child: Text(
+                          'Główne',
+                          style: TextStyle(
+                            fontSize: 10,
+                            fontWeight: FontWeight.w800,
+                            color: theme.colorScheme.onPrimaryContainer,
+                          ),
+                        ),
+                      ),
+                    ],
+                  ],
+                ),
+              ],
+            ),
+          ),
+          IconButton(
+            visualDensity: VisualDensity.compact,
+            tooltip: media.isPrimary ? 'Główne medium' : 'Ustaw jako główne',
+            onPressed: media.isPrimary ? null : () => _setPrimaryMedia(media.id),
+            icon: Icon(
+              media.isPrimary ? Icons.star_rounded : Icons.star_border_rounded,
+              color: media.isPrimary ? theme.colorScheme.primary : null,
+            ),
+          ),
+          IconButton(
+            visualDensity: VisualDensity.compact,
+            tooltip: 'Usuń',
+            onPressed: () => _deleteMedia(media.id),
+            icon: const Icon(Icons.delete_outline_rounded),
+          ),
+        ],
+      ),
+    );
   }
 
   @override
@@ -14584,6 +15846,8 @@ class _CreateExerciseSheetContentState extends State<CreateExerciseSheetContent>
                   hintText: 'Każda alternatywa w nowej linii',
                 ),
               ),
+              const SizedBox(height: 14),
+              _buildMediaSection(theme),
               const SizedBox(height: 18),
               FilledButton.icon(
                 onPressed: save,
@@ -14906,6 +16170,47 @@ class ExercisePlaceholder extends StatelessWidget {
   }
 }
 
+/// Crash-safe budowniczy obrazu/GIF-a z dowolnego źródła:
+/// * URL (`http`/`https`) → [Image.network],
+/// * asset (`assets/...`) → [Image.asset],
+/// * ścieżka pliku z dysku (np. z galerii/aparatu) → [Image.file].
+///
+/// Każdy wariant ma `errorBuilder`, więc brakujący/uszkodzony plik nie crashuje
+/// aplikacji — pokazywany jest [fallback]. Etap 27.
+Widget buildExerciseMediaImage(
+  String path, {
+  BoxFit fit = BoxFit.cover,
+  required Widget fallback,
+}) {
+  final trimmed = path.trim();
+  if (trimmed.isEmpty) return fallback;
+  final lower = trimmed.toLowerCase();
+  if (lower.startsWith('http://') || lower.startsWith('https://')) {
+    return Image.network(
+      trimmed,
+      fit: fit,
+      errorBuilder: (_, __, ___) => fallback,
+      loadingBuilder: (context, child, progress) => progress == null ? child : fallback,
+    );
+  }
+  if (trimmed.startsWith('assets/')) {
+    return Image.asset(
+      trimmed,
+      fit: fit,
+      gaplessPlayback: true,
+      errorBuilder: (_, __, ___) => fallback,
+    );
+  }
+  // Plik lokalny (galeria/aparat). Na web brak dart:io → fallback.
+  if (kIsWeb) return fallback;
+  return Image.file(
+    File(trimmed),
+    fit: fit,
+    gaplessPlayback: true,
+    errorBuilder: (_, __, ___) => fallback,
+  );
+}
+
 class ExerciseMediaPreview extends StatelessWidget {
   const ExerciseMediaPreview({
     super.key,
@@ -14918,32 +16223,7 @@ class ExerciseMediaPreview extends StatelessWidget {
   final BoxFit fit;
   final double? fallbackSize;
 
-  bool _isRemote(String path) {
-    final lower = path.toLowerCase();
-    return lower.startsWith('http://') || lower.startsWith('https://');
-  }
-
   Widget _fallback() => ExercisePlaceholder(exercise: exercise, size: fallbackSize);
-
-  /// Buduje widget obrazu/GIF-a z fallbackiem na wypadek braku pliku.
-  Widget _buildMedia(String path) {
-    if (_isRemote(path)) {
-      return Image.network(
-        path,
-        fit: fit,
-        errorBuilder: (_, __, ___) => _fallback(),
-        loadingBuilder: (context, child, progress) => progress == null ? child : _fallback(),
-      );
-    }
-    // Asset (np. assets/exercises/squat.gif). errorBuilder chroni przed crashem,
-    // gdy plik nie został dodany do projektu.
-    return Image.asset(
-      path,
-      fit: fit,
-      gaplessPlayback: true,
-      errorBuilder: (_, __, ___) => _fallback(),
-    );
-  }
 
   @override
   Widget build(BuildContext context) {
@@ -14954,7 +16234,289 @@ class ExerciseMediaPreview extends StatelessWidget {
     if (path == null) return _fallback();
     return ClipRRect(
       borderRadius: BorderRadius.circular(20),
-      child: _buildMedia(path),
+      child: buildExerciseMediaImage(path, fit: fit, fallback: _fallback()),
+    );
+  }
+}
+
+/// Miniatura pojedynczego medium ([ExerciseMedia]) — używana na liście w formularzu
+/// i w poziomej galerii w szczegółach ćwiczenia. Crash-safe; dla wideo/linku
+/// pokazuje kafelek z ikoną odtwarzania (odtwarzacz pojawi się w kolejnym etapie).
+class ExerciseMediaThumbnail extends StatelessWidget {
+  const ExerciseMediaThumbnail({
+    super.key,
+    required this.media,
+    this.size = 64,
+    this.borderRadius = 14,
+  });
+
+  final ExerciseMedia media;
+  final double size;
+  final double borderRadius;
+
+  @override
+  Widget build(BuildContext context) {
+    final theme = Theme.of(context);
+    final radius = BorderRadius.circular(borderRadius);
+    final iconTile = _iconTile(theme);
+
+    Widget content;
+    if (media.type.isVideo) {
+      // Wideo/link: nie da się renderować jako obraz — tło z miniatury (jeśli jest)
+      // + nakładka z ikoną play. `effectivePath` to plik/URL wideo, więc go nie używamy.
+      final explicitThumb = media.thumbnailPath?.trim();
+      final hasThumb = explicitThumb != null && explicitThumb.isNotEmpty;
+      content = Stack(
+        fit: StackFit.expand,
+        children: [
+          if (hasThumb)
+            buildExerciseMediaImage(explicitThumb, fallback: iconTile)
+          else
+            iconTile,
+          Container(
+            color: Colors.black.withValues(alpha: 0.28),
+            alignment: Alignment.center,
+            child: const Icon(Icons.play_circle_fill_rounded, color: Colors.white, size: 26),
+          ),
+        ],
+      );
+    } else {
+      final thumb = media.thumbnail;
+      content = thumb != null ? buildExerciseMediaImage(thumb, fallback: iconTile) : iconTile;
+    }
+
+    return SizedBox(
+      width: size,
+      height: size,
+      child: ClipRRect(borderRadius: radius, child: content),
+    );
+  }
+
+  Widget _iconTile(ThemeData theme) {
+    return Container(
+      color: theme.colorScheme.surfaceContainerHighest,
+      alignment: Alignment.center,
+      child: Icon(
+        mediaTypeIcon(media.type),
+        color: theme.colorScheme.primary,
+        size: size * 0.42,
+      ),
+    );
+  }
+}
+
+/// Wbudowane (placeholderowe) multimedia do wyboru w formularzu. Etap 27.
+/// Pliki dodamy w kolejnym etapie — do tego czasu render korzysta z fallbacku.
+const List<({String path, MediaType type, String title})> kBuiltInExerciseMediaAssets = [
+  (path: 'assets/exercises/squat.gif', type: MediaType.gif, title: 'Przysiad (animacja)'),
+  (path: 'assets/exercises/pushup.gif', type: MediaType.gif, title: 'Pompka (animacja)'),
+  (path: 'assets/exercises/plank.png', type: MediaType.image, title: 'Deska (zdjęcie)'),
+  (path: 'assets/exercises/generic.png', type: MediaType.image, title: 'Domyślny placeholder'),
+];
+
+/// Ikona dobrana do typu medium.
+IconData mediaTypeIcon(MediaType type) {
+  switch (type) {
+    case MediaType.image:
+      return Icons.image_outlined;
+    case MediaType.gif:
+      return Icons.gif_box_outlined;
+    case MediaType.video:
+      return Icons.movie_outlined;
+    case MediaType.url:
+      return Icons.link_rounded;
+    case MediaType.asset:
+      return Icons.collections_bookmark_outlined;
+    case MediaType.none:
+      return Icons.image_not_supported_outlined;
+  }
+}
+
+/// Pełnoekranowy podgląd pojedynczego medium. Dla obrazów/GIF-ów pokazuje
+/// powiększalny obraz; dla wideo/linku pokazuje informację i link (player w kolejnym etapie).
+Future<void> showExerciseMediaPreviewDialog(BuildContext context, ExerciseMedia media) async {
+  await showDialog<void>(
+    context: context,
+    barrierColor: Colors.black.withValues(alpha: 0.85),
+    builder: (dialogContext) {
+      final theme = Theme.of(dialogContext);
+      final path = media.effectivePath;
+      Widget body;
+      if (media.type.isVideo) {
+        body = Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            Icon(mediaTypeIcon(media.type), size: 64, color: Colors.white),
+            const SizedBox(height: 12),
+            Text(
+              media.title.isEmpty ? media.type.label : media.title,
+              style: const TextStyle(color: Colors.white, fontWeight: FontWeight.w800, fontSize: 18),
+              textAlign: TextAlign.center,
+            ),
+            const SizedBox(height: 8),
+            Padding(
+              padding: const EdgeInsets.symmetric(horizontal: 24),
+              child: Text(
+                path ?? 'Brak źródła wideo.',
+                style: const TextStyle(color: Colors.white70),
+                textAlign: TextAlign.center,
+              ),
+            ),
+            const SizedBox(height: 8),
+            const Text(
+              'Odtwarzacz wideo pojawi się w kolejnym etapie.',
+              style: TextStyle(color: Colors.white54, fontSize: 12),
+              textAlign: TextAlign.center,
+            ),
+          ],
+        );
+      } else if (path != null) {
+        body = InteractiveViewer(
+          maxScale: 4,
+          child: buildExerciseMediaImage(
+            path,
+            fit: BoxFit.contain,
+            fallback: const Icon(Icons.broken_image_outlined, size: 64, color: Colors.white70),
+          ),
+        );
+      } else {
+        body = const Icon(Icons.image_not_supported_outlined, size: 64, color: Colors.white70);
+      }
+      return Stack(
+        children: [
+          Center(child: body),
+          Positioned(
+            top: 8,
+            right: 8,
+            child: SafeArea(
+              child: IconButton(
+                icon: const Icon(Icons.close_rounded, color: Colors.white),
+                onPressed: () => Navigator.of(dialogContext).pop(),
+                tooltip: 'Zamknij',
+              ),
+            ),
+          ),
+          if (media.title.isNotEmpty && !media.type.isVideo)
+            Positioned(
+              left: 16,
+              right: 16,
+              bottom: 24,
+              child: SafeArea(
+                child: Text(
+                  media.title,
+                  style: theme.textTheme.titleMedium?.copyWith(color: Colors.white, fontWeight: FontWeight.w800),
+                  textAlign: TextAlign.center,
+                ),
+              ),
+            ),
+        ],
+      );
+    },
+  );
+}
+
+/// Galeria multimediów ćwiczenia: główne medium na górze, pozostałe w poziomej liście.
+/// Pokazywana w szczegółach ćwiczenia, gdy ćwiczenie ma [Exercise.mediaItems]. Etap 27.
+class ExerciseMediaGallery extends StatelessWidget {
+  const ExerciseMediaGallery({super.key, required this.exercise});
+
+  final Exercise exercise;
+
+  @override
+  Widget build(BuildContext context) {
+    final theme = Theme.of(context);
+    final items = exercise.mediaItems.where((media) => media.hasContent).toList();
+    if (items.isEmpty) {
+      // Brak listy mediów — pokaż klasyczny hero (ścieżki imagePath/gifPath itd.).
+      return _ExerciseMediaHero(exercise: exercise);
+    }
+    final primary = exercise.primaryMedia ?? items.first;
+    final others = items.where((media) => media.id != primary.id).toList();
+
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        // Główne medium na górze.
+        GestureDetector(
+          onTap: () => showExerciseMediaPreviewDialog(context, primary),
+          child: Container(
+            height: 240,
+            decoration: BoxDecoration(
+              color: theme.colorScheme.surfaceContainerHighest,
+              borderRadius: BorderRadius.circular(24),
+              border: Border.all(color: theme.colorScheme.outlineVariant.withValues(alpha: 0.4)),
+            ),
+            clipBehavior: Clip.antiAlias,
+            child: Stack(
+              fit: StackFit.expand,
+              children: [
+                Padding(
+                  padding: const EdgeInsets.all(8),
+                  child: primary.type.isVideo
+                      ? ExerciseMediaThumbnail(media: primary, size: 224, borderRadius: 18)
+                      : buildExerciseMediaImage(
+                          primary.effectivePath ?? '',
+                          fit: BoxFit.contain,
+                          fallback: ExercisePlaceholder(exercise: exercise, size: 200),
+                        ),
+                ),
+                Positioned(
+                  left: 12,
+                  top: 12,
+                  child: _MediaTypeBadge(type: primary.type),
+                ),
+              ],
+            ),
+          ),
+        ),
+        if (others.isNotEmpty) ...[
+          const SizedBox(height: 12),
+          SizedBox(
+            height: 76,
+            child: ListView.separated(
+              scrollDirection: Axis.horizontal,
+              itemCount: others.length,
+              separatorBuilder: (_, __) => const SizedBox(width: 10),
+              itemBuilder: (context, index) {
+                final media = others[index];
+                return GestureDetector(
+                  onTap: () => showExerciseMediaPreviewDialog(context, media),
+                  child: ExerciseMediaThumbnail(media: media, size: 76),
+                );
+              },
+            ),
+          ),
+        ],
+      ],
+    );
+  }
+}
+
+class _MediaTypeBadge extends StatelessWidget {
+  const _MediaTypeBadge({required this.type});
+
+  final MediaType type;
+
+  @override
+  Widget build(BuildContext context) {
+    final theme = Theme.of(context);
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 5),
+      decoration: BoxDecoration(
+        color: theme.colorScheme.primary,
+        borderRadius: BorderRadius.circular(12),
+      ),
+      child: Row(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          Icon(mediaTypeIcon(type), size: 16, color: theme.colorScheme.onPrimary),
+          const SizedBox(width: 4),
+          Text(
+            type.label,
+            style: TextStyle(fontSize: 11, fontWeight: FontWeight.w800, color: theme.colorScheme.onPrimary),
+          ),
+        ],
+      ),
     );
   }
 }

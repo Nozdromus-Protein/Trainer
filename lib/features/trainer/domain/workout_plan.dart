@@ -1,3 +1,21 @@
+/// Status pojedynczego dnia programu w widoku liniowym (Etap 28).
+enum WorkoutDayStatus {
+  /// Dzień ukończony.
+  completed,
+
+  /// Bieżący dzień do wykonania (tryb liniowy).
+  active,
+
+  /// Dzień dostępny do treningu (np. w trybie „dowolny dzień").
+  available,
+
+  /// Dzień zablokowany do czasu ukończenia poprzedniego.
+  locked,
+
+  /// Dzień odpoczynku (brak ćwiczeń) — osobny status wizualny.
+  rest,
+}
+
 class WorkoutPlan {
   const WorkoutPlan({
     required this.id,
@@ -6,6 +24,10 @@ class WorkoutPlan {
     required this.note,
     this.goal = 'Sylwetka',
     this.isActive = false,
+    this.level = '',
+    this.imageAsset,
+    this.allowAnyDay = false,
+    this.completedDays = const <int>{},
   });
 
   final String id;
@@ -15,6 +37,19 @@ class WorkoutPlan {
   final String goal;
   final bool isActive;
 
+  /// Poziom programu (np. „Początkujący"/„Średniozaawansowany"/„Zaawansowany").
+  /// Pusty = nie pokazuj etykiety poziomu. Etap 28.
+  final String level;
+
+  /// Opcjonalny obraz tła nagłówka programu (asset/URL). Brak = gradient. Etap 28.
+  final String? imageAsset;
+
+  /// Czy użytkownik może trenować dowolny dzień (wyłącza blokowanie). Etap 28.
+  final bool allowAnyDay;
+
+  /// Indeksy dni (w [days]) oznaczonych jako ukończone. Etap 28.
+  final Set<int> completedDays;
+
   WorkoutPlan copyWith({
     String? id,
     String? name,
@@ -22,6 +57,10 @@ class WorkoutPlan {
     String? note,
     String? goal,
     bool? isActive,
+    String? level,
+    String? imageAsset,
+    bool? allowAnyDay,
+    Set<int>? completedDays,
   }) {
     return WorkoutPlan(
       id: id ?? this.id,
@@ -30,7 +69,58 @@ class WorkoutPlan {
       note: note ?? this.note,
       goal: goal ?? this.goal,
       isActive: isActive ?? this.isActive,
+      level: level ?? this.level,
+      imageAsset: imageAsset ?? this.imageAsset,
+      allowAnyDay: allowAnyDay ?? this.allowAnyDay,
+      completedDays: completedDays ?? this.completedDays,
     );
+  }
+
+  // ===== Etap 28: logika programu liniowego =====
+
+  /// Liczba ukończonych dni (zliczane tylko poprawne indeksy).
+  int get completedCount =>
+      completedDays.where((index) => index >= 0 && index < days.length).length;
+
+  /// Postęp programu w zakresie 0..1.
+  double get progress => days.isEmpty ? 0 : completedCount / days.length;
+
+  /// Czy dzień jest dniem odpoczynku (brak ćwiczeń albo tytuł sugerujący odpoczynek).
+  bool isRestDay(WorkoutDay day) {
+    if (day.items.isEmpty) return true;
+    final title = day.title.toLowerCase();
+    return title.contains('odpocz') || title.contains('rest');
+  }
+
+  bool isDayCompleted(int index) => completedDays.contains(index);
+
+  /// Indeks bieżącego dnia (pierwszy nieukończony). Gdy wszystkie ukończone,
+  /// zwraca [days].length (program zakończony).
+  int get currentDayIndex {
+    for (var index = 0; index < days.length; index++) {
+      if (!isDayCompleted(index)) return index;
+    }
+    return days.length;
+  }
+
+  /// Czy cały program jest ukończony.
+  bool get isProgramCompleted => days.isNotEmpty && currentDayIndex >= days.length;
+
+  /// Status dnia o danym indeksie (z uwzględnieniem trybu „dowolny dzień").
+  WorkoutDayStatus statusForDay(int index) {
+    if (index < 0 || index >= days.length) return WorkoutDayStatus.locked;
+    if (isDayCompleted(index)) return WorkoutDayStatus.completed;
+    final locked = !allowAnyDay && index > currentDayIndex;
+    if (locked) return WorkoutDayStatus.locked;
+    if (isRestDay(days[index])) return WorkoutDayStatus.rest;
+    if (!allowAnyDay && index == currentDayIndex) return WorkoutDayStatus.active;
+    return WorkoutDayStatus.available;
+  }
+
+  /// Czy dany dzień można wystartować (nie jest zablokowany ani pusty bez sensu).
+  bool canStartDay(int index) {
+    final status = statusForDay(index);
+    return status != WorkoutDayStatus.locked;
   }
 
   Map<String, dynamic> toJson() => {
@@ -40,6 +130,10 @@ class WorkoutPlan {
         'note': note,
         'goal': goal,
         'isActive': isActive,
+        'level': level,
+        'imageAsset': imageAsset,
+        'allowAnyDay': allowAnyDay,
+        'completedDays': completedDays.toList()..sort(),
       };
 
   factory WorkoutPlan.fromJson(Map<String, dynamic> json) => WorkoutPlan(
@@ -55,7 +149,19 @@ class WorkoutPlan {
         note: json['note']?.toString() ?? '',
         goal: normalizeWorkoutPlanGoal(json['goal']?.toString() ?? ''),
         isActive: json['isActive'] as bool? ?? false,
+        level: json['level']?.toString() ?? '',
+        imageAsset: _nullableText(json['imageAsset']),
+        allowAnyDay: json['allowAnyDay'] as bool? ?? false,
+        completedDays: ((json['completedDays'] as List?) ?? const [])
+            .map((value) => (value as num?)?.toInt())
+            .whereType<int>()
+            .toSet(),
       );
+}
+
+String? _nullableText(Object? value) {
+  final text = value?.toString().trim() ?? '';
+  return text.isEmpty ? null : text;
 }
 
 const List<String> workoutPlanGoals = [
