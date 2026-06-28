@@ -8,6 +8,7 @@ import 'package:flutter/material.dart';
 import 'package:http/http.dart' as http;
 import 'package:image_picker/image_picker.dart';
 import 'package:shared_preferences/shared_preferences.dart';
+import 'package:video_player/video_player.dart';
 
 import 'features/trainer/application/exercise_library_filter.dart';
 import 'features/trainer/application/workout_plan_factory.dart';
@@ -2158,6 +2159,32 @@ class AppSettings {
       };
 }
 
+/// Instruktażowe wideo (asset) per ćwiczenie — odtwarzane w trakcie treningu.
+/// Klucz = id ćwiczenia. Dodając kolejne ćwiczenia, dopisz tu plik wideo
+/// (albo ustaw `videoPath` bezpośrednio w definicji ćwiczenia). Pliki leżą w
+/// `assets/exercises/videos/` i są zadeklarowane w pubspec.yaml.
+const Map<String, String> kExerciseVideoAssets = {
+  'crunch': 'assets/exercises/videos/crunch.mp4',
+  'hip_thrust': 'assets/exercises/videos/hip_thrust.mp4',
+  'deadlift': 'assets/exercises/videos/deadlift.mp4',
+  'pushup': 'assets/exercises/videos/pushup.mp4',
+  'triceps_extension': 'assets/exercises/videos/triceps_extension.mp4',
+  'bulgarian_split_squat': 'assets/exercises/videos/bulgarian_split_squat.mp4',
+  'russian_twist': 'assets/exercises/videos/russian_twist.mp4',
+  'lat_pulldown': 'assets/exercises/videos/lat_pulldown.mp4',
+  'bicep_curl': 'assets/exercises/videos/bicep_curl.mp4',
+  'lateral_raise': 'assets/exercises/videos/lateral_raise.mp4',
+  'leg_raise': 'assets/exercises/videos/leg_raise.mp4',
+  'row': 'assets/exercises/videos/row.mp4',
+  'mountain_climber': 'assets/exercises/videos/mountain_climber.mp4',
+  'shoulder_press': 'assets/exercises/videos/shoulder_press.mp4',
+  'bench_press': 'assets/exercises/videos/bench_press.mp4',
+  'lunge': 'assets/exercises/videos/lunge.mp4',
+};
+
+/// Wideo instruktażowe dla ćwiczenia o danym id (albo null).
+String? exerciseVideoAsset(String id) => kExerciseVideoAssets[id];
+
 class ExerciseRepo {
   static final List<Exercise> all = [
     Exercise(
@@ -2175,10 +2202,6 @@ class ExerciseRepo {
       defaultReps: 10,
       defaultDurationSec: 0,
       met: 5.0,
-      // Etap 26: przykładowe multimedia (asset). Pliki dodamy w kolejnym etapie —
-      // do tego czasu ExerciseMediaPreview pokazuje estetyczny fallback bez crasha.
-      gifPath: 'assets/exercises/squat.gif',
-      thumbnailPath: 'assets/exercises/squat_thumb.png',
     ),
     Exercise(
       id: 'goblet_squat',
@@ -2323,36 +2346,6 @@ class ExerciseRepo {
       defaultReps: 12,
       defaultDurationSec: 0,
       met: 4.0,
-      // Etap 26: pełny przykład listy multimediów (galeria). Element `isPrimary`
-      // jest źródłem miniatury i głównej animacji w treningu. Ścieżki to placeholdery.
-      mediaItems: const [
-        ExerciseMedia(
-          id: 'pushup_gif',
-          exerciseId: 'pushup',
-          type: MediaType.gif,
-          localPath: 'assets/exercises/pushup.gif',
-          thumbnailPath: 'assets/exercises/pushup_thumb.png',
-          title: 'Animacja pompki',
-          description: 'Pełny zakres ruchu z boku.',
-          isPrimary: true,
-        ),
-        ExerciseMedia(
-          id: 'pushup_photo',
-          exerciseId: 'pushup',
-          type: MediaType.image,
-          localPath: 'assets/exercises/pushup_bottom.png',
-          title: 'Pozycja dolna',
-          description: 'Kontrola w najniższym punkcie.',
-        ),
-        ExerciseMedia(
-          id: 'pushup_video',
-          exerciseId: 'pushup',
-          type: MediaType.url,
-          remoteUrl: 'https://www.youtube.com/watch?v=IODxDxX7oi4',
-          title: 'Instruktaż wideo',
-          description: 'Zewnętrzny poradnik techniki.',
-        ),
-      ],
     ),
     Exercise(
       id: 'incline_pushup',
@@ -2561,9 +2554,6 @@ class ExerciseRepo {
       defaultReps: 0,
       defaultDurationSec: 45,
       met: 3.3,
-      // Etap 26: przykład samego statycznego obrazu (asset). Placeholder do czasu
-      // dodania pliku — fallback działa offline i bez crasha.
-      imagePath: 'assets/exercises/plank.png',
     ),
     Exercise(
       id: 'side_plank',
@@ -2808,6 +2798,8 @@ class ExerciseRepo {
 
   static Exercise _withLibraryMetadata(Exercise exercise) {
     return exercise.copyWith(
+      // Etap 33: dołącz instruktażowe wideo (jeśli istnieje i nie ustawiono własnego).
+      videoPath: exercise.videoPath ?? exerciseVideoAsset(exercise.id),
       trainingGoals: exercise.trainingGoals.isEmpty ? _goalsFor(exercise) : exercise.trainingGoals,
       avoidWhen: exercise.avoidWhen.isEmpty ? _avoidWhenFor(exercise) : exercise.avoidWhen,
       alternatives: exercise.alternatives.isEmpty ? _alternativesFor(exercise) : exercise.alternatives,
@@ -8815,16 +8807,25 @@ class _PlayerExerciseMedia extends StatelessWidget {
     final staticPath = exercise.staticMediaPath;
     final fallback = ExercisePlaceholder(exercise: exercise);
 
+    // Etap 33: wideo instruktażowe (asset/plik) jest głównym medium w trakcie treningu.
+    final videoPath = exercise.videoMediaPath;
+    final videoLower = videoPath?.toLowerCase() ?? '';
+    final isRemoteVideo = videoLower.startsWith('http://') || videoLower.startsWith('https://');
+    final playableVideo = videoPath != null && !kIsWeb && !isRemoteVideo;
+
     Widget media;
     Widget? badge;
-    if (animated != null) {
+    if (playableVideo) {
+      media = _LoopingVideo(source: videoPath, paused: paused, fallback: fallback);
+      badge = _badge(theme, Icons.movie_outlined, 'Wideo');
+    } else if (animated != null) {
       media = buildExerciseMediaImage(animated, fit: BoxFit.contain, fallback: fallback);
       badge = _badge(theme, Icons.gif_box_outlined, 'Animacja');
     } else if (staticPath != null) {
       media = buildExerciseMediaImage(staticPath, fit: BoxFit.contain, fallback: fallback);
       badge = _badge(theme, Icons.image_outlined, 'Zdjęcie');
     } else if (exercise.hasVideo) {
-      // Odtwarzacz wideo pojawi się później — pokaż poster + ikonę odtwarzania.
+      // Wideo zdalne / web — pokaż poster + ikonę odtwarzania (bez wbudowanego odtwarzacza).
       final poster = exercise.thumbnailMediaPath;
       media = Stack(
         fit: StackFit.expand,
@@ -8876,6 +8877,87 @@ class _PlayerExerciseMedia extends StatelessWidget {
           const SizedBox(width: 4),
           Text(label, style: TextStyle(fontSize: 11, fontWeight: FontWeight.w800, color: theme.colorScheme.onPrimary)),
         ],
+      ),
+    );
+  }
+}
+
+/// Zapętlone, wyciszone wideo instruktażowe (asset albo plik z dysku).
+/// Autoodtwarzanie z reagowaniem na pauzę treningu; błąd inicjalizacji albo brak
+/// pliku → [fallback] (nigdy nie crashuje). Etap 33.
+class _LoopingVideo extends StatefulWidget {
+  const _LoopingVideo({required this.source, required this.paused, required this.fallback});
+
+  final String source;
+  final bool paused;
+  final Widget fallback;
+
+  @override
+  State<_LoopingVideo> createState() => _LoopingVideoState();
+}
+
+class _LoopingVideoState extends State<_LoopingVideo> {
+  VideoPlayerController? _controller;
+  bool _failed = false;
+
+  @override
+  void initState() {
+    super.initState();
+    _init();
+  }
+
+  Future<void> _init() async {
+    try {
+      final controller = widget.source.startsWith('assets/')
+          ? VideoPlayerController.asset(widget.source)
+          : VideoPlayerController.file(File(widget.source));
+      await controller.initialize();
+      await controller.setLooping(true);
+      await controller.setVolume(0);
+      if (!mounted) {
+        await controller.dispose();
+        return;
+      }
+      if (!widget.paused) {
+        await controller.play();
+      }
+      setState(() => _controller = controller);
+    } catch (_) {
+      if (mounted) setState(() => _failed = true);
+    }
+  }
+
+  @override
+  void didUpdateWidget(covariant _LoopingVideo oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    final controller = _controller;
+    if (controller == null) return;
+    if (widget.paused && controller.value.isPlaying) {
+      controller.pause();
+    } else if (!widget.paused && !controller.value.isPlaying) {
+      controller.play();
+    }
+  }
+
+  @override
+  void dispose() {
+    _controller?.dispose();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    if (_failed) return widget.fallback;
+    final controller = _controller;
+    if (controller == null || !controller.value.isInitialized) {
+      return const _MediaLoadingBox();
+    }
+    return FittedBox(
+      fit: BoxFit.contain,
+      child: SizedBox(
+        width: controller.value.size.width,
+        height: controller.value.size.height,
+        child: VideoPlayer(controller),
       ),
     );
   }
@@ -18449,13 +18531,31 @@ class ExerciseMediaThumbnail extends StatelessWidget {
   }
 }
 
-/// Wbudowane (placeholderowe) multimedia do wyboru w formularzu. Etap 27.
-/// Pliki dodamy w kolejnym etapie — do tego czasu render korzysta z fallbacku.
+/// Wbudowane wideo instruktażowe do wyboru w formularzu ćwiczenia (Etap 33).
+/// Pozwala przypisać dowolny dołączony klip do nowo dodanego ćwiczenia.
 const List<({String path, MediaType type, String title})> kBuiltInExerciseMediaAssets = [
-  (path: 'assets/exercises/squat.gif', type: MediaType.gif, title: 'Przysiad (animacja)'),
-  (path: 'assets/exercises/pushup.gif', type: MediaType.gif, title: 'Pompka (animacja)'),
-  (path: 'assets/exercises/plank.png', type: MediaType.image, title: 'Deska (zdjęcie)'),
-  (path: 'assets/exercises/generic.png', type: MediaType.image, title: 'Domyślny placeholder'),
+  (path: 'assets/exercises/videos/bench_press.mp4', type: MediaType.video, title: 'Wyciskanie sztangi leżąc'),
+  (path: 'assets/exercises/videos/bicep_curl.mp4', type: MediaType.video, title: 'Uginanie ramion (biceps)'),
+  (path: 'assets/exercises/videos/bulgarian_split_squat.mp4', type: MediaType.video, title: 'Przysiad bułgarski'),
+  (path: 'assets/exercises/videos/crunch.mp4', type: MediaType.video, title: 'Brzuszki klasyczne'),
+  (path: 'assets/exercises/videos/deadlift.mp4', type: MediaType.video, title: 'Martwy ciąg ze sztangą'),
+  (path: 'assets/exercises/videos/deadlift_alt.mp4', type: MediaType.video, title: 'Martwy ciąg (ujęcie 2)'),
+  (path: 'assets/exercises/videos/hip_thrust.mp4', type: MediaType.video, title: 'Hip thrust ze sztangą'),
+  (path: 'assets/exercises/videos/lat_pulldown.mp4', type: MediaType.video, title: 'Ściąganie drążka'),
+  (path: 'assets/exercises/videos/lateral_raise.mp4', type: MediaType.video, title: 'Unoszenie bokiem hantlami'),
+  (path: 'assets/exercises/videos/leg_raise.mp4', type: MediaType.video, title: 'Unoszenie nóg leżąc'),
+  (path: 'assets/exercises/videos/lunge.mp4', type: MediaType.video, title: 'Wykroki z hantlami'),
+  (path: 'assets/exercises/videos/mountain_climber.mp4', type: MediaType.video, title: 'Wspinaczka górska'),
+  (path: 'assets/exercises/videos/nozyce.mp4', type: MediaType.video, title: 'Nożyce (brzuch)'),
+  (path: 'assets/exercises/videos/pushup.mp4', type: MediaType.video, title: 'Pompki klasyczne'),
+  (path: 'assets/exercises/videos/row.mp4', type: MediaType.video, title: 'Wiosłowanie sztangą'),
+  (path: 'assets/exercises/videos/row_dumbbell.mp4', type: MediaType.video, title: 'Wiosłowanie hantlą'),
+  (path: 'assets/exercises/videos/rowerki.mp4', type: MediaType.video, title: 'Rowerki / twist brzucha'),
+  (path: 'assets/exercises/videos/rozpietki.mp4', type: MediaType.video, title: 'Rozpiętki hantlami'),
+  (path: 'assets/exercises/videos/russian_twist.mp4', type: MediaType.video, title: 'Ruskie skręty z hantlem'),
+  (path: 'assets/exercises/videos/shoulder_press.mp4', type: MediaType.video, title: 'Wyciskanie hantli (barki)'),
+  (path: 'assets/exercises/videos/shoulder_press_alt.mp4', type: MediaType.video, title: 'Wyciskanie hantli (ujęcie 2)'),
+  (path: 'assets/exercises/videos/triceps_extension.mp4', type: MediaType.video, title: 'Prostowanie ramion (triceps)'),
 ];
 
 /// Ikona dobrana do typu medium.
