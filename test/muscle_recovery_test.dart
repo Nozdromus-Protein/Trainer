@@ -148,4 +148,37 @@ void main() {
       expect(recoveryStatusForPercent(95), RecoveryStatus.recovered);
     });
   });
+
+  group('recoveryWarningsForExercises', () {
+    MuscleRecoveryState state(BodyMuscle m, double pct) => MuscleRecoveryState(
+          muscleGroup: m,
+          recoveryPercent: pct,
+          status: recoveryStatusForPercent(pct),
+          lastTrainedAt: DateTime(2026, 6, 30, 12),
+        );
+
+    test('fatigued primary muscle is warned (severe under 40%)', () {
+      final exercise = _exercise('pushup', impacts: const [
+        ExerciseMuscleImpact(muscleGroup: BodyMuscle.chest, role: MuscleRole.primary),
+      ]);
+      final warnings = recoveryWarningsForExercises([exercise], {BodyMuscle.chest: state(BodyMuscle.chest, 30)});
+      expect(warnings, hasLength(1));
+      expect(warnings.first.muscle, BodyMuscle.chest);
+      expect(warnings.first.severe, isTrue);
+    });
+
+    test('recovered muscle is not warned', () {
+      final exercise = _exercise('pushup', impacts: const [
+        ExerciseMuscleImpact(muscleGroup: BodyMuscle.chest, role: MuscleRole.primary),
+      ]);
+      expect(recoveryWarningsForExercises([exercise], {BodyMuscle.chest: state(BodyMuscle.chest, 85)}), isEmpty);
+    });
+
+    test('stabilizer-only muscle is not warned', () {
+      final exercise = _exercise('plank', impacts: const [
+        ExerciseMuscleImpact(muscleGroup: BodyMuscle.abs, role: MuscleRole.stabilizer),
+      ]);
+      expect(recoveryWarningsForExercises([exercise], {BodyMuscle.abs: state(BodyMuscle.abs, 20)}), isEmpty);
+    });
+  });
 }

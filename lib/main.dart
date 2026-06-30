@@ -8190,6 +8190,11 @@ Future<void> startWorkoutForDay(
     }
     await store.discardActiveWorkout();
   }
+  if (!context.mounted) return;
+  // Ostrzeżenie o regeneracji przed startem zestawu (mocno zmęczone partie → potwierdzenie).
+  final dayExercises = [for (final item in day.items) ExerciseRepo.byId(item.exerciseId, store.customExercises)];
+  final canStart = await confirmRecoveryBeforeStart(context, dayExercises);
+  if (!canStart || !context.mounted) return;
   final started = await store.startActiveWorkout(plan: plan, day: day, dayIndex: dayIndex);
   if (!context.mounted) return;
   if (!started) {
@@ -9018,6 +9023,7 @@ class _ActiveExercisePlayerPageState extends State<ActiveExercisePlayerPage> {
     final allSetsDone = setsDone >= active.plannedSets;
     final isLast = index >= total - 1;
     final coach = _coachMessage(exercise, active, isTimed, allSetsDone);
+    final recoveryWarnings = recoveryWarningsForExercises([exercise], store.muscleRecoveryMap());
 
     Widget bigDisplay;
     if (isTimed && !allSetsDone) {
@@ -9080,6 +9086,10 @@ class _ActiveExercisePlayerPageState extends State<ActiveExercisePlayerPage> {
           style: theme.textTheme.headlineSmall?.copyWith(fontWeight: FontWeight.w900),
         ),
         const SizedBox(height: 6),
+        if (recoveryWarnings.isNotEmpty) ...[
+          Center(child: _RecoveryMiniWarning(warning: recoveryWarnings.first)),
+          const SizedBox(height: 6),
+        ],
         SizedBox(
           height: 22,
           child: Center(
@@ -10004,6 +10014,115 @@ Future<void> openMuscleRecoveryPage(BuildContext context) async {
   await Navigator.of(context).push(
     MaterialPageRoute<void>(builder: (_) => const MuscleRecoveryPage()),
   );
+}
+
+/// Baner ostrzegający o trenowaniu partii będących jeszcze w regeneracji.
+/// Informacyjny (nie blokuje). Pusta lista → nic nie pokazuje.
+class RecoveryWarningBanner extends StatelessWidget {
+  const RecoveryWarningBanner({super.key, required this.warnings});
+
+  final List<RecoveryWarning> warnings;
+
+  @override
+  Widget build(BuildContext context) {
+    if (warnings.isEmpty) return const SizedBox.shrink();
+    final theme = Theme.of(context);
+    final scheme = theme.colorScheme;
+    final severe = warnings.any((w) => w.severe);
+    final accent = severe ? scheme.error : const Color(0xFFE08600);
+    final list = warnings.take(3).map((w) => '${w.muscle.label} ${w.recoveryPercent.round()}%').join(', ');
+    final extra = warnings.length > 3 ? ' (+${warnings.length - 3})' : '';
+    final title = severe ? 'Mocno zmęczone partie' : 'Uwaga na regenerację';
+    final message = severe
+        ? 'Te partie nie są jeszcze zregenerowane: $list$extra. Dziś lepiej je odpuść albo zrób lżejszą wersję.'
+        : 'Partie w trakcie regeneracji: $list$extra. Rozważ lżejszy trening lub inną partię.';
+    return Container(
+      padding: const EdgeInsets.all(12),
+      decoration: BoxDecoration(
+        color: accent.withValues(alpha: 0.14),
+        borderRadius: BorderRadius.circular(14),
+        border: Border.all(color: accent.withValues(alpha: 0.5)),
+      ),
+      child: Row(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Icon(severe ? Icons.warning_amber_rounded : Icons.info_outline_rounded, color: accent, size: 20),
+          const SizedBox(width: 10),
+          Expanded(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Text(title, style: theme.textTheme.bodyMedium?.copyWith(fontWeight: FontWeight.w900, color: accent)),
+                const SizedBox(height: 2),
+                Text(message, style: theme.textTheme.bodySmall?.copyWith(color: scheme.onSurface)),
+              ],
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+/// Sprawdza regenerację przed startem zestawu i — jeśli któraś partia jest mocno
+/// zmęczona — prosi o potwierdzenie. Zwraca `true`, gdy można startować.
+Future<bool> confirmRecoveryBeforeStart(BuildContext context, Iterable<Exercise> exercises) async {
+  final store = AppScope.read(context);
+  final warnings = recoveryWarningsForExercises(exercises, store.muscleRecoveryMap());
+  final severe = warnings.where((w) => w.severe).toList();
+  if (severe.isEmpty) return true;
+  final list = severe.take(3).map((w) => '${w.muscle.label} (${w.recoveryPercent.round()}%)').join(', ');
+  final proceed = await showDialog<bool>(
+    context: context,
+    builder: (dialogContext) => AlertDialog(
+      title: const Text('Partie jeszcze w regeneracji'),
+      content: Text(
+        'Te partie nie są w pełni zregenerowane: $list.\n\n'
+        'Trening teraz może spowolnić regenerację i zwiększyć ryzyko przeciążenia. Chcesz mimo to trenować?',
+      ),
+      actions: [
+        TextButton(onPressed: () => Navigator.pop(dialogContext, false), child: const Text('Anuluj')),
+        FilledButton(onPressed: () => Navigator.pop(dialogContext, true), child: const Text('Trenuj mimo to')),
+      ],
+    ),
+  );
+  return proceed == true;
+}
+
+/// Mała pigułka ostrzegająca o regeneracji bieżącego ćwiczenia (w odtwarzaczu).
+class _RecoveryMiniWarning extends StatelessWidget {
+  const _RecoveryMiniWarning({required this.warning});
+
+  final RecoveryWarning warning;
+
+  @override
+  Widget build(BuildContext context) {
+    final theme = Theme.of(context);
+    final accent = warning.severe ? theme.colorScheme.error : const Color(0xFFE08600);
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 4),
+      decoration: BoxDecoration(
+        color: accent.withValues(alpha: 0.15),
+        borderRadius: BorderRadius.circular(20),
+        border: Border.all(color: accent.withValues(alpha: 0.5)),
+      ),
+      child: Row(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          Icon(Icons.warning_amber_rounded, size: 14, color: accent),
+          const SizedBox(width: 5),
+          Flexible(
+            child: Text(
+              '${warning.muscle.label} w regeneracji · ${warning.recoveryPercent.round()}%',
+              maxLines: 1,
+              overflow: TextOverflow.ellipsis,
+              style: theme.textTheme.bodySmall?.copyWith(fontWeight: FontWeight.w800, color: accent),
+            ),
+          ),
+        ],
+      ),
+    );
+  }
 }
 
 /// Pełny ekran „Regeneracja mięśni". Etap regeneracji.
@@ -12711,11 +12830,14 @@ class _WorkoutDayDetailsPageState extends State<WorkoutDayDetailsPage> {
 
     final equipment = <EquipmentType>{};
     final muscles = <MuscleGroup>{};
+    final dayExercises = <Exercise>[];
     for (final item in day.items) {
       final exercise = item.exerciseFrom(store.customExercises);
+      dayExercises.add(exercise);
       equipment.addAll(exercise.equipmentTypes);
       muscles.addAll(exercise.muscleGroups);
     }
+    final recoveryWarnings = recoveryWarningsForExercises(dayExercises, store.muscleRecoveryMap());
 
     return Scaffold(
       body: ListView(
@@ -12751,6 +12873,10 @@ class _WorkoutDayDetailsPageState extends State<WorkoutDayDetailsPage> {
                     onPressed: () => showPlanExercisePicker(context, plan: plan, day: day),
                   )
                 else ...[
+                  if (recoveryWarnings.isNotEmpty) ...[
+                    RecoveryWarningBanner(warnings: recoveryWarnings),
+                    const SizedBox(height: 14),
+                  ],
                   if (equipment.isNotEmpty)
                     _TagSection(
                       icon: Icons.fitness_center_outlined,

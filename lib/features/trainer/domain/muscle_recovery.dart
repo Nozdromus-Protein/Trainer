@@ -70,6 +70,62 @@ class MuscleRecoveryState {
   RecoveryStatus get colorState => status;
 }
 
+/// Ostrzeżenie o trenowaniu partii, która jest jeszcze w trakcie regeneracji.
+class RecoveryWarning {
+  const RecoveryWarning({
+    required this.muscle,
+    required this.recoveryPercent,
+    required this.status,
+    required this.severe,
+  });
+
+  final BodyMuscle muscle;
+  final double recoveryPercent;
+  final RecoveryStatus status;
+
+  /// Czy ostrzeżenie jest mocne (partia bardzo zmęczona — sugeruj odpuszczenie).
+  final bool severe;
+}
+
+/// Zwraca ostrzeżenia o regeneracji dla zestawu ćwiczeń: partie główne/pomocnicze,
+/// które są poniżej progu regeneracji. „W miarę rozumu" — stabilizatory pomijamy,
+/// a mocne ostrzeżenie (severe) dotyczy partii poniżej [severeBelow]%.
+List<RecoveryWarning> recoveryWarningsForExercises(
+  Iterable<Exercise> exercises,
+  Map<BodyMuscle, MuscleRecoveryState> recovery, {
+  double warnBelow = 60,
+  double severeBelow = 40,
+}) {
+  // Najwyższa rola danej partii w całym zestawie (główna > pomocnicza > stabilizacja).
+  final roleByMuscle = <BodyMuscle, MuscleRole>{};
+  for (final exercise in exercises) {
+    for (final impact in exercise.effectiveMuscleImpacts) {
+      final existing = roleByMuscle[impact.muscleGroup];
+      if (existing == null || impact.role.weight > existing.weight) {
+        roleByMuscle[impact.muscleGroup] = impact.role;
+      }
+    }
+  }
+
+  final warnings = <RecoveryWarning>[];
+  roleByMuscle.forEach((muscle, role) {
+    if (role == MuscleRole.stabilizer) return; // stabilizatorów nie ostrzegamy
+    final state = recovery[muscle];
+    if (state == null || !state.hasData) return;
+    final percent = state.recoveryPercent ?? 100;
+    if (percent < warnBelow) {
+      warnings.add(RecoveryWarning(
+        muscle: muscle,
+        recoveryPercent: percent,
+        status: state.status,
+        severe: percent < severeBelow,
+      ));
+    }
+  });
+  warnings.sort((a, b) => a.recoveryPercent.compareTo(b.recoveryPercent));
+  return warnings;
+}
+
 /// Lokalna sugestia treningowa dla partii (bez AI).
 String recoverySuggestionForMuscle(MuscleRecoveryState state) {
   switch (state.status) {
