@@ -7,10 +7,24 @@
     <uses-permission android:name="android.permission.health.READ_HEART_RATE"/>
     <uses-permission android:name="android.permission.health.READ_SLEEP"/>
 
+    <!-- Most kalorii: odczyt spalonych kcal z treningów Trainera tylko dla aplikacji
+         podpisanej tym samym kluczem (np. Licznik Kalorii). -->
+    <permission
+        android:name="com.example.licznik_treningu.permission.READ_CALORIE_BRIDGE"
+        android:protectionLevel="signature"/>
+
     <application
         android:label="Trainer"
         android:name="${applicationName}"
         android:icon="@mipmap/ic_launcher">
+
+        <!-- Dostawca treści dla aplikacji Licznik Kalorii (tylko odczyt, chroniony uprawnieniem). -->
+        <provider
+            android:name=".CalorieBridgeProvider"
+            android:authorities="com.example.licznik_treningu.calorie_bridge"
+            android:exported="true"
+            android:readPermission="com.example.licznik_treningu.permission.READ_CALORIE_BRIDGE"/>
+
         <activity
             android:name=".MainActivity"
             android:exported="true"
