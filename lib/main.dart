@@ -584,6 +584,11 @@ class AppStore extends ChangeNotifier {
     await _calorieAdapter.publishTrainingImpacts(trainingImpacts);
   }
 
+  /// Ponownie publikuje most kalorii dla Licznika Kalorii (spalone kcal z treningów).
+  Future<void> publishCalorieBridge() async {
+    await _calorieAdapter.publishTrainingImpacts(trainingImpacts);
+  }
+
   Future<void> saveActivityEntries() async {
     await _trainerRepository.saveActivityEntries(activityEntries);
   }
@@ -2809,7 +2814,110 @@ class ExerciseRepo {
       defaultDurationSec: 0,
       met: 6.8,
     ),
+    // === Zestaw treningu brzucha (ćwiczenia czasowe) ===
+    ..._abWorkoutExercises,
   ].map(_withLibraryMetadata).toList(growable: false);
+
+  /// Pojedyncze ćwiczenie brzucha (czasowe) — wspólny szablon, by skrócić definicje.
+  static Exercise _abExercise(
+    String id,
+    String name, {
+    required int durationSec,
+    required List<ExerciseMuscleImpact> impacts,
+    List<String> muscles = const ['brzuch', 'core'],
+    String illustration = 'crunch',
+  }) {
+    return Exercise(
+      id: id,
+      name: name,
+      category: 'Brzuch',
+      muscles: muscles,
+      equipment: 'masa ciała',
+      level: 'Początkujący',
+      illustrationType: illustration,
+      description: 'Ćwiczenie czasowe na mięśnie brzucha. Utrzymuj napięcie korpusu i kontrolowane tempo.',
+      tips: const ['Napnij brzuch przez cały czas.', 'Oddychaj równo, nie wstrzymuj oddechu.'],
+      commonMistakes: const ['Zbyt szybkie, zamachowe tempo.', 'Odrywanie dolnego odcinka pleców.'],
+      defaultSets: 1,
+      defaultReps: 0,
+      defaultDurationSec: durationSec,
+      met: 4.0,
+      muscleImpacts: impacts,
+    );
+  }
+
+  /// Ćwiczenia brzucha ze zdjęć użytkownika (zestaw do trenowania od razu).
+  static final List<Exercise> _abWorkoutExercises = [
+    _abExercise('standing_bicycle_crunch', 'Standing Bicycle Crunches', durationSec: 56, illustration: 'crunch', impacts: const [
+      ExerciseMuscleImpact(muscleGroup: BodyMuscle.abs, role: MuscleRole.primary),
+      ExerciseMuscleImpact(muscleGroup: BodyMuscle.obliques, role: MuscleRole.secondary),
+    ]),
+    _abExercise('flutter_kicks', 'Flutter Kicks', durationSec: 56, impacts: const [
+      ExerciseMuscleImpact(muscleGroup: BodyMuscle.abs, role: MuscleRole.primary),
+      ExerciseMuscleImpact(muscleGroup: BodyMuscle.hipFlexors, role: MuscleRole.secondary),
+    ]),
+    _abExercise('windshield_wipers', 'Windshield Wipers', durationSec: 56, impacts: const [
+      ExerciseMuscleImpact(muscleGroup: BodyMuscle.obliques, role: MuscleRole.primary),
+      ExerciseMuscleImpact(muscleGroup: BodyMuscle.abs, role: MuscleRole.secondary),
+    ]),
+    _abExercise('plank_taps', 'Plank Taps', durationSec: 56, illustration: 'plank', muscles: const ['brzuch', 'barki', 'core'], impacts: const [
+      ExerciseMuscleImpact(muscleGroup: BodyMuscle.abs, role: MuscleRole.primary),
+      ExerciseMuscleImpact(muscleGroup: BodyMuscle.frontShoulders, role: MuscleRole.secondary),
+    ]),
+    _abExercise('alt_v_up', 'Alt V-Up', durationSec: 56, impacts: const [
+      ExerciseMuscleImpact(muscleGroup: BodyMuscle.abs, role: MuscleRole.primary),
+      ExerciseMuscleImpact(muscleGroup: BodyMuscle.hipFlexors, role: MuscleRole.secondary),
+    ]),
+    _abExercise('side_crunch_left', 'Side Crunches Left', durationSec: 36, muscles: const ['skośne brzucha', 'core'], impacts: const [
+      ExerciseMuscleImpact(muscleGroup: BodyMuscle.obliques, role: MuscleRole.primary),
+    ]),
+    _abExercise('side_crunch_right', 'Side Crunches Right', durationSec: 36, muscles: const ['skośne brzucha', 'core'], impacts: const [
+      ExerciseMuscleImpact(muscleGroup: BodyMuscle.obliques, role: MuscleRole.primary),
+    ]),
+    _abExercise('crunches_legs_raised', 'Crunches With Legs Raised', durationSec: 56, impacts: const [
+      ExerciseMuscleImpact(muscleGroup: BodyMuscle.abs, role: MuscleRole.primary),
+    ]),
+    _abExercise('plank_hip_dips', 'Plank Hip Dips', durationSec: 56, illustration: 'plank', muscles: const ['skośne brzucha', 'core'], impacts: const [
+      ExerciseMuscleImpact(muscleGroup: BodyMuscle.obliques, role: MuscleRole.primary),
+      ExerciseMuscleImpact(muscleGroup: BodyMuscle.abs, role: MuscleRole.secondary),
+    ]),
+    _abExercise('crunch_90_90', '90/90 Crunch', durationSec: 56, impacts: const [
+      ExerciseMuscleImpact(muscleGroup: BodyMuscle.abs, role: MuscleRole.primary),
+    ]),
+    _abExercise('oblique_crunch_reach', 'Oblique Crunch Reach', durationSec: 56, muscles: const ['skośne brzucha', 'brzuch', 'core'], impacts: const [
+      ExerciseMuscleImpact(muscleGroup: BodyMuscle.obliques, role: MuscleRole.primary),
+      ExerciseMuscleImpact(muscleGroup: BodyMuscle.abs, role: MuscleRole.secondary),
+    ]),
+    _abExercise('double_knees_to_chest', 'Double Knees To Chest', durationSec: 36, impacts: const [
+      ExerciseMuscleImpact(muscleGroup: BodyMuscle.abs, role: MuscleRole.primary),
+      ExerciseMuscleImpact(muscleGroup: BodyMuscle.hipFlexors, role: MuscleRole.secondary),
+    ]),
+    _abExercise('lying_twist_stretch_left', 'Lying Twist Stretch Left', durationSec: 36, muscles: const ['skośne brzucha', 'dolny grzbiet'], impacts: const [
+      ExerciseMuscleImpact(muscleGroup: BodyMuscle.obliques, role: MuscleRole.primary),
+    ]),
+    _abExercise('lying_twist_stretch_right', 'Lying Twist Stretch Right', durationSec: 36, muscles: const ['skośne brzucha', 'dolny grzbiet'], impacts: const [
+      ExerciseMuscleImpact(muscleGroup: BodyMuscle.obliques, role: MuscleRole.primary),
+    ]),
+  ];
+
+  /// Identyfikatory ćwiczeń wchodzących w skład gotowego treningu brzucha.
+  static const List<String> abWorkoutSetIds = [
+    'standing_bicycle_crunch',
+    'flutter_kicks',
+    'windshield_wipers',
+    'plank_taps',
+    'alt_v_up',
+    'side_crunch_left',
+    'side_crunch_right',
+    'crunches_legs_raised',
+    'plank_hip_dips',
+    'crunch_90_90',
+    'oblique_crunch_reach',
+    'plank',
+    'double_knees_to_chest',
+    'lying_twist_stretch_left',
+    'lying_twist_stretch_right',
+  ];
 
   static List<Exercise> combined([List<Exercise> custom = const []]) {
     final byId = <String, Exercise>{
@@ -3259,8 +3367,23 @@ void openTrainerSubPage(BuildContext context, Widget page, {String? title}) {
   );
 }
 
+/// Czy pełnoekranowy model regeneracji pokazano już w tym uruchomieniu aplikacji.
+bool _recoveryStartupShown = false;
+
 class _HomeShellState extends State<HomeShell> {
   int index = 0;
+
+  @override
+  void initState() {
+    super.initState();
+    // Po starcie aplikacji pokaż raz pełnoekranowy model regeneracji mięśni.
+    if (!_recoveryStartupShown) {
+      _recoveryStartupShown = true;
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        if (mounted) openMuscleRecoveryPage(context);
+      });
+    }
+  }
 
   // Etap 21: uporządkowane menu główne — 5 czytelnych zakładek.
   // Każdy ekran ma jeden jasny punkt wejścia (bez dublowania nawigacji).
@@ -4857,9 +4980,7 @@ class TodayPage extends StatelessWidget {
   Widget build(BuildContext context) {
     final store = AppScope.of(context);
     final day = store.selectedDate;
-    final logs = store.logsForDay(day);
     final totals = store.totalsForDay(day);
-    final dayImpact = store.trainingImpactForDay(day);
     return PageFrame(
       title: kAppName,
       subtitle: 'Dziennik dnia, statystyki i szybkie akcje',
@@ -4904,11 +5025,15 @@ class TodayPage extends StatelessWidget {
           ],
           DateSwitcher(date: day, onChanged: store.setSelectedDate),
 
-          // === SEKCJA: Podsumowanie dnia ===
+          // === SEKCJA: Regeneracja mięśni (model + spalone kcal) ===
+          const SizedBox(height: 18),
+          const SectionHeader(title: 'Regeneracja mięśni'),
+          const SizedBox(height: 10),
+          const RecoveryTodayCard(),
+
+          // === SEKCJA: Podsumowanie dnia (bez kafelka spalonych kcal — jest pod modelem) ===
           const SizedBox(height: 18),
           const SectionHeader(title: 'Podsumowanie dnia'),
-          const SizedBox(height: 10),
-          DailyHero(totals: totals),
           const SizedBox(height: 10),
           Row(
             children: [
@@ -4928,48 +5053,136 @@ class TodayPage extends StatelessWidget {
           const SizedBox(height: 10),
           TrainingInsightCard(logs: store.logs, selectedDay: day),
 
-          // === SEKCJA: Dzisiejszy trening ===
-          const SizedBox(height: 18),
-          SectionHeader(
-            title: 'Dzisiejszy trening',
-            actionLabel: 'Dodaj',
-            onAction: () => showAddWorkoutSheet(context),
-          ),
-          const SizedBox(height: 10),
-          if (logs.isEmpty)
-            EmptyCard(
-              icon: Icons.fitness_center,
-              title: 'Brak treningu z dzisiaj',
-              text: 'Dodaj ćwiczenie ręcznie albo opisz trening w AI. Aplikacja policzy czas, objętość i spalone kalorie.',
-              buttonLabel: 'Dodaj ćwiczenie',
-              onPressed: () => showAddWorkoutSheet(context),
-            )
-          else
-            ...logs.map((log) => WorkoutLogCard(log: log)),
-          // === SEKCJA: Regeneracja mięśni (zastępuje stoper na stronie głównej) ===
-          const SizedBox(height: 18),
-          const SectionHeader(title: 'Regeneracja mięśni'),
-          const SizedBox(height: 10),
-          const RecoveryTodayCard(),
-          const SizedBox(height: 12),
-          QuickWorkoutActionsCard(),
-
           // === SEKCJA: Aktywność z zegarka / Health Connect ===
           const SizedBox(height: 18),
           const SectionHeader(title: 'Aktywność z zegarka'),
           const SizedBox(height: 10),
           TodayActivityCard(day: day),
 
-          // === SEKCJA: Sugestie i korekta dnia ===
+          // === Sugestie i korekta dnia → osobny ekran ===
           const SizedBox(height: 18),
-          const SectionHeader(title: 'Sugestie i korekta dnia'),
-          const SizedBox(height: 10),
-          if (dayImpact != null) ...[
-            DayAdjustmentCard(impact: dayImpact),
-            const SizedBox(height: 12),
-          ],
-          AiQuickCard(),
+          FilledButton.tonalIcon(
+            onPressed: () => openDayInsightsPage(context),
+            icon: const Icon(Icons.tips_and_updates_outlined),
+            label: const Text('Sugestie i korekta dnia'),
+          ),
         ],
+      ),
+    );
+  }
+}
+
+Future<void> openDayInsightsPage(BuildContext context) async {
+  await Navigator.of(context).push(
+    MaterialPageRoute<void>(builder: (_) => const DayInsightsPage()),
+  );
+}
+
+/// Osobny ekran „Sugestie i korekta dnia" (przeniesiony ze strony głównej).
+class DayInsightsPage extends StatelessWidget {
+  const DayInsightsPage({super.key});
+
+  @override
+  Widget build(BuildContext context) {
+    final store = AppScope.of(context);
+    final day = store.selectedDate;
+    final dayImpact = store.trainingImpactForDay(day);
+    return Scaffold(
+      appBar: AppBar(title: const Text('Sugestie i korekta dnia')),
+      body: SafeArea(
+        child: ListView(
+          padding: const EdgeInsets.fromLTRB(16, 16, 16, 28),
+          children: [
+            if (dayImpact != null) ...[
+              DayAdjustmentCard(impact: dayImpact),
+              const SizedBox(height: 12),
+            ] else ...[
+              Container(
+                padding: const EdgeInsets.all(18),
+                decoration: BoxDecoration(
+                  color: Theme.of(context).colorScheme.surfaceContainerHighest.withValues(alpha: 0.5),
+                  borderRadius: BorderRadius.circular(18),
+                ),
+                child: Text(
+                  'Brak korekty dnia — wykonaj trening, aby zobaczyć sugestie kalorii, wody i białka.',
+                  style: Theme.of(context).textTheme.bodyMedium?.copyWith(color: Theme.of(context).colorScheme.onSurfaceVariant),
+                ),
+              ),
+              const SizedBox(height: 12),
+            ],
+            const CalorieBridgeStatusCard(),
+            const SizedBox(height: 12),
+            AiQuickCard(),
+          ],
+        ),
+      ),
+    );
+  }
+}
+
+/// Status przekazywania spalonych kcal z treningów do aplikacji Licznik Kalorii.
+class CalorieBridgeStatusCard extends StatelessWidget {
+  const CalorieBridgeStatusCard({super.key});
+
+  @override
+  Widget build(BuildContext context) {
+    final store = AppScope.of(context);
+    final theme = Theme.of(context);
+    final todayBurned = store.burnedKcalForDay(store.selectedDate);
+    final latest = store.trainingImpacts.isEmpty ? null : store.trainingImpacts.first;
+    Widget row(String label, String value) => Padding(
+          padding: const EdgeInsets.symmetric(vertical: 3),
+          child: Row(
+            children: [
+              Text(label, style: theme.textTheme.bodySmall?.copyWith(color: theme.colorScheme.onSurfaceVariant)),
+              const Spacer(),
+              Flexible(child: Text(value, textAlign: TextAlign.right, maxLines: 1, overflow: TextOverflow.ellipsis, style: theme.textTheme.bodySmall?.copyWith(fontWeight: FontWeight.w800))),
+            ],
+          ),
+        );
+    return Card(
+      child: Padding(
+        padding: const EdgeInsets.all(16),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.stretch,
+          children: [
+            Row(
+              children: [
+                Icon(Icons.sync_alt_rounded, color: theme.colorScheme.primary),
+                const SizedBox(width: 8),
+                Expanded(child: Text('Integracja z Licznikiem Kalorii', style: theme.textTheme.titleSmall?.copyWith(fontWeight: FontWeight.w900))),
+              ],
+            ),
+            const SizedBox(height: 10),
+            row('Dziś przekazane (trening)', '$todayBurned kcal'),
+            if (latest != null) ...[
+              row('Ostatni trening', latest.sessionName),
+              row('Spalone', '${latest.estimatedBurnedKcal} kcal'),
+              row('Czas', '${latest.durationMin} min'),
+              row('Typ aktywności', 'strength_training'),
+              row('Dzień', latest.dateKey),
+            ] else
+              row('Status', 'Brak treningów do przekazania'),
+            const SizedBox(height: 10),
+            Text(
+              'Spalone kcal z ćwiczeń są publikowane lokalnie dla Licznika Kalorii (bez podwójnego liczenia — po deduplicationKey). Licznik powinien odczytać te dane i nie dodawać aktywności drugi raz.',
+              style: theme.textTheme.bodySmall?.copyWith(color: theme.colorScheme.onSurfaceVariant),
+            ),
+            const SizedBox(height: 10),
+            OutlinedButton.icon(
+              onPressed: () async {
+                await store.publishCalorieBridge();
+                if (context.mounted) {
+                  ScaffoldMessenger.of(context).showSnackBar(
+                    const SnackBar(content: Text('Dane kalorii ponownie przekazane do Licznika Kalorii.')),
+                  );
+                }
+              },
+              icon: const Icon(Icons.upload_rounded, size: 18),
+              label: const Text('Wyślij ponownie'),
+            ),
+          ],
+        ),
       ),
     );
   }
@@ -5883,6 +6096,118 @@ void showError(BuildContext context, String message) {
   ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(message), behavior: SnackBarBehavior.floating));
 }
 
+/// Buduje gotowy plan treningu brzucha (jeden dzień, ćwiczenia czasowe).
+WorkoutPlan buildAbWorkoutPlan() {
+  final items = <PlanItem>[
+    for (final id in ExerciseRepo.abWorkoutSetIds)
+      PlanItem(
+        exerciseId: id,
+        sets: 1,
+        reps: 0,
+        durationSec: ExerciseRepo.byId(id).defaultDurationSec,
+        note: '',
+        restSeconds: 15,
+      ),
+  ];
+  return WorkoutPlan(
+    id: 'ab_set_${idNow()}',
+    name: 'Trening brzucha',
+    note: 'Gotowy zestaw na brzuch i skośne — wykonuj ćwiczenia po kolei, bez długich przerw.',
+    goal: 'Sylwetka',
+    level: 'Początkujący',
+    isActive: true,
+    days: [
+      WorkoutDay(weekday: DateTime.now().weekday, title: 'Brzuch — zestaw', items: items),
+    ],
+  );
+}
+
+/// Dodaje gotowy trening brzucha jako aktywny plan i otwiera jego szczegóły dnia.
+Future<void> addReadyAbWorkout(BuildContext context) async {
+  final store = AppScope.read(context);
+  final existing = store.plans.where((plan) => plan.id.startsWith('ab_set_')).toList();
+  final WorkoutPlan plan;
+  if (existing.isNotEmpty) {
+    plan = existing.first;
+    await store.setActiveWorkoutPlan(plan.id);
+  } else {
+    plan = buildAbWorkoutPlan();
+    await store.addWorkoutPlan(plan);
+  }
+  if (!context.mounted) return;
+  await openWorkoutDayDetails(context, plan.id, 0);
+}
+
+/// Karta „Gotowe zestawy treningowe" w zakładce Ćwiczenia. Pozwala dodać gotowy
+/// zestaw brzucha jednym dotknięciem i od razu go trenować.
+class ReadyWorkoutSetsCard extends StatelessWidget {
+  const ReadyWorkoutSetsCard({super.key});
+
+  @override
+  Widget build(BuildContext context) {
+    final store = AppScope.of(context);
+    final theme = Theme.of(context);
+    final exercises = [for (final id in ExerciseRepo.abWorkoutSetIds) ExerciseRepo.byId(id, store.customExercises)];
+    final totalSeconds = exercises.fold<int>(0, (sum, e) => sum + (e.defaultDurationSec > 0 ? e.defaultDurationSec : 40));
+    return Card(
+      clipBehavior: Clip.antiAlias,
+      child: Padding(
+        padding: const EdgeInsets.all(16),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.stretch,
+          children: [
+            Row(
+              children: [
+                Icon(Icons.bolt_rounded, color: theme.colorScheme.primary),
+                const SizedBox(width: 8),
+                Expanded(child: Text('Gotowe zestawy', style: theme.textTheme.titleSmall?.copyWith(fontWeight: FontWeight.w900))),
+                Container(
+                  padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 3),
+                  decoration: BoxDecoration(color: theme.colorScheme.primary, borderRadius: BorderRadius.circular(10)),
+                  child: Text('NOWOŚĆ', style: TextStyle(color: theme.colorScheme.onPrimary, fontWeight: FontWeight.w800, fontSize: 10)),
+                ),
+              ],
+            ),
+            const SizedBox(height: 12),
+            Text('Trening brzucha', style: theme.textTheme.titleLarge?.copyWith(fontWeight: FontWeight.w900)),
+            const SizedBox(height: 2),
+            Text(
+              '${exercises.length} ćwiczeń · ~${(totalSeconds / 60).round()} min · masa ciała',
+              style: theme.textTheme.bodySmall?.copyWith(color: theme.colorScheme.onSurfaceVariant),
+            ),
+            const SizedBox(height: 12),
+            SizedBox(
+              height: 56,
+              child: ListView.separated(
+                scrollDirection: Axis.horizontal,
+                itemCount: exercises.length,
+                separatorBuilder: (_, __) => const SizedBox(width: 8),
+                itemBuilder: (context, index) => SizedBox(
+                  width: 56,
+                  height: 56,
+                  child: ClipRRect(borderRadius: BorderRadius.circular(12), child: ExerciseVisual(exercise: exercises[index])),
+                ),
+              ),
+            ),
+            const SizedBox(height: 14),
+            Row(
+              children: [
+                Expanded(
+                  child: FilledButton.icon(
+                    onPressed: () => addReadyAbWorkout(context),
+                    icon: const Icon(Icons.play_arrow_rounded),
+                    label: const Text('Dodaj i trenuj'),
+                  ),
+                ),
+              ],
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+}
+
 class ExercisesPage extends StatefulWidget {
   const ExercisesPage({super.key});
 
@@ -5956,6 +6281,8 @@ class _ExercisesPageState extends State<ExercisesPage> {
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.stretch,
         children: [
+          const ReadyWorkoutSetsCard(),
+          const SizedBox(height: 14),
           Card(
             child: Padding(
               padding: const EdgeInsets.all(16),
@@ -7513,6 +7840,82 @@ void analyzeFormDialog(BuildContext context, Exercise exercise) {
   );
 }
 
+/// Kompaktowe podsumowanie dzisiejszego treningu w zakładce „Trening".
+/// Przeniesione ze strony głównej „Dzisiaj".
+class _PlanTodayTrainingCard extends StatelessWidget {
+  const _PlanTodayTrainingCard();
+
+  @override
+  Widget build(BuildContext context) {
+    final store = AppScope.of(context);
+    final theme = Theme.of(context);
+    final day = store.selectedDate;
+    final logs = store.logsForDay(day);
+    final totals = store.totalsForDay(day);
+    // Karta pojawia się tylko, gdy jest dzisiejszy trening (czyste UI, gdy brak).
+    if (logs.isEmpty) return const SizedBox.shrink();
+    return Card(
+      child: Padding(
+        padding: const EdgeInsets.all(16),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.stretch,
+          children: [
+            Row(
+              children: [
+                Icon(Icons.today_rounded, color: theme.colorScheme.primary),
+                const SizedBox(width: 8),
+                Expanded(child: Text('Dzisiejszy trening', style: theme.textTheme.titleSmall?.copyWith(fontWeight: FontWeight.w900))),
+                TextButton(
+                  onPressed: () => openTrainerSubPage(context, const HistoryPage(), title: 'Historia treningów'),
+                  child: const Text('Historia'),
+                ),
+              ],
+            ),
+            const SizedBox(height: 6),
+            ...[
+              Text(
+                '${logs.length} ćwiczeń · ${totals.sets} serii · ${(totals.durationSec / 60).round()} min · ${totals.calories.round()} kcal',
+                style: theme.textTheme.bodyMedium?.copyWith(fontWeight: FontWeight.w700),
+              ),
+              const SizedBox(height: 8),
+              for (final log in logs.take(4))
+                Padding(
+                  padding: const EdgeInsets.symmetric(vertical: 2),
+                  child: Row(
+                    children: [
+                      Icon(Icons.fitness_center_rounded, size: 14, color: theme.colorScheme.onSurfaceVariant),
+                      const SizedBox(width: 8),
+                      Expanded(
+                        child: Text(
+                          log.exerciseFrom(store.customExercises).name,
+                          maxLines: 1,
+                          overflow: TextOverflow.ellipsis,
+                          style: theme.textTheme.bodySmall,
+                        ),
+                      ),
+                      Text('${log.sets}×${log.reps}', style: theme.textTheme.bodySmall?.copyWith(color: theme.colorScheme.onSurfaceVariant)),
+                    ],
+                  ),
+                ),
+              if (logs.length > 4)
+                Padding(
+                  padding: const EdgeInsets.only(top: 2),
+                  child: Text('+ ${logs.length - 4} więcej', style: theme.textTheme.bodySmall?.copyWith(color: theme.colorScheme.onSurfaceVariant)),
+                ),
+            ],
+            const SizedBox(height: 10),
+            FilledButton.tonalIcon(
+              onPressed: () => showAddWorkoutSheet(context),
+              icon: const Icon(Icons.add_rounded),
+              label: const Text('Dodaj ćwiczenie'),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+}
+
 class PlanPage extends StatelessWidget {
   const PlanPage({super.key});
 
@@ -7539,6 +7942,8 @@ class PlanPage extends StatelessWidget {
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.stretch,
         children: [
+          const _PlanTodayTrainingCard(),
+          const SizedBox(height: 14),
           if (activePlan != null) ...[
             _ActivePlanSummary(plan: activePlan),
             const SizedBox(height: 14),
