@@ -1,6 +1,8 @@
+import 'body_muscle.dart';
 import 'exercise_media.dart';
 import 'trainer_enums.dart';
 
+export 'body_muscle.dart';
 export 'exercise_media.dart';
 
 class Exercise {
@@ -35,6 +37,7 @@ class Exercise {
     this.videoPath,
     this.videoUrl,
     this.mediaItems = const [],
+    this.muscleImpacts = const [],
     this.source = 'local',
   });
 
@@ -89,7 +92,32 @@ class Exercise {
   /// Opcjonalna — brak elementów oznacza powrót do pól [imagePath]/[gifPath]/...
   final List<ExerciseMedia> mediaItems;
 
+  /// Jawnie przypisane partie mięśniowe (główne/pomocnicze/stabilizacja).
+  /// Gdy puste, [effectiveMuscleImpacts] wyprowadza je z pola [muscles].
+  final List<ExerciseMuscleImpact> muscleImpacts;
+
   final String source;
+
+  /// Wpływ na partie mięśniowe użyty do liczenia regeneracji.
+  /// Jawne [muscleImpacts] mają pierwszeństwo; w przeciwnym razie wyprowadzane
+  /// są z [muscles] (pierwsza = główna, kolejne = pomocnicze).
+  List<ExerciseMuscleImpact> get effectiveMuscleImpacts {
+    if (muscleImpacts.isNotEmpty) return muscleImpacts;
+    final derived = <ExerciseMuscleImpact>[];
+    final seen = <BodyMuscle>{};
+    for (var i = 0; i < muscles.length; i++) {
+      final muscle = BodyMuscle.fromText(muscles[i]);
+      if (muscle == null || !seen.add(muscle)) continue;
+      derived.add(ExerciseMuscleImpact(
+        muscleGroup: muscle,
+        role: i == 0 ? MuscleRole.primary : MuscleRole.secondary,
+      ));
+    }
+    return derived;
+  }
+
+  /// Czy ćwiczenie ma jakiekolwiek (jawne lub wyprowadzone) przypisanie partii.
+  bool get hasMuscleAssignment => effectiveMuscleImpacts.isNotEmpty;
 
   String get primaryMuscle => muscles.isEmpty ? category : muscles.first;
 
@@ -225,6 +253,7 @@ class Exercise {
     String? videoPath,
     String? videoUrl,
     List<ExerciseMedia>? mediaItems,
+    List<ExerciseMuscleImpact>? muscleImpacts,
     String? source,
   }) {
     return Exercise(
@@ -258,6 +287,7 @@ class Exercise {
       videoPath: videoPath ?? this.videoPath,
       videoUrl: videoUrl ?? this.videoUrl,
       mediaItems: mediaItems ?? this.mediaItems,
+      muscleImpacts: muscleImpacts ?? this.muscleImpacts,
       source: source ?? this.source,
     );
   }
@@ -293,6 +323,7 @@ class Exercise {
         'videoPath': videoPath,
         'videoUrl': videoUrl,
         'mediaItems': mediaItems.map((media) => media.toJson()).toList(),
+        'muscleImpacts': muscleImpacts.map((impact) => impact.toJson()).toList(),
         'source': source,
       };
 
@@ -335,6 +366,7 @@ class Exercise {
         videoPath: _nullableText(json['videoPath']),
         videoUrl: _nullableText(json['videoUrl']),
         mediaItems: _mediaList(json['mediaItems']),
+        muscleImpacts: _muscleImpactList(json['muscleImpacts']),
         source: json['source']?.toString() ?? 'custom',
       );
 }
@@ -345,6 +377,18 @@ List<ExerciseMedia> _mediaList(Object? value) {
   for (final item in value) {
     if (item is Map) {
       result.add(ExerciseMedia.fromJson(Map<String, dynamic>.from(item)));
+    }
+  }
+  return result;
+}
+
+List<ExerciseMuscleImpact> _muscleImpactList(Object? value) {
+  if (value is! List) return const [];
+  final result = <ExerciseMuscleImpact>[];
+  for (final item in value) {
+    if (item is Map) {
+      final impact = ExerciseMuscleImpact.fromJson(Map<String, dynamic>.from(item));
+      if (impact != null) result.add(impact);
     }
   }
   return result;

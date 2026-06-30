@@ -2,9 +2,12 @@ import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
 import 'dart:math' as math;
+import 'dart:typed_data';
+import 'dart:ui' as ui;
 
-import 'package:flutter/foundation.dart' show kIsWeb;
+import 'package:flutter/foundation.dart' show kDebugMode, kIsWeb;
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart' show rootBundle;
 import 'package:http/http.dart' as http;
 import 'package:image_picker/image_picker.dart';
 import 'package:shared_preferences/shared_preferences.dart';
@@ -1399,6 +1402,20 @@ class AppStore extends ChangeNotifier {
     activeWorkoutSession = null;
     await saveActiveWorkoutSession();
     notifyListeners();
+
+    // Log pomocniczy po treningu: ćwiczenia, obciążone partie, wagi i % regeneracji.
+    if (kDebugMode) {
+      for (final log in completedLogs) {
+        final exercise = ExerciseRepo.byId(log.exerciseId, customExercises);
+        debugPrint('[Recovery] ${exercise.name} · serie ${log.sets} × ${log.reps}, RPE ${log.rpe}');
+        for (final impact in exercise.effectiveMuscleImpacts) {
+          debugPrint('   → ${impact.muscleGroup.label} [${impact.role.label}] waga ${impact.effectiveWeight}');
+        }
+      }
+      muscleRecoveryMap().forEach((muscle, state) {
+        debugPrint('[Recovery] ${muscle.label}: ${state.recoveryPercent?.toStringAsFixed(0)}% (${state.status.name})');
+      });
+    }
     return summary;
   }
 
@@ -1434,6 +1451,35 @@ class AppStore extends ChangeNotifier {
   }
 
   DayTotals totalsForDay(DateTime day) => DayTotals.from(logsForDay(day));
+
+  /// Mapa regeneracji partii mięśniowych z historii treningów (Etap regeneracji).
+  /// Puste, gdy brak danych — UI pokazuje wtedy wszystkie mięśnie jako szare/unknown.
+  Map<BodyMuscle, MuscleRecoveryState> muscleRecoveryMap([DateTime? now]) {
+    return RecoveryCalculator().compute(
+      logs: logs,
+      resolveExercise: (id) => ExerciseRepo.byId(id, customExercises),
+      now: now,
+    );
+  }
+
+  /// Suma dzisiaj spalonych kcal z treningów (Trainer), bez dublowania —
+  /// korzysta z [trainingImpacts] z kluczem deduplikacji.
+  int burnedKcalForDay(DateTime day) {
+    var total = 0;
+    for (final impact in trainingImpacts) {
+      if (sameDay(impact.date, day)) total += impact.estimatedBurnedKcal;
+    }
+    return total;
+  }
+
+  /// Łączny czas treningów danego dnia (minuty), z zapisanych wpływów.
+  int trainingMinutesForDay(DateTime day) {
+    var total = 0;
+    for (final impact in trainingImpacts) {
+      if (sameDay(impact.date, day)) total += impact.durationMin;
+    }
+    return total;
+  }
 
   Future<Map<String, dynamic>> analyzeWorkoutText(String text) async {
     aiBusy = true;
@@ -4900,8 +4946,11 @@ class TodayPage extends StatelessWidget {
             )
           else
             ...logs.map((log) => WorkoutLogCard(log: log)),
-          const SizedBox(height: 12),
-          WorkoutTimerCard(),
+          // === SEKCJA: Regeneracja mięśni (zastępuje stoper na stronie głównej) ===
+          const SizedBox(height: 18),
+          const SectionHeader(title: 'Regeneracja mięśni'),
+          const SizedBox(height: 10),
+          const RecoveryTodayCard(),
           const SizedBox(height: 12),
           QuickWorkoutActionsCard(),
 
@@ -9004,6 +9053,693 @@ class _RoundControl extends StatelessWidget {
               ),
             ],
           ),
+        ),
+      ),
+    );
+  }
+}
+
+// ============================================================================
+// Mapa regeneracji mięśni: model człowieka + maski + dynamiczne kolory.
+// ============================================================================
+
+const Color kRecoveryUnknownColor = Color(0xFF8A8F98);
+
+/// Kolor mięśnia na podstawie procentu regeneracji (null → szary „unknown").
+/// Zielony kolor zapisany w masce PNG jest ignorowany — kolor nakładamy tutaj.
+Color recoveryColor(double? recoveryPercent, {bool dark = false}) {
+  if (recoveryPercent == null) return kRecoveryUnknownColor;
+  final p = recoveryPercent;
+  late final Color base;
+  if (p <= 20) {
+    base = const Color(0xFFFF3B30);
+  } else if (p <= 40) {
+    base = const Color(0xFFFF6B2C);
+  } else if (p <= 60) {
+    base = const Color(0xFFFFB020);
+  } else if (p <= 80) {
+    base = const Color(0xFFB7E75A);
+  } else {
+    base = const Color(0xFF35D07F);
+  }
+  return dark ? Color.lerp(base, Colors.white, 0.12)! : base;
+}
+
+/// Siatka etykiet (do trafiania w mięsień) zbudowana z alfy masek. Etap regeneracji.
+class _BodyLabelGrid {
+  _BodyLabelGrid(this.width, this.height, this.indices, this.muscles);
+
+  final int width;
+  final int height;
+  final Uint8List indices; // 0 = brak, w przeciwnym razie indeks mięśnia + 1
+  final List<BodyMuscle> muscles;
+
+  BodyMuscle? muscleAt(int x, int y) {
+    if (x < 0 || y < 0 || x >= width || y >= height) return null;
+    final value = indices[y * width + x];
+    if (value == 0) return null;
+    final index = value - 1;
+    return (index >= 0 && index < muscles.length) ? muscles[index] : null;
+  }
+}
+
+/// Model człowieka z kolorowanymi maskami mięśni. Renderuje bazę + maski jako Stack
+/// (każda warstwa Positioned.fill), całość skalowana BoxFit.contain. Crash-safe:
+/// brak/uszkodzona maska jest pomijana z logiem; brak bazy → fallback.
+class BodyMuscleMap extends StatefulWidget {
+  const BodyMuscleMap({
+    super.key,
+    required this.side,
+    required this.dark,
+    required this.recovery,
+    this.onMuscleTap,
+    this.onBackgroundTap,
+  });
+
+  final BodyMuscleSide side;
+  final bool dark;
+  final Map<BodyMuscle, MuscleRecoveryState> recovery;
+  final ValueChanged<BodyMuscle>? onMuscleTap;
+
+  /// Wywoływane po dotknięciu modelu poza mięśniem (np. do przełączenia przód/tył).
+  final VoidCallback? onBackgroundTap;
+
+  @override
+  State<BodyMuscleMap> createState() => _BodyMuscleMapState();
+}
+
+class _BodyMuscleMapState extends State<BodyMuscleMap> {
+  _BodyLabelGrid? _grid;
+  BodyMuscleSide? _gridSide;
+
+  @override
+  void initState() {
+    super.initState();
+    _ensureGrid();
+  }
+
+  @override
+  void didUpdateWidget(covariant BodyMuscleMap oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    if (oldWidget.side != widget.side) _ensureGrid();
+  }
+
+  Future<void> _ensureGrid() async {
+    final side = widget.side;
+    if (_gridSide == side && _grid != null) return;
+    final grid = await _buildLabelGrid(side);
+    if (!mounted || widget.side != side) return;
+    setState(() {
+      _grid = grid;
+      _gridSide = side;
+    });
+  }
+
+  Future<_BodyLabelGrid?> _buildLabelGrid(BodyMuscleSide side) async {
+    final masks = muscleMasksForSide(side);
+    final muscles = masks.keys.toList();
+    int gw = 0;
+    int gh = 0;
+    Uint8List? indices;
+    for (var i = 0; i < muscles.length; i++) {
+      for (final file in masks[muscles[i]]!) {
+        try {
+          final data = await rootBundle.load(bodyMaskAsset(side, file));
+          final codec = await ui.instantiateImageCodec(data.buffer.asUint8List(), targetWidth: 150);
+          final frame = await codec.getNextFrame();
+          final image = frame.image;
+          final bytes = await image.toByteData(format: ui.ImageByteFormat.rawRgba);
+          final w = image.width;
+          final h = image.height;
+          image.dispose();
+          if (bytes == null) continue;
+          if (indices == null) {
+            gw = w;
+            gh = h;
+            indices = Uint8List(gw * gh);
+          }
+          if (w != gw || h != gh) continue; // pomiń maski o innym rozmiarze
+          final raw = bytes.buffer.asUint8List();
+          for (var p = 0; p < gw * gh; p++) {
+            if (raw[p * 4 + 3] > 40) indices[p] = i + 1;
+          }
+        } catch (error) {
+          debugPrint('[BodyMuscleMap] pominięto maskę ${bodyMaskAsset(side, file)}: $error');
+        }
+      }
+    }
+    if (indices == null) return null;
+    return _BodyLabelGrid(gw, gh, indices, muscles);
+  }
+
+  void _handleTapUp(TapUpDetails details, Size size) {
+    final grid = _grid;
+    final onTap = widget.onMuscleTap;
+    if (grid == null || onTap == null) return;
+    final scale = math.min(size.width / grid.width, size.height / grid.height);
+    final dispW = grid.width * scale;
+    final dispH = grid.height * scale;
+    final lx = details.localPosition.dx - (size.width - dispW) / 2;
+    final ly = details.localPosition.dy - (size.height - dispH) / 2;
+    if (lx < 0 || ly < 0 || lx >= dispW || ly >= dispH) return;
+    final gx = (lx / scale).floor().clamp(0, grid.width - 1);
+    final gy = (ly / scale).floor().clamp(0, grid.height - 1);
+    final muscle = grid.muscleAt(gx, gy);
+    if (muscle != null) {
+      onTap(muscle);
+    } else {
+      widget.onBackgroundTap?.call();
+    }
+  }
+
+  Widget _baseFallback() {
+    final scheme = Theme.of(context).colorScheme;
+    return ColoredBox(
+      color: scheme.surfaceContainerHighest,
+      child: Center(child: Icon(Icons.accessibility_new_rounded, size: 64, color: scheme.outline)),
+    );
+  }
+
+  Widget _maskLayer(BodyMuscle muscle, String file) {
+    final state = widget.recovery[muscle];
+    final hasData = state?.hasData ?? false;
+    final color = recoveryColor(state?.recoveryPercent, dark: widget.dark)
+        .withValues(alpha: hasData ? 0.82 : 0.42);
+    return IgnorePointer(
+      child: ColorFiltered(
+        colorFilter: ColorFilter.mode(color, BlendMode.srcIn),
+        child: Image.asset(
+          bodyMaskAsset(widget.side, file),
+          fit: BoxFit.fill,
+          gaplessPlayback: true,
+          errorBuilder: (_, __, ___) => const SizedBox.shrink(),
+        ),
+      ),
+    );
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final base = bodyBaseAsset(widget.side, dark: widget.dark);
+    final grid = _grid;
+
+    // Do czasu zbudowania siatki (i poznania proporcji) pokaż samą bazę (contain).
+    if (grid == null) {
+      return Center(
+        child: Image.asset(base, fit: BoxFit.contain, errorBuilder: (_, __, ___) => _baseFallback()),
+      );
+    }
+
+    final masks = muscleMasksForSide(widget.side);
+    return LayoutBuilder(
+      builder: (context, constraints) {
+        final size = Size(constraints.maxWidth, constraints.maxHeight);
+        return GestureDetector(
+          behavior: HitTestBehavior.opaque,
+          onTapUp: (details) => _handleTapUp(details, size),
+          child: FittedBox(
+            fit: BoxFit.contain,
+            child: SizedBox(
+              width: grid.width.toDouble(),
+              height: grid.height.toDouble(),
+              child: Stack(
+                fit: StackFit.expand,
+                children: [
+                  Positioned.fill(
+                    child: Image.asset(base, fit: BoxFit.fill, errorBuilder: (_, __, ___) => _baseFallback()),
+                  ),
+                  for (final muscle in masks.keys)
+                    for (final file in masks[muscle]!) Positioned.fill(child: _maskLayer(muscle, file)),
+                ],
+              ),
+            ),
+          ),
+        );
+      },
+    );
+  }
+}
+
+String _formatRecoveryAgo(DateTime time, [DateTime? now]) {
+  final diff = (now ?? DateTime.now()).difference(time);
+  if (diff.inMinutes < 60) return '${diff.inMinutes} min temu';
+  if (diff.inHours < 24) return '${diff.inHours} h temu';
+  return '${diff.inDays} dni temu';
+}
+
+/// Bottom sheet ze szczegółami regeneracji partii mięśniowej. Etap regeneracji.
+Future<void> showMuscleRecoverySheet(BuildContext context, BodyMuscle muscle, MuscleRecoveryState? state) async {
+  await showModalBottomSheet<void>(
+    context: context,
+    showDragHandle: true,
+    builder: (sheetContext) {
+      final theme = Theme.of(sheetContext);
+      final dark = theme.brightness == Brightness.dark;
+      final s = state ?? MuscleRecoveryState.unknown(muscle);
+      final color = recoveryColor(s.recoveryPercent, dark: dark);
+      Widget row(String label, String value) => Padding(
+            padding: const EdgeInsets.symmetric(vertical: 4),
+            child: Row(
+              children: [
+                Text(label, style: theme.textTheme.bodyMedium?.copyWith(color: theme.colorScheme.onSurfaceVariant)),
+                const Spacer(),
+                Text(value, style: theme.textTheme.bodyMedium?.copyWith(fontWeight: FontWeight.w800)),
+              ],
+            ),
+          );
+      return SafeArea(
+        child: Padding(
+          padding: const EdgeInsets.fromLTRB(20, 4, 20, 20),
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            crossAxisAlignment: CrossAxisAlignment.stretch,
+            children: [
+              Row(
+                children: [
+                  Container(width: 16, height: 16, decoration: BoxDecoration(color: color, shape: BoxShape.circle)),
+                  const SizedBox(width: 10),
+                  Expanded(child: Text(muscle.label, style: theme.textTheme.titleLarge?.copyWith(fontWeight: FontWeight.w900))),
+                ],
+              ),
+              const SizedBox(height: 14),
+              row('Regeneracja', s.recoveryPercent == null ? '—' : '${s.recoveryPercent!.round()}%'),
+              const SizedBox(height: 4),
+              ClipRRect(
+                borderRadius: BorderRadius.circular(8),
+                child: LinearProgressIndicator(
+                  value: (s.recoveryPercent ?? 0) / 100,
+                  minHeight: 8,
+                  backgroundColor: theme.colorScheme.surfaceContainerHighest,
+                  valueColor: AlwaysStoppedAnimation<Color>(color),
+                ),
+              ),
+              const SizedBox(height: 8),
+              row('Status', s.statusLabel),
+              if (s.lastTrainedAt != null) row('Ostatnio trenowane', _formatRecoveryAgo(s.lastTrainedAt!)),
+              if (s.hasData)
+                row('Do pełnej regeneracji', s.estimatedHoursRemaining <= 0 ? 'gotowe' : '~${s.estimatedHoursRemaining} h'),
+              if (s.lastExerciseNames.isNotEmpty) ...[
+                const SizedBox(height: 10),
+                Text('Obciążające ćwiczenia', style: theme.textTheme.titleSmall?.copyWith(fontWeight: FontWeight.w900)),
+                const SizedBox(height: 4),
+                Text(s.lastExerciseNames.join(' · '), style: theme.textTheme.bodyMedium?.copyWith(color: theme.colorScheme.onSurfaceVariant)),
+              ],
+              const SizedBox(height: 14),
+              Container(
+                padding: const EdgeInsets.all(14),
+                decoration: BoxDecoration(
+                  color: theme.colorScheme.primaryContainer.withValues(alpha: 0.4),
+                  borderRadius: BorderRadius.circular(16),
+                ),
+                child: Row(
+                  children: [
+                    Icon(Icons.tips_and_updates_outlined, color: theme.colorScheme.primary),
+                    const SizedBox(width: 10),
+                    Expanded(child: Text(recoverySuggestionForMuscle(s), style: theme.textTheme.bodyMedium)),
+                  ],
+                ),
+              ),
+            ],
+          ),
+        ),
+      );
+    },
+  );
+}
+
+/// Przełącznik widoku Przód / Tył modelu.
+class _BodySideToggle extends StatelessWidget {
+  const _BodySideToggle({required this.side, required this.onChanged});
+
+  final BodyMuscleSide side;
+  final ValueChanged<BodyMuscleSide> onChanged;
+
+  @override
+  Widget build(BuildContext context) {
+    return SegmentedButton<BodyMuscleSide>(
+      showSelectedIcon: false,
+      style: SegmentedButton.styleFrom(
+        visualDensity: VisualDensity.compact,
+        padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
+        tapTargetSize: MaterialTapTargetSize.shrinkWrap,
+      ),
+      segments: const [
+        ButtonSegment(value: BodyMuscleSide.front, label: Text('Przód')),
+        ButtonSegment(value: BodyMuscleSide.back, label: Text('Tył')),
+      ],
+      selected: {side},
+      onSelectionChanged: (selection) => onChanged(selection.first),
+    );
+  }
+}
+
+/// Legenda kolorów regeneracji.
+class RecoveryLegend extends StatelessWidget {
+  const RecoveryLegend({super.key});
+
+  @override
+  Widget build(BuildContext context) {
+    final theme = Theme.of(context);
+    final dark = theme.brightness == Brightness.dark;
+    Widget chip(Color color, String label) => Row(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            Container(width: 12, height: 12, decoration: BoxDecoration(color: color, shape: BoxShape.circle)),
+            const SizedBox(width: 5),
+            Text(label, style: theme.textTheme.bodySmall?.copyWith(color: theme.colorScheme.onSurfaceVariant)),
+          ],
+        );
+    return Wrap(
+      spacing: 14,
+      runSpacing: 8,
+      children: [
+        chip(kRecoveryUnknownColor, 'Brak danych'),
+        chip(recoveryColor(10, dark: dark), 'Zmęczone'),
+        chip(recoveryColor(50, dark: dark), 'W toku'),
+        chip(recoveryColor(70, dark: dark), 'Prawie'),
+        chip(recoveryColor(95, dark: dark), 'Gotowe'),
+      ],
+    );
+  }
+}
+
+/// Lokalna sugestia ogólna na podstawie całej mapy regeneracji (bez AI).
+String overallRecoverySuggestion(Map<BodyMuscle, MuscleRecoveryState> recovery) {
+  final data = recovery.values.where((state) => state.hasData).toList();
+  if (data.isEmpty) {
+    return 'Brak danych regeneracji — wykonaj trening, aby zobaczyć analizę partii.';
+  }
+  final tired = data.where((s) => (s.recoveryPercent ?? 100) <= 40).toList();
+  if (tired.length >= 3) {
+    return 'Kilka dużych partii jest mocno zmęczonych — dziś dobrze zrobi mobility, stretching albo spacer.';
+  }
+  if (tired.isNotEmpty) {
+    final names = tired.map((s) => s.muscleGroup.label).take(3).join(', ');
+    return 'Zmęczone partie ($names) — rozważ lżejszy trening albo inną partię.';
+  }
+  final ready = data.where((s) => (s.recoveryPercent ?? 0) >= 80).toList();
+  if (ready.isNotEmpty) {
+    final names = ready.map((s) => s.muscleGroup.label).take(3).join(', ');
+    return 'Gotowe do treningu: $names.';
+  }
+  return 'Większość partii w trakcie regeneracji — trenuj umiarkowanie.';
+}
+
+/// Pigułka z dzisiejszymi spalonymi kcal (styl Licznika Kalorii). Etap regeneracji.
+class RecoveryKcalPill extends StatelessWidget {
+  const RecoveryKcalPill({super.key});
+
+  @override
+  Widget build(BuildContext context) {
+    final store = AppScope.of(context);
+    final theme = Theme.of(context);
+    final day = store.selectedDate;
+    final burned = store.burnedKcalForDay(day);
+    final minutes = store.trainingMinutesForDay(day);
+    return Container(
+      padding: const EdgeInsets.all(14),
+      decoration: BoxDecoration(
+        gradient: LinearGradient(
+          begin: Alignment.centerLeft,
+          end: Alignment.centerRight,
+          colors: [
+            theme.colorScheme.primaryContainer.withValues(alpha: 0.55),
+            theme.colorScheme.surfaceContainerHighest.withValues(alpha: 0.6),
+          ],
+        ),
+        borderRadius: BorderRadius.circular(18),
+      ),
+      child: Row(
+        children: [
+          Container(
+            width: 44,
+            height: 44,
+            decoration: BoxDecoration(color: theme.colorScheme.primary, shape: BoxShape.circle),
+            child: Icon(Icons.local_fire_department_rounded, color: theme.colorScheme.onPrimary),
+          ),
+          const SizedBox(width: 12),
+          Expanded(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Text(
+                  burned > 0 ? 'Spalone dzisiaj' : 'Aktywność dzisiaj',
+                  style: theme.textTheme.labelMedium?.copyWith(color: theme.colorScheme.onSurfaceVariant, fontWeight: FontWeight.w700),
+                ),
+                Row(
+                  crossAxisAlignment: CrossAxisAlignment.baseline,
+                  textBaseline: TextBaseline.alphabetic,
+                  children: [
+                    Text('$burned', style: theme.textTheme.headlineSmall?.copyWith(fontWeight: FontWeight.w900)),
+                    const SizedBox(width: 4),
+                    Text('kcal', style: theme.textTheme.bodyMedium?.copyWith(color: theme.colorScheme.onSurfaceVariant)),
+                  ],
+                ),
+                if (minutes > 0)
+                  Text('Trening: $minutes min', style: theme.textTheme.bodySmall?.copyWith(color: theme.colorScheme.onSurfaceVariant))
+                else if (burned == 0)
+                  Text('Brak danych aktywności dzisiaj', style: theme.textTheme.bodySmall?.copyWith(color: theme.colorScheme.onSurfaceVariant)),
+              ],
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+/// Karta modelu człowieka i regeneracji mięśni na stronie „Dzisiaj". Etap regeneracji.
+class RecoveryTodayCard extends StatefulWidget {
+  const RecoveryTodayCard({super.key});
+
+  @override
+  State<RecoveryTodayCard> createState() => _RecoveryTodayCardState();
+}
+
+class _RecoveryTodayCardState extends State<RecoveryTodayCard> {
+  BodyMuscleSide _side = BodyMuscleSide.front;
+
+  void _toggleSide() {
+    setState(() => _side = _side == BodyMuscleSide.front ? BodyMuscleSide.back : BodyMuscleSide.front);
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final store = AppScope.of(context);
+    final theme = Theme.of(context);
+    final dark = theme.brightness == Brightness.dark;
+    final recovery = store.muscleRecoveryMap();
+    return Card(
+      clipBehavior: Clip.antiAlias,
+      child: Padding(
+        padding: const EdgeInsets.fromLTRB(16, 14, 16, 16),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.stretch,
+          children: [
+            Row(
+              children: [
+                Icon(Icons.self_improvement_rounded, color: theme.colorScheme.primary),
+                const SizedBox(width: 8),
+                Expanded(child: Text('Regeneracja mięśni', style: theme.textTheme.titleMedium?.copyWith(fontWeight: FontWeight.w900))),
+                _BodySideToggle(side: _side, onChanged: (s) => setState(() => _side = s)),
+              ],
+            ),
+            const SizedBox(height: 6),
+            Text(
+              recovery.isEmpty
+                  ? 'Brak danych — wykonaj trening, aby zobaczyć regenerację.'
+                  : 'Dotknij modelu, aby zmienić widok • dotknij mięśnia po szczegóły.',
+              style: theme.textTheme.bodySmall?.copyWith(color: theme.colorScheme.onSurfaceVariant),
+            ),
+            const SizedBox(height: 10),
+            SizedBox(
+              height: 230,
+              child: AnimatedSwitcher(
+                duration: const Duration(milliseconds: 280),
+                child: BodyMuscleMap(
+                  key: ValueKey(_side),
+                  side: _side,
+                  dark: dark,
+                  recovery: recovery,
+                  onMuscleTap: (muscle) => showMuscleRecoverySheet(context, muscle, recovery[muscle]),
+                  onBackgroundTap: _toggleSide,
+                ),
+              ),
+            ),
+            const SizedBox(height: 12),
+            const RecoveryKcalPill(),
+            const SizedBox(height: 10),
+            Row(
+              children: [
+                Expanded(
+                  child: OutlinedButton.icon(
+                    onPressed: _toggleSide,
+                    icon: const Icon(Icons.cached_rounded, size: 18),
+                    label: Text(_side == BodyMuscleSide.front ? 'Pokaż tył' : 'Pokaż przód'),
+                  ),
+                ),
+                const SizedBox(width: 10),
+                Expanded(
+                  child: FilledButton.tonalIcon(
+                    onPressed: () => openMuscleRecoveryPage(context),
+                    icon: const Icon(Icons.insights_rounded, size: 18),
+                    label: const Text('Szczegóły'),
+                  ),
+                ),
+              ],
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+}
+
+Future<void> openMuscleRecoveryPage(BuildContext context) async {
+  await Navigator.of(context).push(
+    MaterialPageRoute<void>(builder: (_) => const MuscleRecoveryPage()),
+  );
+}
+
+/// Pełny ekran „Regeneracja mięśni". Etap regeneracji.
+class MuscleRecoveryPage extends StatefulWidget {
+  const MuscleRecoveryPage({super.key});
+
+  @override
+  State<MuscleRecoveryPage> createState() => _MuscleRecoveryPageState();
+}
+
+class _MuscleRecoveryPageState extends State<MuscleRecoveryPage> {
+  BodyMuscleSide _side = BodyMuscleSide.front;
+
+  @override
+  Widget build(BuildContext context) {
+    final store = AppScope.of(context);
+    final theme = Theme.of(context);
+    final dark = theme.brightness == Brightness.dark;
+    final recovery = store.muscleRecoveryMap();
+    final fatigued = recovery.values.where((state) => state.hasData).toList()
+      ..sort((a, b) => (a.recoveryPercent ?? 100).compareTo(b.recoveryPercent ?? 100));
+
+    return Scaffold(
+      appBar: AppBar(title: const Text('Regeneracja mięśni')),
+      body: SafeArea(
+        child: ListView(
+          padding: const EdgeInsets.fromLTRB(16, 12, 16, 28),
+          children: [
+            Center(child: _BodySideToggle(side: _side, onChanged: (s) => setState(() => _side = s))),
+            const SizedBox(height: 12),
+            SizedBox(
+              height: 360,
+              child: AnimatedSwitcher(
+                duration: const Duration(milliseconds: 280),
+                child: BodyMuscleMap(
+                  key: ValueKey(_side),
+                  side: _side,
+                  dark: dark,
+                  recovery: recovery,
+                  onMuscleTap: (muscle) => showMuscleRecoverySheet(context, muscle, recovery[muscle]),
+                  onBackgroundTap: () => setState(() => _side = _side == BodyMuscleSide.front ? BodyMuscleSide.back : BodyMuscleSide.front),
+                ),
+              ),
+            ),
+            const SizedBox(height: 12),
+            const RecoveryLegend(),
+            const SizedBox(height: 16),
+            Container(
+              padding: const EdgeInsets.all(14),
+              decoration: BoxDecoration(
+                color: theme.colorScheme.primaryContainer.withValues(alpha: 0.4),
+                borderRadius: BorderRadius.circular(16),
+              ),
+              child: Row(
+                children: [
+                  Icon(Icons.tips_and_updates_outlined, color: theme.colorScheme.primary),
+                  const SizedBox(width: 10),
+                  Expanded(child: Text(overallRecoverySuggestion(recovery), style: theme.textTheme.bodyMedium)),
+                ],
+              ),
+            ),
+            const SizedBox(height: 18),
+            if (fatigued.isEmpty)
+              Container(
+                padding: const EdgeInsets.all(18),
+                decoration: BoxDecoration(
+                  color: theme.colorScheme.surfaceContainerHighest.withValues(alpha: 0.5),
+                  borderRadius: BorderRadius.circular(18),
+                ),
+                child: Row(
+                  children: [
+                    Icon(Icons.self_improvement_rounded, color: theme.colorScheme.primary),
+                    const SizedBox(width: 12),
+                    Expanded(
+                      child: Text(
+                        'Brak danych regeneracji — wykonaj trening z przypisanymi partiami mięśniowymi, aby zobaczyć mapę.',
+                        style: theme.textTheme.bodyMedium?.copyWith(color: theme.colorScheme.onSurfaceVariant),
+                      ),
+                    ),
+                  ],
+                ),
+              )
+            else ...[
+              Text('Najbardziej zmęczone partie', style: theme.textTheme.titleMedium?.copyWith(fontWeight: FontWeight.w900)),
+              const SizedBox(height: 10),
+              for (final state in fatigued.take(6)) _FatiguedMuscleRow(state: state),
+            ],
+          ],
+        ),
+      ),
+    );
+  }
+}
+
+class _FatiguedMuscleRow extends StatelessWidget {
+  const _FatiguedMuscleRow({required this.state});
+
+  final MuscleRecoveryState state;
+
+  @override
+  Widget build(BuildContext context) {
+    final theme = Theme.of(context);
+    final dark = theme.brightness == Brightness.dark;
+    final color = recoveryColor(state.recoveryPercent, dark: dark);
+    final percent = (state.recoveryPercent ?? 0).round();
+    final eta = state.estimatedHoursRemaining <= 0 ? 'gotowe' : '~${state.estimatedHoursRemaining} h';
+    return InkWell(
+      borderRadius: BorderRadius.circular(14),
+      onTap: () => showMuscleRecoverySheet(context, state.muscleGroup, state),
+      child: Padding(
+        padding: const EdgeInsets.symmetric(vertical: 8),
+        child: Row(
+          children: [
+            Container(width: 14, height: 14, decoration: BoxDecoration(color: color, shape: BoxShape.circle)),
+            const SizedBox(width: 10),
+            Expanded(
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Row(
+                    children: [
+                      Expanded(child: Text(state.muscleGroup.label, style: theme.textTheme.bodyLarge?.copyWith(fontWeight: FontWeight.w800))),
+                      Text('$percent%', style: theme.textTheme.bodyMedium?.copyWith(fontWeight: FontWeight.w900)),
+                    ],
+                  ),
+                  const SizedBox(height: 4),
+                  ClipRRect(
+                    borderRadius: BorderRadius.circular(6),
+                    child: LinearProgressIndicator(
+                      value: percent / 100,
+                      minHeight: 6,
+                      backgroundColor: theme.colorScheme.surfaceContainerHighest,
+                      valueColor: AlwaysStoppedAnimation<Color>(color),
+                    ),
+                  ),
+                  const SizedBox(height: 2),
+                  Text('${state.statusLabel} · do pełnej regeneracji $eta', style: theme.textTheme.bodySmall?.copyWith(color: theme.colorScheme.onSurfaceVariant)),
+                ],
+              ),
+            ),
+          ],
         ),
       ),
     );
@@ -17380,12 +18116,21 @@ class _CreateExerciseSheetContentState extends State<CreateExerciseSheetContent>
   bool _mediaExpanded = false;
   final ImagePicker _mediaPicker = ImagePicker();
 
+  // Partie mięśniowe (muscle → rola) używane do regeneracji. Etap regeneracji.
+  late Map<BodyMuscle, MuscleRole> _muscleRoles;
+  bool _musclesExpanded = false;
+
   @override
   void initState() {
     super.initState();
     final exercise = widget.exercise;
     mediaItems = List<ExerciseMedia>.from(exercise?.mediaItems ?? const <ExerciseMedia>[]);
     _mediaExpanded = mediaItems.isNotEmpty;
+    _muscleRoles = {
+      for (final impact in (exercise?.effectiveMuscleImpacts ?? const <ExerciseMuscleImpact>[]))
+        impact.muscleGroup: impact.role,
+    };
+    _musclesExpanded = _muscleRoles.isNotEmpty;
     name = TextEditingController(text: exercise?.name ?? '');
     category = TextEditingController(text: exercise?.category ?? 'Inne');
     primaryMuscle = TextEditingController(
@@ -17496,6 +18241,10 @@ class _CreateExerciseSheetContentState extends State<CreateExerciseSheetContent>
       videoPath: original?.videoPath,
       videoUrl: original?.videoUrl,
       mediaItems: savedMedia,
+      muscleImpacts: [
+        for (final entry in _muscleRoles.entries)
+          ExerciseMuscleImpact(muscleGroup: entry.key, role: entry.value),
+      ],
       source: original == null
           ? 'custom'
           : original.source == 'local'
@@ -17705,6 +18454,176 @@ class _CreateExerciseSheetContentState extends State<CreateExerciseSheetContent>
           ),
         );
       },
+    );
+  }
+
+  Future<void> _openAddMuscleSheet() async {
+    final available = BodyMuscle.values.where((m) => !_muscleRoles.containsKey(m)).toList();
+    final picked = await showModalBottomSheet<BodyMuscle>(
+      context: context,
+      showDragHandle: true,
+      isScrollControlled: true,
+      useSafeArea: true,
+      builder: (sheetContext) {
+        List<BodyMuscle> onSide(BodyMuscleSide side) =>
+            available.where((m) => musclesOnSide(side).contains(m)).toList();
+        Widget group(String title, List<BodyMuscle> muscles) {
+          if (muscles.isEmpty) return const SizedBox.shrink();
+          return Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Padding(
+                padding: const EdgeInsets.fromLTRB(16, 8, 16, 4),
+                child: Text(title, style: const TextStyle(fontWeight: FontWeight.w900)),
+              ),
+              for (final muscle in muscles)
+                ListTile(
+                  dense: true,
+                  title: Text(muscle.label),
+                  onTap: () => Navigator.of(sheetContext).pop(muscle),
+                ),
+            ],
+          );
+        }
+
+        return FractionallySizedBox(
+          heightFactor: 0.86,
+          child: ListView(
+            children: [
+              const Padding(
+                padding: EdgeInsets.fromLTRB(16, 4, 16, 4),
+                child: Text('Dodaj partię mięśniową', style: TextStyle(fontWeight: FontWeight.w900, fontSize: 16)),
+              ),
+              group('Przód', onSide(BodyMuscleSide.front)),
+              group('Tył', onSide(BodyMuscleSide.back)),
+              if (available.isEmpty)
+                const Padding(padding: EdgeInsets.all(24), child: Center(child: Text('Wszystkie partie już dodane.'))),
+            ],
+          ),
+        );
+      },
+    );
+    if (picked != null) {
+      setState(() {
+        _muscleRoles[picked] = MuscleRole.primary;
+        _musclesExpanded = true;
+      });
+    }
+  }
+
+  Widget _buildMuscleRow(ThemeData theme, BodyMuscle muscle, MuscleRole role) {
+    return Padding(
+      padding: const EdgeInsets.only(bottom: 8),
+      child: Row(
+        children: [
+          Expanded(
+            child: Text(muscle.label, maxLines: 1, overflow: TextOverflow.ellipsis, style: theme.textTheme.bodyMedium?.copyWith(fontWeight: FontWeight.w700)),
+          ),
+          const SizedBox(width: 8),
+          DropdownButton<MuscleRole>(
+            value: role,
+            isDense: true,
+            underline: const SizedBox.shrink(),
+            onChanged: (value) {
+              if (value != null) setState(() => _muscleRoles[muscle] = value);
+            },
+            items: [
+              for (final r in MuscleRole.values) DropdownMenuItem(value: r, child: Text(r.label)),
+            ],
+          ),
+          IconButton(
+            visualDensity: VisualDensity.compact,
+            tooltip: 'Usuń',
+            onPressed: () => setState(() => _muscleRoles.remove(muscle)),
+            icon: const Icon(Icons.close_rounded),
+          ),
+        ],
+      ),
+    );
+  }
+
+  Widget _buildMuscleSection(ThemeData theme) {
+    final entries = _muscleRoles.entries.toList();
+    return Container(
+      decoration: BoxDecoration(
+        color: theme.colorScheme.surfaceContainerHighest.withValues(alpha: 0.4),
+        borderRadius: BorderRadius.circular(16),
+        border: Border.all(color: theme.colorScheme.outlineVariant.withValues(alpha: 0.4)),
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.stretch,
+        children: [
+          InkWell(
+            onTap: () => setState(() => _musclesExpanded = !_musclesExpanded),
+            borderRadius: BorderRadius.circular(16),
+            child: Padding(
+              padding: const EdgeInsets.fromLTRB(14, 12, 8, 12),
+              child: Row(
+                children: [
+                  Icon(Icons.accessibility_new_rounded, color: theme.colorScheme.primary),
+                  const SizedBox(width: 10),
+                  Expanded(
+                    child: Text('Partie mięśniowe', style: theme.textTheme.titleSmall?.copyWith(fontWeight: FontWeight.w900)),
+                  ),
+                  if (entries.isNotEmpty)
+                    Container(
+                      padding: const EdgeInsets.symmetric(horizontal: 9, vertical: 3),
+                      decoration: BoxDecoration(color: theme.colorScheme.primary, borderRadius: BorderRadius.circular(10)),
+                      child: Text('${entries.length}', style: TextStyle(color: theme.colorScheme.onPrimary, fontWeight: FontWeight.w800, fontSize: 12)),
+                    ),
+                  Icon(_musclesExpanded ? Icons.expand_less_rounded : Icons.expand_more_rounded),
+                ],
+              ),
+            ),
+          ),
+          if (_musclesExpanded) ...[
+            Divider(height: 1, color: theme.colorScheme.outlineVariant.withValues(alpha: 0.4)),
+            Padding(
+              padding: const EdgeInsets.fromLTRB(14, 12, 14, 14),
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.stretch,
+                children: [
+                  if (entries.isEmpty)
+                    Container(
+                      padding: const EdgeInsets.all(12),
+                      margin: const EdgeInsets.only(bottom: 10),
+                      decoration: BoxDecoration(
+                        color: theme.colorScheme.errorContainer.withValues(alpha: 0.35),
+                        borderRadius: BorderRadius.circular(12),
+                      ),
+                      child: Row(
+                        children: [
+                          Icon(Icons.warning_amber_rounded, size: 18, color: theme.colorScheme.error),
+                          const SizedBox(width: 8),
+                          Expanded(
+                            child: Text(
+                              'Brak przypisanych partii mięśniowych — ćwiczenie nie będzie liczone do regeneracji.',
+                              style: theme.textTheme.bodySmall?.copyWith(color: theme.colorScheme.onSurface),
+                            ),
+                          ),
+                        ],
+                      ),
+                    )
+                  else ...[
+                    Text(
+                      'Główna 1.0 · Pomocnicza 0.5 · Stabilizacja 0.25',
+                      style: theme.textTheme.bodySmall?.copyWith(color: theme.colorScheme.onSurfaceVariant),
+                    ),
+                    const SizedBox(height: 8),
+                    for (final entry in entries) _buildMuscleRow(theme, entry.key, entry.value),
+                  ],
+                  const SizedBox(height: 6),
+                  FilledButton.tonalIcon(
+                    onPressed: _openAddMuscleSheet,
+                    icon: const Icon(Icons.add_rounded),
+                    label: const Text('Dodaj partię'),
+                  ),
+                ],
+              ),
+            ),
+          ],
+        ],
+      ),
     );
   }
 
@@ -18040,6 +18959,8 @@ class _CreateExerciseSheetContentState extends State<CreateExerciseSheetContent>
                   hintText: 'Każda alternatywa w nowej linii',
                 ),
               ),
+              const SizedBox(height: 14),
+              _buildMuscleSection(theme),
               const SizedBox(height: 14),
               _buildMediaSection(theme),
               const SizedBox(height: 18),

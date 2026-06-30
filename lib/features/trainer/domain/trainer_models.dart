@@ -1,6 +1,8 @@
 export 'activity_credit.dart';
 export 'active_workout_session.dart';
 export 'body_measurement.dart';
+export 'body_muscle.dart';
+export 'muscle_recovery.dart';
 export 'exercise.dart';
 export 'exercise_media.dart';
 export 'exercise_library_preferences.dart';

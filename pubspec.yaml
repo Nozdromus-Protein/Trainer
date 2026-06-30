@@ -19,6 +19,10 @@ flutter:
   uses-material-design: true
   assets:
     - assets/exercises/videos/
+    - assets/trainer/body_model/front/
+    - assets/trainer/body_model/front/masks/
+    - assets/trainer/body_model/back/
+    - assets/trainer/body_model/back/masks/
 dev_dependencies:
   flutter_test:
     sdk: flutter
