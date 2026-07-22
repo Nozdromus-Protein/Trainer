@@ -120,6 +120,62 @@ void main() {
     expect(tester.takeException(), isNull);
   });
 
+  testWidgets('workout details collapse exercises by default and expand on demand', (tester) async {
+    SharedPreferences.setMockInitialValues({});
+    final store = AppStore();
+    await store.load();
+    store.logs
+      ..clear()
+      ..addAll([
+        _sessionLog(
+          id: 'push-log',
+          sessionId: 'full-session',
+          sessionName: 'Full Body A',
+          exerciseId: 'pushup',
+          date: DateTime(2026, 6, 22, 18),
+          note: 'Pilnuj łopatek',
+        ),
+        _sessionLog(
+          id: 'row-log',
+          sessionId: 'full-session',
+          sessionName: 'Full Body A',
+          exerciseId: 'deadlift',
+          date: DateTime(2026, 6, 22, 18),
+        ),
+      ]);
+    await store.saveLogs();
+
+    // Wyższy viewport, żeby oba rozwinięte ćwiczenia były zbudowane w ListView.
+    await tester.binding.setSurfaceSize(const Size(800, 1500));
+    addTearDown(() => tester.binding.setSurfaceSize(null));
+    await _pumpHistory(tester, store);
+    await tester.tap(find.text('Full Body A'));
+    await tester.pumpAndSettle();
+
+    // Na starcie widać tylko listę ćwiczeń — bez serii i notatek.
+    expect(find.text('Szczegóły treningu'), findsOneWidget);
+    expect(find.text('Seria 1'), findsNothing);
+    expect(find.text('Pilnuj łopatek'), findsNothing);
+    expect(find.text('Rozwiń wszystkie'), findsOneWidget);
+
+    // Rozwinięcie jednego ćwiczenia pokazuje jego serie i notatkę.
+    await tester.tap(find.byKey(const Key('history_exercise_toggle_push-log')));
+    await tester.pumpAndSettle();
+    expect(find.text('Seria 1'), findsOneWidget);
+    expect(find.text('Pilnuj łopatek'), findsOneWidget);
+
+    // „Rozwiń wszystkie" otwiera oba ćwiczenia, potem „Zwiń wszystkie" chowa serie.
+    await tester.tap(find.byKey(const Key('history_toggle_all_exercises')));
+    await tester.pumpAndSettle();
+    expect(find.text('Seria 1'), findsNWidgets(2));
+    expect(find.text('Zwiń wszystkie'), findsOneWidget);
+
+    await tester.tap(find.byKey(const Key('history_toggle_all_exercises')));
+    await tester.pumpAndSettle();
+    expect(find.text('Seria 1'), findsNothing);
+    expect(tester.takeException(), isNull);
+  });
+
   testWidgets('workout history deletes a session only after confirmation', (tester) async {
     SharedPreferences.setMockInitialValues({});
     final store = AppStore();

@@ -137,6 +137,12 @@ class TrainerActivityEntry {
     this.distanceKm = 0,
     this.steps = 0,
     this.note = '',
+    this.routePoints = const <List<double>>[],
+    this.avgHeartRate = 0,
+    this.maxHeartRate = 0,
+    this.sweatLossMl = 0,
+    this.hrZoneMinutes = const <int>[],
+    this.kcalFromDevice = false,
   });
 
   final String id;
@@ -152,6 +158,34 @@ class TrainerActivityEntry {
   final double distanceKm;
   final int steps;
   final String note;
+
+  /// Trasa GPS aktywności (bieg/chód z zegarka): lista punktów [lat, lng],
+  /// uproszczona do ~120 punktów. Pusta, gdy Health Connect nie udostępnił
+  /// trasy (brak zgody „Trasy ćwiczeń") albo aktywność nie ma GPS.
+  final List<List<double>> routePoints;
+
+  /// Średnie / maksymalne tętno sesji (0 = brak danych).
+  final double avgHeartRate;
+  final double maxHeartRate;
+
+  /// Szacowana utrata wody przez pot (ml). Health Connect nie udostępnia potu,
+  /// więc to szacunek Trainera (czas × intensywność z tętna × masa ciała).
+  final int sweatLossMl;
+
+  /// Minuty w strefach pulsu [niska, kontrola wagi, aerobowa, anaerobowa, maks.]
+  /// policzone z próbek tętna sesji. Pusta lista = brak danych tętna.
+  final List<int> hrZoneMinutes;
+
+  /// Czy [estimatedKcal] pochodzi wprost z zegarka / Samsung Health
+  /// (a nie z własnego wzoru Trainera).
+  final bool kcalFromDevice;
+
+  bool get hasRoute => routePoints.length >= 2;
+
+  bool get hasHeartRate => avgHeartRate > 0;
+
+  /// Kadencja (kroki na minutę) — liczona, nie zapisywana.
+  int get cadenceSpm => durationMin > 0 && steps > 0 ? (steps / durationMin).round() : 0;
 
   String get dateKey {
     String two(int value) => value.toString().padLeft(2, '0');
@@ -191,6 +225,12 @@ class TrainerActivityEntry {
     double? distanceKm,
     int? steps,
     String? note,
+    List<List<double>>? routePoints,
+    double? avgHeartRate,
+    double? maxHeartRate,
+    int? sweatLossMl,
+    List<int>? hrZoneMinutes,
+    bool? kcalFromDevice,
   }) {
     return TrainerActivityEntry(
       id: id ?? this.id,
@@ -206,6 +246,12 @@ class TrainerActivityEntry {
       distanceKm: distanceKm ?? this.distanceKm,
       steps: steps ?? this.steps,
       note: note ?? this.note,
+      routePoints: routePoints ?? this.routePoints,
+      avgHeartRate: avgHeartRate ?? this.avgHeartRate,
+      maxHeartRate: maxHeartRate ?? this.maxHeartRate,
+      sweatLossMl: sweatLossMl ?? this.sweatLossMl,
+      hrZoneMinutes: hrZoneMinutes ?? this.hrZoneMinutes,
+      kcalFromDevice: kcalFromDevice ?? this.kcalFromDevice,
     );
   }
 
@@ -224,6 +270,12 @@ class TrainerActivityEntry {
         'distanceKm': distanceKm,
         'steps': steps,
         'note': note,
+        'routePoints': routePoints,
+        'avgHeartRate': avgHeartRate,
+        'maxHeartRate': maxHeartRate,
+        'sweatLossMl': sweatLossMl,
+        'hrZoneMinutes': hrZoneMinutes,
+        'kcalFromDevice': kcalFromDevice,
         'deduplicationKey': deduplicationKey,
       };
 
@@ -243,7 +295,32 @@ class TrainerActivityEntry {
       distanceKm: (json['distanceKm'] as num?)?.toDouble() ?? 0,
       steps: (json['steps'] as num?)?.round() ?? 0,
       note: json['note']?.toString() ?? '',
+      routePoints: _routePointsFromJson(json['routePoints']),
+      avgHeartRate: (json['avgHeartRate'] as num?)?.toDouble() ?? 0,
+      maxHeartRate: (json['maxHeartRate'] as num?)?.toDouble() ?? 0,
+      sweatLossMl: (json['sweatLossMl'] as num?)?.round() ?? 0,
+      hrZoneMinutes: _intListFromJson(json['hrZoneMinutes']),
+      kcalFromDevice: json['kcalFromDevice'] == true,
     );
+  }
+
+  static List<int> _intListFromJson(Object? value) {
+    if (value is! List) return const <int>[];
+    return value.map((entry) => (entry as num?)?.round() ?? 0).toList();
+  }
+
+  /// Bezpieczne parsowanie trasy: tylko poprawne pary liczb [lat, lng].
+  static List<List<double>> _routePointsFromJson(Object? value) {
+    if (value is! List) return const <List<double>>[];
+    final points = <List<double>>[];
+    for (final entry in value) {
+      if (entry is! List || entry.length < 2) continue;
+      final lat = (entry[0] as num?)?.toDouble();
+      final lng = (entry[1] as num?)?.toDouble();
+      if (lat == null || lng == null || !lat.isFinite || !lng.isFinite) continue;
+      points.add([lat, lng]);
+    }
+    return points;
   }
 
   factory TrainerActivityEntry.fromTrainingImpact(TrainingImpact impact) {
@@ -325,7 +402,7 @@ List<ActivityCreditDecision> resolveActivityCredits(Iterable<TrainerActivityEntr
           entry: entry,
           includedInCalories: false,
           skippedAsDuplicate: true,
-          reason: entry.type == TrainerActivityType.measuredWalk ? 'Pominięto: ten sam odcinek jest już policzony jako bieg.' : 'Pominięto: ten sam odcinek jest już policzony jako chód mierzony.',
+          reason: 'Pominięto: ten sam odcinek jest już policzony (${conflict.type.label.toLowerCase()}).',
           duplicateOfKey: conflict.deduplicationKey,
         ),
       );
@@ -396,8 +473,11 @@ int _activityDisplayOrder(TrainerActivityType type) {
 }
 
 bool _isWalkRunConflict(TrainerActivityEntry left, TrainerActivityEntry right) {
-  final pair = {left.type, right.type};
-  if (!pair.contains(TrainerActivityType.measuredWalk) || !pair.contains(TrainerActivityType.run)) return false;
+  // Konflikt dotyczy odcinków bieg/chód w KAŻDEJ kombinacji: bieg↔chód
+  // (ten sam odcinek raz jako bieg, raz jako marsz), ale też bieg↔bieg i
+  // chód↔chód (ta sama sesja zapisana przez dwie aplikacje pod różnymi id).
+  const overlapTypes = {TrainerActivityType.measuredWalk, TrainerActivityType.run};
+  if (!overlapTypes.contains(left.type) || !overlapTypes.contains(right.type)) return false;
   if (left.dateKey != right.dateKey) return false;
   if (left.stableActivityKey == right.stableActivityKey) return true;
   if (left.sourceActivityId.isNotEmpty && left.sourceActivityId == right.sourceActivityId) return true;

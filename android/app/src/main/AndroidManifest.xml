@@ -6,6 +6,8 @@
     <uses-permission android:name="android.permission.health.READ_EXERCISE"/>
     <uses-permission android:name="android.permission.health.READ_HEART_RATE"/>
     <uses-permission android:name="android.permission.health.READ_SLEEP"/>
+    <!-- Trasy GPS biegów/chodu (mapa aktywności na karcie „Bieg i chód"). -->
+    <uses-permission android:name="android.permission.health.READ_EXERCISE_ROUTES"/>
 
     <!-- Most kalorii: odczyt spalonych kcal z treningów Trainera tylko dla aplikacji
          podpisanej tym samym kluczem (np. Licznik Kalorii). -->

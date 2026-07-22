@@ -198,6 +198,23 @@ void main() {
       expect(restored.volume, 940);
     });
 
+    test('WorkoutSession.fromJson bez rpe → 0 (nie fabrykuje domyślnej 7)', () {
+      final restored = WorkoutSession.fromJson({
+        'id': 's1',
+        'exerciseId': 'squat',
+        'date': DateTime(2026, 7, 16).toIso8601String(),
+        'sets': 3,
+        'reps': 10,
+        'weightKg': 40,
+        'durationSec': 0,
+        // brak pola 'rpe'
+        'calories': 50,
+        'note': '',
+        'aiConfidence': 0,
+      });
+      expect(restored.rpe, 0);
+    });
+
     test('WorkoutPlan restores WorkoutDay and plan items', () {
       const plan = WorkoutPlan(
         id: 'plan-1',
@@ -234,7 +251,8 @@ void main() {
       expect(restored.days.single.items.single.restSeconds, 120);
     });
 
-    test('WorkoutPlan progression: lock, complete, rest and JSON round-trip', () {
+    test('WorkoutPlan progression: lock, complete, rest and JSON round-trip',
+        () {
       const trainingItem = PlanItem(
         exerciseId: 'pushup',
         sets: 3,

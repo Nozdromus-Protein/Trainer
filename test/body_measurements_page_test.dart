@@ -25,7 +25,14 @@ void main() {
     await tester.pump();
 
     expect(find.text('Pomiary sylwetki'), findsOneWidget);
+    // Cała funkcja analizy sylwetki na początku strony: trzy okna zdjęć
+    // (przód/bok/tył) obok siebie + cel + przycisk analizy.
     expect(find.text('Zdjęcia progresu'), findsOneWidget);
+    expect(find.byKey(const Key('progress_photo_slot_front')), findsOneWidget);
+    expect(find.byKey(const Key('progress_photo_slot_side')), findsOneWidget);
+    expect(find.byKey(const Key('progress_photo_slot_back')), findsOneWidget);
+    expect(find.byKey(const Key('silhouette_goal_button')), findsOneWidget);
+    expect(find.byKey(const Key('analyze_body_button')), findsOneWidget);
 
     await tester.enterText(find.byKey(const Key('measurement_weight')), '98.4');
     await tester.enterText(find.byKey(const Key('measurement_waist')), '92');
@@ -75,7 +82,61 @@ void main() {
     );
     expect(find.text('Historia pomiarów'), findsOneWidget);
     expect(find.text('Pomiar rano'), findsOneWidget);
-    expect(find.text('Zdjęcia progresu: placeholder'), findsOneWidget);
+    expect(find.text('Bez zdjęć progresu'), findsOneWidget);
+    expect(tester.takeException(), isNull);
+  });
+
+  testWidgets('body analysis runs locally without photos and saves to history', (tester) async {
+    SharedPreferences.setMockInitialValues({});
+    final store = AppStore();
+    await store.load();
+    // Profil domyślny (masa+wzrost) wystarcza do lokalnego szacunku;
+    // wybrany cel podpina się do wyniku analizy.
+    await store.updateSettings(store.settings.copyWith(targetSilhouette: 'v_taper'));
+    await tester.binding.setSurfaceSize(const Size(420, 1400));
+    addTearDown(() => tester.binding.setSurfaceSize(null));
+
+    await tester.pumpWidget(
+      AppScope(
+        store: store,
+        child: MaterialApp(
+          theme: buildTheme(const Color(0xFF24D6A3), true),
+          home: const Scaffold(body: BodyMeasurementsPage()),
+        ),
+      ),
+    );
+    await tester.pump();
+
+    await tester.ensureVisible(find.byKey(const Key('analyze_body_button')));
+    await tester.pumpAndSettle();
+    await tester.tap(find.byKey(const Key('analyze_body_button')));
+    await tester.pumpAndSettle();
+
+    // Analiza (lokalna — brak zdjęć i kluczy AI) zapisała się i otworzyła szczegóły.
+    expect(store.bodyAnalyses, hasLength(1));
+    final analysis = store.bodyAnalyses.single;
+    expect(analysis.source, 'local');
+    expect(analysis.composition.hasData, isTrue);
+    expect(analysis.targetSilhouetteId, 'v_taper');
+    // Nowy model analizy: FFM z masy i BF, zakres niepewności, walidacja.
+    expect(analysis.schemaVersion, 2);
+    expect(analysis.lowReliability, isFalse);
+    expect(analysis.bodyFatRangeMaxPercent, greaterThan(0));
+    expect(find.text('Analiza sylwetki'), findsOneWidget);
+    expect(find.text('Skład ciała (szacunek)'), findsOneWidget);
+    // Strona jest dłuższa (sekcje 1–6) — sekcja celu wymaga przewinięcia.
+    await tester.scrollUntilVisible(
+      find.textContaining('Droga do celu'),
+      400,
+      scrollable: find.byType(Scrollable).first,
+    );
+    expect(find.textContaining('Droga do celu'), findsOneWidget);
+
+    // Wynik przetrwał restart (persystencja w SharedPreferences).
+    final restored = AppStore();
+    await restored.load();
+    expect(restored.bodyAnalyses, hasLength(1));
+    expect(restored.bodyAnalyses.single.composition.bodyFatPercent, analysis.composition.bodyFatPercent);
     expect(tester.takeException(), isNull);
   });
 

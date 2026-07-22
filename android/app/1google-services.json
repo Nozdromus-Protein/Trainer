@@ -1,0 +1,29 @@
+{
+  "project_info": {
+    "project_number": "398578860255",
+    "project_id": "trainer-7071d",
+    "storage_bucket": "trainer-7071d.firebasestorage.app"
+  },
+  "client": [
+    {
+      "client_info": {
+        "mobilesdk_app_id": "1:398578860255:android:d77972dba0d45bcbaf296a",
+        "android_client_info": {
+          "package_name": "com.example.licznik_treningu"
+        }
+      },
+      "oauth_client": [],
+      "api_key": [
+        {
+          "current_key": "AIzaSyBhrFrgq8300g2fFgR689424evLxxEWzd0"
+        }
+      ],
+      "services": {
+        "appinvite_service": {
+          "other_platform_oauth_client": []
+        }
+      }
+    }
+  ],
+  "configuration_version": "1"
+}

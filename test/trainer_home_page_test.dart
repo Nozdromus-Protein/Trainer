@@ -38,7 +38,7 @@ void main() {
     expect(find.text('Historia'), findsOneWidget);
     expect(find.text('Plany treningowe'), findsOneWidget);
     expect(find.text('Progres'), findsOneWidget);
-    expect(find.text('Ustawienia Trainera'), findsOneWidget);
+    expect(find.text('Ustawienia'), findsOneWidget);
     expect(tester.takeException(), isNull);
   });
 }

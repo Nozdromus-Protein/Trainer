@@ -70,10 +70,24 @@ void main() {
     await tester.pumpAndSettle();
 
     expect(find.text('Baza ćwiczeń'), findsOneWidget);
+
+    // Filtry są teraz w rozwijanej sekcji — rozwiń przed sprawdzeniem pól.
+    await tester.ensureVisible(find.text('Filtry bazy'));
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('Filtry bazy'));
+    await tester.pumpAndSettle();
     expect(find.text('Partia mięśniowa'), findsOneWidget);
     expect(find.text('Sprzęt'), findsOneWidget);
     expect(find.text('Poziom trudności'), findsOneWidget);
     expect(find.text('Cel treningowy'), findsOneWidget);
+
+    // Lista ćwiczeń jest leniwa (SliverList) — przewiń do karty przysiadu.
+    // Krok 600 px: baza urosła o ćwiczenia cardio, 50 iteracji po 300 px nie starczało.
+    await tester.scrollUntilVisible(
+      find.text('Przysiad'),
+      600,
+      scrollable: find.byType(Scrollable).first,
+    );
     expect(find.text('Przysiad'), findsOneWidget);
     expect(tester.takeException(), isNull);
   });

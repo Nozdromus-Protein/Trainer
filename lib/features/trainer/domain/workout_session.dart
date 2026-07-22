@@ -76,7 +76,9 @@ class WorkoutSession {
         reps: (json['reps'] as num?)?.toInt() ?? 0,
         weightKg: (json['weightKg'] as num?)?.toDouble() ?? 0,
         durationSec: (json['durationSec'] as num?)?.toInt() ?? 0,
-        rpe: (json['rpe'] as num?)?.toInt() ?? 7,
+        // 0 = brak oceny. NIE wstawiamy domyślnej „7", bo fabrykowałaby
+        // wiarygodnie wyglądający pomiar tam, gdzie żadnego nie było.
+        rpe: (json['rpe'] as num?)?.toInt() ?? 0,
         calories: (json['calories'] as num?)?.toDouble() ?? 0,
         note: json['note']?.toString() ?? '',
         aiConfidence: (json['aiConfidence'] as num?)?.toDouble() ?? 0,

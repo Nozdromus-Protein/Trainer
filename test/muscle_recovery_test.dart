@@ -1,7 +1,9 @@
 import 'package:flutter_test/flutter_test.dart';
 import 'package:licznik_treningu/features/trainer/domain/trainer_models.dart';
 
-Exercise _exercise(String id, {List<ExerciseMuscleImpact> impacts = const [], List<String> muscles = const ['klatka piersiowa']}) {
+Exercise _exercise(String id,
+    {List<ExerciseMuscleImpact> impacts = const [],
+    List<String> muscles = const ['klatka piersiowa']}) {
   return Exercise(
     id: id,
     name: id,
@@ -21,7 +23,8 @@ Exercise _exercise(String id, {List<ExerciseMuscleImpact> impacts = const [], Li
   );
 }
 
-WorkoutLog _log(String exerciseId, DateTime date, {int sets = 3, int reps = 10, int rpe = 8}) {
+WorkoutLog _log(String exerciseId, DateTime date,
+    {int sets = 3, int reps = 10, int rpe = 8}) {
   return WorkoutLog(
     id: 'log_$exerciseId${date.millisecondsSinceEpoch}',
     exerciseId: exerciseId,
@@ -41,7 +44,8 @@ WorkoutLog _log(String exerciseId, DateTime date, {int sets = 3, int reps = 10, 
 void main() {
   group('Muscle impact + BodyMuscle', () {
     test('ExerciseMuscleImpact JSON round-trip and role weights', () {
-      const impact = ExerciseMuscleImpact(muscleGroup: BodyMuscle.chest, role: MuscleRole.primary);
+      const impact = ExerciseMuscleImpact(
+          muscleGroup: BodyMuscle.chest, role: MuscleRole.primary);
       expect(impact.effectiveWeight, 1.0);
       final restored = ExerciseMuscleImpact.fromJson(impact.toJson());
       expect(restored, isNotNull);
@@ -60,6 +64,25 @@ void main() {
       expect(BodyMuscle.fromText('xyz nieznane'), isNull);
     });
 
+    test('BodyMuscle.fromText keeps detailed anatomical muscles', () {
+      expect(
+        BodyMuscle.fromText('mięsień nadgrzebieniowy'),
+        BodyMuscle.supraspinatus,
+      );
+      expect(
+        BodyMuscle.fromText('infraspinatus'),
+        BodyMuscle.infraspinatus,
+      );
+      expect(
+        BodyMuscle.fromText('mięsień zębaty przedni'),
+        BodyMuscle.serratusAnterior,
+      );
+      expect(
+        BodyMuscle.fromText('prostowniki grzbietu'),
+        BodyMuscle.erectorSpinae,
+      );
+    });
+
     test('mask maps cover front and back muscles', () {
       expect(kFrontMuscleMasks[BodyMuscle.abs], hasLength(4));
       expect(kFrontMuscleMasks[BodyMuscle.quads], hasLength(2));
@@ -67,14 +90,18 @@ void main() {
       // Adductors są po obu stronach.
       expect(kFrontMuscleMasks.containsKey(BodyMuscle.adductors), isTrue);
       expect(kBackMuscleMasks.containsKey(BodyMuscle.adductors), isTrue);
+      expect(kBackMuscleMasks[BodyMuscle.supraspinatus], isNotEmpty);
+      expect(kFrontMuscleMasks[BodyMuscle.serratusAnterior], isNotEmpty);
     });
   });
 
   group('Exercise.effectiveMuscleImpacts', () {
     test('explicit impacts win over derived', () {
       final exercise = _exercise('pushup', impacts: const [
-        ExerciseMuscleImpact(muscleGroup: BodyMuscle.chest, role: MuscleRole.primary),
-        ExerciseMuscleImpact(muscleGroup: BodyMuscle.triceps, role: MuscleRole.secondary),
+        ExerciseMuscleImpact(
+            muscleGroup: BodyMuscle.chest, role: MuscleRole.primary),
+        ExerciseMuscleImpact(
+            muscleGroup: BodyMuscle.triceps, role: MuscleRole.secondary),
       ]);
       final impacts = exercise.effectiveMuscleImpacts;
       expect(impacts, hasLength(2));
@@ -82,17 +109,20 @@ void main() {
       expect(exercise.hasMuscleAssignment, isTrue);
     });
 
-    test('derives impacts from muscles when none explicit (first = primary)', () {
+    test('derives impacts from muscles when none explicit (first = primary)',
+        () {
       final exercise = _exercise('row', muscles: const ['plecy', 'biceps']);
       final impacts = exercise.effectiveMuscleImpacts;
       expect(impacts, isNotEmpty);
       expect(impacts.first.role, MuscleRole.primary);
-      expect(impacts.skip(1).every((i) => i.role == MuscleRole.secondary), isTrue);
+      expect(
+          impacts.skip(1).every((i) => i.role == MuscleRole.secondary), isTrue);
     });
 
     test('JSON round-trip keeps muscle impacts', () {
       final exercise = _exercise('pushup', impacts: const [
-        ExerciseMuscleImpact(muscleGroup: BodyMuscle.chest, role: MuscleRole.primary),
+        ExerciseMuscleImpact(
+            muscleGroup: BodyMuscle.chest, role: MuscleRole.primary),
       ]);
       final restored = Exercise.fromJson(exercise.toJson());
       expect(restored.muscleImpacts, hasLength(1));
@@ -102,7 +132,8 @@ void main() {
 
   group('RecoveryCalculator', () {
     Exercise resolve(String id) => _exercise(id, impacts: const [
-          ExerciseMuscleImpact(muscleGroup: BodyMuscle.chest, role: MuscleRole.primary),
+          ExerciseMuscleImpact(
+              muscleGroup: BodyMuscle.chest, role: MuscleRole.primary),
         ]);
 
     test('recently trained muscle is fatigued (low recovery)', () {
@@ -116,7 +147,10 @@ void main() {
       expect(chest, isNotNull);
       expect(chest!.hasData, isTrue);
       expect(chest.recoveryPercent, lessThan(30));
-      expect(chest.status == RecoveryStatus.freshFatigue || chest.status == RecoveryStatus.heavyFatigue, isTrue);
+      expect(
+          chest.status == RecoveryStatus.freshFatigue ||
+              chest.status == RecoveryStatus.heavyFatigue,
+          isTrue);
     });
 
     test('old training (beyond window) is ignored', () {
@@ -159,9 +193,11 @@ void main() {
 
     test('fatigued primary muscle is warned (severe under 40%)', () {
       final exercise = _exercise('pushup', impacts: const [
-        ExerciseMuscleImpact(muscleGroup: BodyMuscle.chest, role: MuscleRole.primary),
+        ExerciseMuscleImpact(
+            muscleGroup: BodyMuscle.chest, role: MuscleRole.primary),
       ]);
-      final warnings = recoveryWarningsForExercises([exercise], {BodyMuscle.chest: state(BodyMuscle.chest, 30)});
+      final warnings = recoveryWarningsForExercises(
+          [exercise], {BodyMuscle.chest: state(BodyMuscle.chest, 30)});
       expect(warnings, hasLength(1));
       expect(warnings.first.muscle, BodyMuscle.chest);
       expect(warnings.first.severe, isTrue);
@@ -169,16 +205,24 @@ void main() {
 
     test('recovered muscle is not warned', () {
       final exercise = _exercise('pushup', impacts: const [
-        ExerciseMuscleImpact(muscleGroup: BodyMuscle.chest, role: MuscleRole.primary),
+        ExerciseMuscleImpact(
+            muscleGroup: BodyMuscle.chest, role: MuscleRole.primary),
       ]);
-      expect(recoveryWarningsForExercises([exercise], {BodyMuscle.chest: state(BodyMuscle.chest, 85)}), isEmpty);
+      expect(
+          recoveryWarningsForExercises(
+              [exercise], {BodyMuscle.chest: state(BodyMuscle.chest, 85)}),
+          isEmpty);
     });
 
     test('stabilizer-only muscle is not warned', () {
       final exercise = _exercise('plank', impacts: const [
-        ExerciseMuscleImpact(muscleGroup: BodyMuscle.abs, role: MuscleRole.stabilizer),
+        ExerciseMuscleImpact(
+            muscleGroup: BodyMuscle.abs, role: MuscleRole.stabilizer),
       ]);
-      expect(recoveryWarningsForExercises([exercise], {BodyMuscle.abs: state(BodyMuscle.abs, 20)}), isEmpty);
+      expect(
+          recoveryWarningsForExercises(
+              [exercise], {BodyMuscle.abs: state(BodyMuscle.abs, 20)}),
+          isEmpty);
     });
   });
 }

@@ -562,11 +562,81 @@ def error_result(name: str, error_text: str, note: str) -> dict:
 # ============================================================
 
 class AnalyzeWorkoutRequest(BaseModel):
-    description: str
+    # Opis jest OPCJONALNY — starsze wersje aplikacji (i klient wysyłający sam
+    # ustrukturyzowany trening) nie przysyłały tego pola i dostawały HTTP 422
+    # ("Field required", loc: body.description). Gdy opisu brak, budujemy go
+    # z danych sesji/ćwiczeń w build_workout_analysis_prompt.
+    description: Optional[str] = None
+    # Ustrukturyzowany trening z aplikacji Trainer (podsumowanie sesji, wykonane
+    # ćwiczenia i kontekst ostatnich dni). Wcześniej te pola były odrzucane jako
+    # nieznane, więc analiza traciła najlepsze dane, jakie miała.
+    session: Optional[Dict[str, Any]] = None
+    exercises: Optional[List[Dict[str, Any]]] = None
+    recent_history: Optional[List[Dict[str, Any]]] = None
     user: Optional[Dict[str, Any]] = None
     date: Optional[str] = None
     ai_provider: Optional[str] = None
     provider: Optional[str] = None
+
+    def effective_description(self) -> str:
+        """Opis treningu do promptu: jawny z klienta albo złożony z danych sesji."""
+        text = (self.description or "").strip()
+        if text:
+            return text
+        return build_description_from_session(self.session, self.exercises)
+
+
+def build_description_from_session(
+    session: Optional[Dict[str, Any]],
+    exercises: Optional[List[Dict[str, Any]]],
+) -> str:
+    """Składa czytelny opis treningu z ustrukturyzowanych danych sesji.
+
+    Używane, gdy klient nie przysłał pola `description` (zgodność wsteczna).
+    """
+    session = session or {}
+    lines: List[str] = []
+
+    name = str(session.get("name") or "").strip()
+    lines.append(f"Trening: {name}." if name else "Trening.")
+
+    stats: List[str] = []
+    if session.get("duration_minutes") is not None:
+        stats.append(f"czas {to_int(session.get('duration_minutes'), 0)} min")
+    if session.get("exercise_count") is not None:
+        stats.append(f"ćwiczeń: {to_int(session.get('exercise_count'), 0)}")
+    if session.get("set_count") is not None:
+        stats.append(f"serii: {to_int(session.get('set_count'), 0)}")
+    if session.get("volume_kg") is not None:
+        stats.append(f"objętość: {round(to_float(session.get('volume_kg'), 0))} kg")
+    average_rpe = to_float(session.get("average_rpe"), 0)
+    if average_rpe > 0:
+        stats.append(f"średnie RPE {average_rpe:.1f}")
+    if stats:
+        lines.append(", ".join(stats).capitalize() + ".")
+
+    for item in exercises or []:
+        if not isinstance(item, dict):
+            continue
+        label = str(item.get("name") or item.get("exercise_id") or "Ćwiczenie").strip()
+        parts: List[str] = []
+        sets = to_int(item.get("sets"), 0)
+        if sets > 0:
+            parts.append(f"{sets} serie")
+        reps = to_int(item.get("reps"), 0)
+        if reps > 0:
+            parts.append(f"{reps} powt.")
+        weight = to_float(item.get("weight_kg"), 0)
+        if weight > 0:
+            parts.append(f"{weight:g} kg")
+        duration = to_int(item.get("duration_sec"), 0)
+        if duration > 0:
+            parts.append(f"{duration} s")
+        if parts:
+            lines.append(f"- {label}: {' × '.join(parts)}")
+
+    text = "\n".join(lines).strip()
+    return text if text else "Trening bez dodatkowego opisu."
 
 
 class GenerateWorkoutPlanRequest(BaseModel):
@@ -646,19 +716,35 @@ def trainer_error_result(kind: str, error_text: str) -> dict:
 
 
 def build_workout_analysis_prompt(req: AnalyzeWorkoutRequest) -> str:
+    # Sekcja z twardymi danymi z aplikacji — gdy klient je przysłał, są
+    # dokładniejsze niż sam opis tekstowy (serie, ciężary, czasy, typ wpisu).
+    structured_section = ""
+    if req.session or req.exercises:
+        structured_section = f"""
+Dane sesji z aplikacji (źródło prawdy — używaj ich zamiast zgadywania):
+{json.dumps(req.session or {}, ensure_ascii=False)}
+
+Wykonane ćwiczenia (duration_sec dotyczy CZASU DANEGO ĆWICZENIA, nie całej sesji;
+dla ćwiczeń powtórzeniowych może wynosić 0):
+{json.dumps(req.exercises or [], ensure_ascii=False)}
+
+Ostatnie treningi (kontekst):
+{json.dumps(req.recent_history or [], ensure_ascii=False)}
+"""
+
     return f"""
 Jesteś trenerem personalnym, ale odpowiadasz praktycznie, bez lania wody.
 Analizujesz opis treningu użytkownika aplikacji Trainer.
 
 Opis treningu:
-"{req.description}"
+"{req.effective_description()}"
 
 Data:
 {req.date}
 
 Profil użytkownika:
 {json.dumps(req.user or {}, ensure_ascii=False)}
-
+{structured_section}
 Zwróć WYŁĄCZNIE poprawny JSON, bez markdown i bez komentarzy.
 
 Format:
@@ -1113,6 +1199,12 @@ class TrainerChatRequest(BaseModel):
     user: Optional[Dict[str, Any]] = None
     recent_logs: Optional[List[Any]] = None
     active_plan: Optional[Dict[str, Any]] = None
+    # Pełny kontekst danych z aplikacji Trainer: regeneracja mięśni, ostatnie
+    # 7 dni treningów (serie/RPE/objętość), aktywność i Health Connect,
+    # korekta kcal/wody dla Licznika Kalorii, planer tygodnia.
+    context: Optional[Dict[str, Any]] = None
+    # Dodatkowe instrukcje z aplikacji (np. jak korzystać z kontekstu).
+    instructions: Optional[str] = None
     history: Optional[List[Any]] = None
     ai_provider: Optional[str] = None
     provider: Optional[str] = None
@@ -1130,6 +1222,24 @@ def build_trainer_chat_prompt(req: TrainerChatRequest) -> str:
                     lines.append(f"{role}: {content}")
         history_text = "\n".join(lines)
 
+    context_section = ""
+    if req.context:
+        context_section = f"""
+Dane z aplikacji Trainer (kontekst — używaj ich jako źródła prawdy o użytkowniku;
+zawiera: profil, dzisiejszą aktywność i Health Connect, ostatnie 7 dni treningów
+z seriami/RPE/objętością, mapę regeneracji mięśni w %, biegi/cardio, plany
+i programy 30-dniowe, korektę kcal/wody/makro wysyłaną do Licznika Kalorii
+oraz propozycje planera tygodnia):
+{json.dumps(req.context, ensure_ascii=False)}
+"""
+
+    instructions_section = ""
+    if req.instructions:
+        instructions_section = f"""
+Instrukcje z aplikacji:
+{req.instructions}
+"""
+
     return f"""
 Jesteś osobistym trenerem AI w aplikacji Trainer. Odpowiadasz po polsku, krótko,
 praktycznie i konkretnie, jak doświadczony trener personalny.
@@ -1139,13 +1249,13 @@ Pytanie użytkownika:
 
 Profil użytkownika:
 {json.dumps(req.user or {}, ensure_ascii=False)}
-
-Ostatnie treningi:
+{context_section}
+Ostatnie treningi (starszy format — może być puste, gdy dane są w kontekście):
 {json.dumps(req.recent_logs or [], ensure_ascii=False)}
 
 Aktywny plan treningowy:
 {json.dumps(req.active_plan or {}, ensure_ascii=False)}
-
+{instructions_section}
 Wcześniejsza rozmowa:
 {history_text}
 
@@ -1158,10 +1268,16 @@ Format:
 
 Zasady:
 - Bądź konkretny: jeśli pytanie dotyczy ciężaru, powtórzeń, odpoczynku albo techniki, daj jasną wskazówkę.
-- Korzystaj z kontekstu (profil, ostatnie treningi, plan), jeśli jest dostępny.
+- Odpowiadaj na podstawie danych z sekcji "Dane z aplikacji Trainer": regeneracja
+  mięśni (muscle_recovery), treningi z 7 dni (last_7_days), aktywność
+  (cardio_activities, today.health_connect), korekta dla Licznika Kalorii
+  (today.calorie_bridge) i planer tygodnia (weekly_planner).
+- Podawaj liczby z danych (np. "triceps 44% regeneracji", "objętość 3200 kg"),
+  zamiast ogólników.
 - Nie diagnozuj medycznie. Przy bólu albo kontuzji zalecaj ostrożność i konsultację ze specjalistą.
 - Nie zmieniaj planu użytkownika samodzielnie — możesz tylko zaproponować zmianę.
-- Jeżeli brakuje danych, powiedz to wprost i podaj ogólną, bezpieczną radę.
+- Jeżeli danych brakuje w kontekście, powiedz wprost, jakich danych brakuje
+  (np. brak zgód Health Connect, brak treningów), zamiast zgadywać.
 """
 
 

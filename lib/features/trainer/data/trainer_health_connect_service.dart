@@ -7,6 +7,10 @@ abstract class TrainerHealthConnectService {
   Future<TrainerHealthConnectSnapshot> requestPermissions({DateTime? date});
 
   Future<TrainerHealthConnectSnapshot> readDailyData({DateTime? date});
+
+  /// Sesje treningowe (bieg/chód/rower…) z Health Connect dla danego dnia —
+  /// do rozpoznawania aktywności i przeliczania na kcal (z deduplikacją).
+  Future<List<TrainerHealthWorkoutSession>> readWorkoutSessions({DateTime? date});
 }
 
 TrainerHealthConnectService createTrainerHealthConnectService() => implementation.createTrainerHealthConnectService();

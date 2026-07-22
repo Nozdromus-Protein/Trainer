@@ -81,6 +81,8 @@ enum EquipmentType {
   resistanceBand('Guma oporowa'),
   pullUpBar('Drążek'),
   bench('Ławka'),
+  rack('Stojaki / rack'),
+  step('Step / podwyższenie'),
   cardioMachine('Sprzęt cardio'),
   mat('Mata'),
   other('Inny sprzęt');
@@ -88,6 +90,17 @@ enum EquipmentType {
   const EquipmentType(this.label);
 
   final String label;
+
+  /// Stabilny klucz do zapisu w ustawieniach (nazwa wartości enuma).
+  String get key => name;
+
+  static EquipmentType? fromKey(String value) {
+    final normalized = value.trim();
+    for (final type in EquipmentType.values) {
+      if (type.name == normalized) return type;
+    }
+    return null;
+  }
 
   static Set<EquipmentType> fromText(String value) {
     final normalized = value.trim().toLowerCase();
@@ -105,7 +118,8 @@ enum EquipmentType {
     if (normalized.contains('maszyn')) result.add(EquipmentType.machine);
     if (normalized.contains('wyciąg') ||
         normalized.contains('wyciag') ||
-        normalized.contains('cable')) {
+        normalized.contains('cable') ||
+        normalized.contains('link')) {
       result.add(EquipmentType.cable);
     }
     if (normalized.contains('gum') || normalized.contains('band')) {
@@ -113,15 +127,36 @@ enum EquipmentType {
     }
     if (normalized.contains('drąż') ||
         normalized.contains('draz') ||
+        normalized.contains('poręcz') ||
+        normalized.contains('porecz') ||
+        normalized.contains('barier') ||
         normalized.contains('pull-up bar')) {
       result.add(EquipmentType.pullUpBar);
     }
     if (normalized.contains('ławk') || normalized.contains('lawk')) {
       result.add(EquipmentType.bench);
     }
+    // „rack"/„stojaki"/„klatka treningowa" — uwaga: NIE mylić z „klatka
+    // piersiowa" (to partia, nie sprzęt), dlatego dopasowujemy tylko jawne słowa.
+    if (normalized.contains('rack') ||
+        normalized.contains('stojak') ||
+        normalized.contains('klatka treningowa') ||
+        normalized.contains('klatka siłowa') ||
+        normalized.contains('klatka silowa')) {
+      result.add(EquipmentType.rack);
+    }
+    if (normalized.contains('step') ||
+        normalized.contains('podwyż') ||
+        normalized.contains('podwyz') ||
+        normalized.contains('skrzyni') ||
+        normalized.contains('stopień') ||
+        normalized.contains('stopie')) {
+      result.add(EquipmentType.step);
+    }
     if (normalized.contains('bież') ||
         normalized.contains('biez') ||
         normalized.contains('rower') ||
+        normalized.contains('ergometr') ||
         normalized.contains('orbitrek')) {
       result.add(EquipmentType.cardioMachine);
     }

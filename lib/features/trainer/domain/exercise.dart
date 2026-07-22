@@ -1,8 +1,10 @@
 import 'body_muscle.dart';
+import 'exercise_entry_type.dart';
 import 'exercise_media.dart';
 import 'trainer_enums.dart';
 
 export 'body_muscle.dart';
+export 'exercise_entry_type.dart';
 export 'exercise_media.dart';
 
 class Exercise {
@@ -38,6 +40,7 @@ class Exercise {
     this.videoUrl,
     this.mediaItems = const [],
     this.muscleImpacts = const [],
+    this.entryTypeKey = '',
     this.source = 'local',
   });
 
@@ -96,7 +99,26 @@ class Exercise {
   /// Gdy puste, [effectiveMuscleImpacts] wyprowadza je z pola [muscles].
   final List<ExerciseMuscleImpact> muscleImpacts;
 
+  /// Jawny typ wpisu danych serii (klucz [ExerciseEntryType.key]).
+  /// Pusty → typ wyprowadzany z [kExerciseEntryTypeOverrides] albo heurystyki.
+  final String entryTypeKey;
+
   final String source;
+
+  /// Typ wpisu danych dla tego ćwiczenia — decyduje, jakie pola pokazuje
+  /// panel wpisu serii (powtórzenia / ciężar / dodatkowy ciężar / czas / dystans).
+  ExerciseEntryType get entryType {
+    final explicit = ExerciseEntryType.fromKey(entryTypeKey);
+    if (explicit != null) return explicit;
+    final override = kExerciseEntryTypeOverrides[id];
+    if (override != null) return override;
+    return deriveEntryType(
+      name: name,
+      category: category,
+      equipment: equipment,
+      defaultDurationSec: defaultDurationSec,
+    );
+  }
 
   /// Wpływ na partie mięśniowe użyty do liczenia regeneracji.
   /// Jawne [muscleImpacts] mają pierwszeństwo; w przeciwnym razie wyprowadzane
@@ -254,6 +276,7 @@ class Exercise {
     String? videoUrl,
     List<ExerciseMedia>? mediaItems,
     List<ExerciseMuscleImpact>? muscleImpacts,
+    String? entryTypeKey,
     String? source,
   }) {
     return Exercise(
@@ -288,6 +311,7 @@ class Exercise {
       videoUrl: videoUrl ?? this.videoUrl,
       mediaItems: mediaItems ?? this.mediaItems,
       muscleImpacts: muscleImpacts ?? this.muscleImpacts,
+      entryTypeKey: entryTypeKey ?? this.entryTypeKey,
       source: source ?? this.source,
     );
   }
@@ -324,6 +348,7 @@ class Exercise {
         'videoUrl': videoUrl,
         'mediaItems': mediaItems.map((media) => media.toJson()).toList(),
         'muscleImpacts': muscleImpacts.map((impact) => impact.toJson()).toList(),
+        'entryTypeKey': entryTypeKey,
         'source': source,
       };
 
@@ -367,6 +392,7 @@ class Exercise {
         videoUrl: _nullableText(json['videoUrl']),
         mediaItems: _mediaList(json['mediaItems']),
         muscleImpacts: _muscleImpactList(json['muscleImpacts']),
+        entryTypeKey: json['entryTypeKey']?.toString() ?? '',
         source: json['source']?.toString() ?? 'custom',
       );
 }
@@ -396,14 +422,30 @@ List<ExerciseMuscleImpact> _muscleImpactList(Object? value) {
 
 String normalizeTrainingLevel(String value) {
   final normalized = value.trim().toLowerCase();
-  if (normalized.contains('zaaw')) return 'Zaawansowany';
+  // „śred" MUSI być sprawdzone przed „zaaw": słowo „średnioza(zaaw)ansowany"
+  // zawiera podciąg „zaaw", więc sprawdzenie zaawansowanego jako pierwsze
+  // błędnie klasyfikowało średniozaawansowanego jako zaawansowanego.
   if (normalized.contains('śred') ||
       normalized.contains('sred') ||
       normalized.contains('inter') ||
       normalized.contains('mid')) {
     return 'Średniozaawansowany';
   }
+  if (normalized.contains('zaaw')) return 'Zaawansowany';
   return 'Początkujący';
+}
+
+/// Ranga poziomu do porównań: początkujący 0, średniozaawansowany 1,
+/// zaawansowany 2. Pozwala pytać „czy to ćwiczenie jest ponad mój poziom".
+int trainingLevelRank(String value) {
+  switch (normalizeTrainingLevel(value)) {
+    case 'Zaawansowany':
+      return 2;
+    case 'Średniozaawansowany':
+      return 1;
+    default:
+      return 0;
+  }
 }
 
 String? _nullableText(Object? value) {

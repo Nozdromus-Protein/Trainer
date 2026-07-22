@@ -15,6 +15,9 @@ class UnsupportedTrainerHealthConnectService implements TrainerHealthConnectServ
   @override
   Future<TrainerHealthConnectSnapshot> readDailyData({DateTime? date}) async => _snapshot(date, 'Odczyt Health Connect jest dostępny tylko na Androidzie.');
 
+  @override
+  Future<List<TrainerHealthWorkoutSession>> readWorkoutSessions({DateTime? date}) async => const <TrainerHealthWorkoutSession>[];
+
   TrainerHealthConnectSnapshot _snapshot(DateTime? date, String message) {
     final now = DateTime.now();
     final day = date ?? now;

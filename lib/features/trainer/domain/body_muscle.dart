@@ -21,6 +21,11 @@ enum BodyMuscle {
   forearmsBack('Przedramiona (tył)'),
   frontShoulders('Barki przód'),
   rearShoulders('Barki tył'),
+  supraspinatus('Mięsień nadgrzebieniowy'),
+  infraspinatus('Mięsień podgrzebieniowy'),
+  teresMinor('Mięsień obły mniejszy'),
+  teresMajor('Mięsień obły większy'),
+  subscapularis('Mięsień podłopatkowy'),
   hipFlexors('Zginacze bioder'),
   quads('Czworogłowe uda'),
   sternocleidomastoid('Szyja'),
@@ -29,9 +34,21 @@ enum BodyMuscle {
   lats('Najszerszy grzbietu'),
   lowerBack('Dolny grzbiet'),
   upperBack('Górne plecy'),
+  rhomboids('Mięśnie równoległoboczne'),
+  levatorScapulae('Dźwigacz łopatki'),
   sideWaistBack('Boczna talia'),
   glutes('Pośladki'),
   hamstrings('Dwugłowe uda'),
+  gluteMedius('Pośladkowy średni'),
+  tensorFasciaeLatae('Naprężacz powięzi szerokiej'),
+  sartorius('Mięsień krawiecki'),
+  gracilis('Mięsień smukły'),
+  soleus('Mięsień płaszczkowaty'),
+  gastrocnemius('Mięsień brzuchaty łydki'),
+  erectorSpinae('Prostowniki grzbietu'),
+  quadratusLumborum('Mięsień czworoboczny lędźwi'),
+  serratusAnterior('Mięsień zębaty przedni'),
+  transverseAbdominis('Mięsień poprzeczny brzucha'),
   triceps('Triceps');
 
   const BodyMuscle(this.label);
@@ -56,27 +73,96 @@ enum BodyMuscle {
     final t = value.trim().toLowerCase();
     if (t.isEmpty) return null;
     bool has(List<String> keys) => keys.any(t.contains);
+    if (has(['nadgrzeb', 'supraspinat'])) return BodyMuscle.supraspinatus;
+    if (has(['podgrzeb', 'infraspinat'])) return BodyMuscle.infraspinatus;
+    if (has(['obły mniejszy', 'obly mniejszy', 'teres minor']))
+      return BodyMuscle.teresMinor;
+    if (has(['obły większy', 'obly wiekszy', 'teres major']))
+      return BodyMuscle.teresMajor;
+    if (has(['podłopatk', 'podlopatk', 'subscapular']))
+      return BodyMuscle.subscapularis;
+    if (has(['równoległ', 'rownolegl', 'rhomboid']))
+      return BodyMuscle.rhomboids;
+    if (has(['dźwigacz łopat', 'dzwigacz lopat', 'levator scapula']))
+      return BodyMuscle.levatorScapulae;
+    if (has(['pośladkowy średni', 'posladkowy sredni', 'gluteus medius']))
+      return BodyMuscle.gluteMedius;
+    if (has(['naprężacz powięzi', 'naprezacz powiezi', 'tensor fascia']))
+      return BodyMuscle.tensorFasciaeLatae;
+    if (has(['krawieck', 'sartorius'])) return BodyMuscle.sartorius;
+    if (has(['smukły', 'smukly', 'gracilis'])) return BodyMuscle.gracilis;
+    if (has(['płaszczkow', 'plaszczkow', 'soleus'])) return BodyMuscle.soleus;
+    if (has(['brzuchaty łyd', 'brzuchaty lyd', 'gastrocnem']))
+      return BodyMuscle.gastrocnemius;
+    if (has(['prostownik grzbiet', 'prostowniki grzbiet', 'erector spinae']))
+      return BodyMuscle.erectorSpinae;
+    if (has(
+        ['czworoboczny lędźwi', 'czworoboczny ledzwi', 'quadratus lumborum']))
+      return BodyMuscle.quadratusLumborum;
+    if (has(['zębaty przedni', 'zebaty przedni', 'serratus anterior']))
+      return BodyMuscle.serratusAnterior;
+    if (has([
+      'poprzeczny brzucha',
+      'transverse abdominis',
+      'transversus abdominis'
+    ])) return BodyMuscle.transverseAbdominis;
     if (has(['klatk', 'chest', 'pierś', 'piers'])) return BodyMuscle.chest;
     if (has(['skoś', 'skos', 'oblique', 'boczn'])) return BodyMuscle.obliques;
-    if (has(['brzuch', 'core', 'abs', 'prosty brzuc', 'poprzeczn'])) return BodyMuscle.abs;
+    if (has(['brzuch', 'core', 'abs', 'prosty brzuc', 'poprzeczn']))
+      return BodyMuscle.abs;
     if (has(['przywodz', 'adduct'])) return BodyMuscle.adductors;
-    if (has(['biceps', 'dwugłowe ramienia', 'dwuglowe ramienia'])) return BodyMuscle.biceps;
+    if (has(['biceps', 'dwugłowe ramienia', 'dwuglowe ramienia']))
+      return BodyMuscle.biceps;
     if (has(['triceps', 'trójgłowe', 'trojglowe'])) return BodyMuscle.triceps;
     if (has(['przedram', 'forearm'])) return BodyMuscle.forearmsFront;
-    if (has(['łyd', 'lyd', 'calf', 'calves', 'brzuchaty łyd'])) return BodyMuscle.calvesFront;
+    if (has(['łyd', 'lyd', 'calf', 'calves', 'brzuchaty łyd']))
+      return BodyMuscle.calvesFront;
     if (has(['piszcz', 'tibialis'])) return BodyMuscle.tibialis;
     if (has(['kaptur', 'czworobocz', 'trap'])) return BodyMuscle.traps;
     if (has(['najszer', 'lat', 'grzbiet'])) return BodyMuscle.lats;
-    if (has(['dolny grzbiet', 'dolne plec', 'prostownik', 'lower back', 'lędźw', 'ledzw'])) return BodyMuscle.lowerBack;
-    if (has(['górne plec', 'gorne plec', 'upper back', 'rhomb', 'równoleg', 'rownoleg'])) return BodyMuscle.upperBack;
+    if (has([
+      'dolny grzbiet',
+      'dolne plec',
+      'prostownik',
+      'lower back',
+      'lędźw',
+      'ledzw'
+    ])) return BodyMuscle.lowerBack;
+    if (has([
+      'górne plec',
+      'gorne plec',
+      'upper back',
+      'rhomb',
+      'równoleg',
+      'rownoleg'
+    ])) return BodyMuscle.upperBack;
     if (has(['plec', 'back'])) return BodyMuscle.lats;
-    if (has(['bark tył', 'bark tyl', 'tylne aktony', 'rear delt', 'tył bark', 'tyl bark'])) return BodyMuscle.rearShoulders;
-    if (has(['bark', 'naramien', 'shoulder', 'delt', 'aktony'])) return BodyMuscle.frontShoulders;
-    if (has(['zginacz bioder', 'hip flexor', 'biodr'])) return BodyMuscle.hipFlexors;
-    if (has(['czworogł', 'czworogl', 'quad', 'przód uda', 'przod uda', 'uda przod'])) return BodyMuscle.quads;
-    if (has(['dwugł', 'dwugl', 'hamstring', 'tył uda', 'tyl uda', 'dwugłowe uda'])) return BodyMuscle.hamstrings;
+    if (has([
+      'bark tył',
+      'bark tyl',
+      'tylne aktony',
+      'rear delt',
+      'tył bark',
+      'tyl bark'
+    ])) return BodyMuscle.rearShoulders;
+    if (has(['bark', 'naramien', 'shoulder', 'delt', 'aktony']))
+      return BodyMuscle.frontShoulders;
+    if (has(['zginacz bioder', 'hip flexor', 'biodr']))
+      return BodyMuscle.hipFlexors;
+    if (has([
+      'czworogł',
+      'czworogl',
+      'quad',
+      'przód uda',
+      'przod uda',
+      'uda przod'
+    ])) return BodyMuscle.quads;
+    if (has(
+        ['dwugł', 'dwugl', 'hamstring', 'tył uda', 'tyl uda', 'dwugłowe uda']))
+      return BodyMuscle.hamstrings;
     if (has(['pośladk', 'posladk', 'glute', 'pupa'])) return BodyMuscle.glutes;
-    if (has(['szyj', 'kark', 'neck', 'mostkowo'])) return BodyMuscle.sternocleidomastoid;
+    if (has(['szyj', 'kark', 'neck', 'mostkowo']))
+      return BodyMuscle.sternocleidomastoid;
     if (has(['uda', 'noga', 'nogi', 'leg'])) return BodyMuscle.quads;
     if (has(['talia', 'waist'])) return BodyMuscle.sideWaistBack;
     return null;
@@ -142,7 +228,8 @@ class ExerciseMuscleImpact {
     if (muscle == null) return null;
     final role = MuscleRole.fromKey(json['role']);
     final weight = (json['impactWeight'] as num?)?.toDouble();
-    return ExerciseMuscleImpact(muscleGroup: muscle, role: role, impactWeight: weight);
+    return ExerciseMuscleImpact(
+        muscleGroup: muscle, role: role, impactWeight: weight);
   }
 }
 
@@ -175,25 +262,60 @@ const Map<BodyMuscle, List<String>> kFrontMuscleMasks = {
     'forearms_front_outer_mask.png',
   ],
   BodyMuscle.frontShoulders: ['front_shoulders_mask.png'],
+  BodyMuscle.subscapularis: ['front_shoulders_mask.png'],
+  BodyMuscle.serratusAnterior: ['obliques_upper_mask.png'],
+  BodyMuscle.transverseAbdominis: [
+    'abs_lower_middle_mask.png',
+    'abs_lower_mask.png'
+  ],
   BodyMuscle.hipFlexors: ['hip_flexors.png'],
   BodyMuscle.quads: ['quads_inner_mask.png', 'quads_outer_mask.png'],
+  BodyMuscle.sartorius: ['quads_inner_mask.png'],
+  BodyMuscle.gracilis: ['adductors_mask.png'],
+  BodyMuscle.tensorFasciaeLatae: ['hip_flexors.png'],
   BodyMuscle.sternocleidomastoid: ['sternocleidomastoid_mask.png'],
   BodyMuscle.tibialis: ['tibialis_mask.png'],
 };
 
 const Map<BodyMuscle, List<String>> kBackMuscleMasks = {
   BodyMuscle.adductors: ['adductors_back_mask.png'],
-  BodyMuscle.calvesBack: ['calves_back_inner_mask.png', 'calves_back_outer_mask.png'],
-  BodyMuscle.forearmsBack: ['forearms_inner_back_mask.png', 'forearms_outer_back_mask.png'],
+  BodyMuscle.calvesBack: [
+    'calves_back_inner_mask.png',
+    'calves_back_outer_mask.png'
+  ],
+  BodyMuscle.soleus: [
+    'calves_back_inner_mask.png',
+    'calves_back_outer_mask.png'
+  ],
+  BodyMuscle.gastrocnemius: [
+    'calves_back_inner_mask.png',
+    'calves_back_outer_mask.png'
+  ],
+  BodyMuscle.forearmsBack: [
+    'forearms_inner_back_mask.png',
+    'forearms_outer_back_mask.png'
+  ],
   BodyMuscle.glutes: ['glutes_mask.png'],
-  BodyMuscle.hamstrings: ['hamstrings_inner_mask.png', 'hamstrings_outer_mask.png'],
+  BodyMuscle.gluteMedius: ['glutes_mask.png'],
+  BodyMuscle.hamstrings: [
+    'hamstrings_inner_mask.png',
+    'hamstrings_outer_mask.png'
+  ],
   BodyMuscle.lats: ['lats_mask.png'],
   BodyMuscle.lowerBack: ['lower_back_mask.png'],
+  BodyMuscle.erectorSpinae: ['lower_back_mask.png'],
+  BodyMuscle.quadratusLumborum: ['side_waist_back_mask.png'],
   BodyMuscle.rearShoulders: ['rear_shoulders_mask.png'],
+  BodyMuscle.supraspinatus: ['upper_back_mask.png'],
+  BodyMuscle.infraspinatus: ['upper_back_mask.png'],
+  BodyMuscle.teresMinor: ['rear_shoulders_mask.png'],
+  BodyMuscle.teresMajor: ['lats_mask.png'],
   BodyMuscle.sideWaistBack: ['side_waist_back_mask.png'],
   BodyMuscle.traps: ['traps_mask.png'],
   BodyMuscle.triceps: ['triceps_mask.png'],
   BodyMuscle.upperBack: ['upper_back_mask.png'],
+  BodyMuscle.rhomboids: ['upper_back_mask.png'],
+  BodyMuscle.levatorScapulae: ['traps_mask.png'],
 };
 
 /// Mapa masek dla danej strony modelu.

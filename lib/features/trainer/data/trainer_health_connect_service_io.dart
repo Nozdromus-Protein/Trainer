@@ -236,6 +236,57 @@ class TrainerHealthConnectServiceIo implements TrainerHealthConnectService {
     );
   }
 
+  @override
+  Future<List<TrainerHealthWorkoutSession>> readWorkoutSessions({DateTime? date}) async {
+    final day = _dayOnly(date ?? DateTime.now());
+    if (!Platform.isAndroid) return const <TrainerHealthWorkoutSession>[];
+    try {
+      await _health.configure();
+      final start = day;
+      final now = DateTime.now();
+      final rawEnd = start.add(const Duration(days: 1));
+      final end = _sameDate(day, now) && rawEnd.isAfter(now) ? now : rawEnd;
+      final points = await _health.getHealthDataFromTypes(
+        types: const [HealthDataType.WORKOUT],
+        startTime: start,
+        endTime: end,
+      );
+      final unique = _health.removeDuplicates(points);
+      final sessions = <TrainerHealthWorkoutSession>[];
+      for (final point in unique) {
+        final value = point.value;
+        var type = '';
+        var kcal = 0.0;
+        var distanceMeters = 0.0;
+        if (value is WorkoutHealthValue) {
+          type = value.workoutActivityType.name;
+          kcal = (value.totalEnergyBurned ?? 0).toDouble();
+          distanceMeters = (value.totalDistance ?? 0).toDouble();
+        } else {
+          // Odporne parsowanie przez JSON, gdy plugin odda inny typ wartości.
+          final json = value.toJson();
+          type = (json['workoutActivityType'] ?? json['workout_activity_type'] ?? '').toString();
+          kcal = double.tryParse((json['totalEnergyBurned'] ?? json['total_energy_burned'] ?? '').toString()) ?? 0;
+          distanceMeters = double.tryParse((json['totalDistance'] ?? json['total_distance'] ?? '').toString()) ?? 0;
+        }
+        sessions.add(
+          TrainerHealthWorkoutSession(
+            sourceId: point.uuid,
+            activityType: type,
+            start: point.dateFrom,
+            end: point.dateTo,
+            energyKcal: kcal < 0 ? 0 : kcal,
+            distanceKm: distanceMeters <= 0 ? 0 : distanceMeters / 1000,
+            sourceName: point.sourceName,
+          ),
+        );
+      }
+      return sessions;
+    } on Object {
+      return const <TrainerHealthWorkoutSession>[];
+    }
+  }
+
   Future<_PermissionState> _readPermissionState(bool isAvailable) async {
     if (!isAvailable) {
       return const _PermissionState(

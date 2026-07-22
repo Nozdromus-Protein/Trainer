@@ -78,7 +78,7 @@ void main() {
   });
 
   testWidgets(
-      'plans page and editor render without overflow on a narrow screen',
+      'training tab shows 30-day programs and cardio tiles without overflow',
       (tester) async {
     SharedPreferences.setMockInitialValues({});
     final store = AppStore();
@@ -97,23 +97,22 @@ void main() {
     );
     await tester.pumpAndSettle();
 
-    expect(find.text('Plany treningowe'), findsOneWidget);
-    expect(find.text('Dodaj plan'), findsOneWidget);
-    expect(find.text('Aktywny plan'), findsOneWidget);
+    // Nowa zakładka „Trening": programy 30-dniowe zamiast kafelka planu lokalnego.
+    expect(find.text('Trening'), findsOneWidget);
+    expect(find.text('Programy 30-dniowe'), findsOneWidget);
+    expect(find.text('Brzuch i core'), findsOneWidget);
+    // Usunięte elementy starego układu.
+    expect(find.text('Dodaj plan'), findsNothing);
+    expect(find.text('Narzędzia treningowe'), findsNothing);
     expect(tester.takeException(), isNull);
 
-    await tester.tap(find.text('Dodaj plan'));
-    await tester.pumpAndSettle();
-    expect(find.text('Nowy plan treningowy'), findsOneWidget);
-    expect(find.text('Nazwa planu'), findsOneWidget);
-    expect(find.text('Cel planu'), findsOneWidget);
-    expect(tester.takeException(), isNull);
-
-    await tester.enterText(find.byType(TextField).first, 'Plan mobilny');
-    await tester.tap(find.widgetWithText(FilledButton, 'Utwórz plan'));
-    await tester.pumpAndSettle();
-
-    expect(find.text('Plan mobilny'), findsOneWidget);
+    // Sekcja cardio jest niżej — przewiń do kafelka.
+    await tester.scrollUntilVisible(
+      find.text('Cardio dla początkujących'),
+      400,
+      scrollable: find.byType(Scrollable).first,
+    );
+    expect(find.text('Cardio dla początkujących'), findsOneWidget);
     expect(tester.takeException(), isNull);
   });
 

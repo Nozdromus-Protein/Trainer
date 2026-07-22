@@ -15,6 +15,7 @@ class TrainerLocalData {
     required this.trainingImpacts,
     required this.activityEntries,
     required this.healthConnectSnapshots,
+    this.bodyAnalyses = const [],
   });
 
   final List<WorkoutLog> sessions;
@@ -26,6 +27,7 @@ class TrainerLocalData {
   final List<TrainingImpact> trainingImpacts;
   final List<TrainerActivityEntry> activityEntries;
   final List<TrainerHealthConnectSnapshot> healthConnectSnapshots;
+  final List<BodyAnalysisResult> bodyAnalyses;
 }
 
 class TrainerLocalRepository {
@@ -37,6 +39,7 @@ class TrainerLocalRepository {
   static const exerciseLibraryPreferencesKey = 'exercise_library_preferences_v1';
   static const activeWorkoutSessionKey = 'active_workout_session_v1';
   static const bodyMeasurementsKey = 'body_measurements_v1';
+  static const bodyAnalysesKey = 'body_analyses_v1';
   static const trainingImpactsKey = 'training_impacts_v1';
   static const activityEntriesKey = 'activity_entries_v1';
   static const healthConnectSnapshotsKey = 'health_connect_snapshots_v1';
@@ -84,6 +87,10 @@ class TrainerLocalRepository {
       healthConnectSnapshots: _decodeList(
         preferences.getString(healthConnectSnapshotsKey),
         TrainerHealthConnectSnapshot.fromJson,
+      ),
+      bodyAnalyses: _decodeList(
+        preferences.getString(bodyAnalysesKey),
+        BodyAnalysisResult.fromJson,
       ),
     );
   }
@@ -144,6 +151,18 @@ class TrainerLocalRepository {
       bodyMeasurementsKey,
       jsonEncode(
         bodyMeasurements.map((measurement) => measurement.toJson()).toList(),
+      ),
+    );
+  }
+
+  Future<void> saveBodyAnalyses(
+    Iterable<BodyAnalysisResult> bodyAnalyses,
+  ) async {
+    final preferences = await _prefs;
+    await preferences.setString(
+      bodyAnalysesKey,
+      jsonEncode(
+        bodyAnalyses.map((analysis) => analysis.toJson()).toList(),
       ),
     );
   }

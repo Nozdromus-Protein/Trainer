@@ -205,7 +205,9 @@ void main() {
       plan: testPlan,
       day: testPlan.days.single,
     );
-    await tester.binding.setSurfaceSize(const Size(320, 720));
+    // Wąski ekran (test overflowów poziomych); wysoka powierzchnia, żeby leniwy
+    // ListView zbudował sekcje strony bez kruchej choreografii przewijania.
+    await tester.binding.setSurfaceSize(const Size(320, 2200));
     addTearDown(() => tester.binding.setSurfaceSize(null));
 
     await tester.pumpWidget(
@@ -219,7 +221,7 @@ void main() {
     );
     await tester.pump();
 
-    expect(find.text('Aktywny trening'), findsOneWidget);
+    expect(find.text('Trening — szczegóły'), findsOneWidget);
     expect(find.text('Zapisz serię'), findsOneWidget);
     expect(find.text('Następne ćwiczenie', skipOffstage: false), findsOneWidget);
     expect(find.text('Pomiń ćwiczenie', skipOffstage: false), findsOneWidget);
@@ -231,18 +233,13 @@ void main() {
       rpe: 7,
     );
     await tester.pump();
-    await tester.drag(
-      find.byType(ListView).first,
-      const Offset(0, -500),
-    );
-    await tester.pump();
 
-    expect(find.text('Wykonane serie'), findsOneWidget);
-    expect(find.text('10 kg × 12 powt.'), findsOneWidget);
     expect(find.text('Przerwa między seriami'), findsOneWidget);
     expect(find.text('Pauza'), findsOneWidget);
     expect(find.text('−30 s'), findsOneWidget);
     expect(find.text('+30 s'), findsOneWidget);
+    expect(find.text('Wykonane serie'), findsOneWidget);
+    expect(find.text('10 kg × 12 powt.'), findsOneWidget);
     expect(tester.takeException(), isNull);
 
     await tester.scrollUntilVisible(
@@ -273,7 +270,9 @@ void main() {
     await tester.pumpWidget(
       MaterialApp(
         theme: buildTheme(const Color(0xFF24D6A3), true),
-        home: WorkoutSummaryPage(
+        home: AppScope(
+          store: store,
+          child: WorkoutSummaryPage(
           summary: CompletedWorkoutSummary(
             sessionId: 'summary-1',
             name: 'Plan aktywny · Góra',
@@ -302,6 +301,7 @@ void main() {
               createdAt: DateTime(2026, 6, 23, 19),
             ),
           ),
+          ),
         ),
       ),
     );
@@ -310,8 +310,9 @@ void main() {
     expect(find.text('Trening zakończony'), findsOneWidget);
     expect(find.text('45:00'), findsOneWidget);
     expect(find.text('Wpływ na Licznik Kalorii'), findsOneWidget);
+    expect(find.text('+160 kcal sugestii'), findsOneWidget);
     expect(find.text('+700 ml wody'), findsOneWidget);
-    expect(find.text('+30 g białka'), findsOneWidget);
+    expect(find.text('+30 g białka'), findsNothing);
     expect(tester.takeException(), isNull);
   });
 }

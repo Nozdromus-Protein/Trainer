@@ -111,8 +111,6 @@ void main() {
     await tester.pump();
 
     expect(find.text('Progres'), findsOneWidget);
-    expect(find.text('Objętość tygodniowa'), findsOneWidget);
-    expect(find.text('Liczba treningów'), findsOneWidget);
     expect(
       find.descendant(
         of: find.byKey(const Key('progress_week_workouts')),
@@ -142,6 +140,21 @@ void main() {
       findsOneWidget,
     );
     expect(tester.takeException(), isNull);
+
+    // Wykresy są teraz w leniwej liście sliverów — przewiń, aby je zbudować.
+    await tester.scrollUntilVisible(
+      find.text('Objętość tygodniowa'),
+      300,
+      scrollable: find.byType(Scrollable).first,
+    );
+    expect(find.text('Objętość tygodniowa'), findsOneWidget);
+
+    await tester.scrollUntilVisible(
+      find.text('Liczba treningów'),
+      300,
+      scrollable: find.byType(Scrollable).first,
+    );
+    expect(find.text('Liczba treningów'), findsOneWidget);
 
     await tester.scrollUntilVisible(
       find.text('Najrzadziej trenowane partie'),

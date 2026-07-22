@@ -1,3 +1,15 @@
+import 'program_variant.dart';
+
+/// Maksymalna ręczna korekta intensywności w krokach (±6) — jedno źródło
+/// prawdy dla planu, dnia i logiki w `deload_cycle.dart`.
+/// Jeden krok to ≈5% ciężaru i +1 powtórzenie; seria dochodzi co drugi krok.
+const int kMaxIntensitySteps = 6;
+
+/// Maksymalna korekta ŁĄCZNA (program + dzień). Obie gałki mają po
+/// ±[kMaxIntensitySteps], więc razem dają dwukrotność — dzień da się podkręcić
+/// ponad to, co ustawione dla całego programu.
+const int kMaxCombinedIntensitySteps = kMaxIntensitySteps * 2;
+
 /// Status pojedynczego dnia programu w widoku liniowym (Etap 28).
 enum WorkoutDayStatus {
   /// Dzień ukończony.
@@ -28,6 +40,10 @@ class WorkoutPlan {
     this.imageAsset,
     this.allowAnyDay = false,
     this.completedDays = const <int>{},
+    this.activeVariantId = '',
+    this.variantHistory = const <ProgramVariantChange>[],
+    this.media,
+    this.intensitySteps = 0,
   });
 
   final String id;
@@ -50,6 +66,21 @@ class WorkoutPlan {
   /// Indeksy dni (w [days]) oznaczonych jako ukończone. Etap 28.
   final Set<int> completedDays;
 
+  /// Aktualnie zastosowany wariant programu ('' = szablon bazowy).
+  final String activeVariantId;
+
+  /// Historia zmian wariantów — moment każdej zmiany zostaje oznaczony,
+  /// ukończone dni nigdy nie są przeliczane wstecz.
+  final List<ProgramVariantChange> variantHistory;
+
+  /// Okładka/obraz programu (osobne pole — nie dotyka obrazów ćwiczeń).
+  final ProgramMedia? media;
+
+  /// Ręczna korekta intensywności całego programu w krokach
+  /// (−[kMaxIntensitySteps]..+[kMaxIntensitySteps]).
+  /// Nakładka NAD automatyczną rampą cyklu; 0 = zestawy jak zaprojektowane.
+  final int intensitySteps;
+
   WorkoutPlan copyWith({
     String? id,
     String? name,
@@ -61,6 +92,11 @@ class WorkoutPlan {
     String? imageAsset,
     bool? allowAnyDay,
     Set<int>? completedDays,
+    String? activeVariantId,
+    List<ProgramVariantChange>? variantHistory,
+    ProgramMedia? media,
+    bool clearMedia = false,
+    int? intensitySteps,
   }) {
     return WorkoutPlan(
       id: id ?? this.id,
@@ -73,6 +109,10 @@ class WorkoutPlan {
       imageAsset: imageAsset ?? this.imageAsset,
       allowAnyDay: allowAnyDay ?? this.allowAnyDay,
       completedDays: completedDays ?? this.completedDays,
+      activeVariantId: activeVariantId ?? this.activeVariantId,
+      variantHistory: variantHistory ?? this.variantHistory,
+      media: clearMedia ? null : (media ?? this.media),
+      intensitySteps: intensitySteps ?? this.intensitySteps,
     );
   }
 
@@ -104,7 +144,8 @@ class WorkoutPlan {
   }
 
   /// Czy cały program jest ukończony.
-  bool get isProgramCompleted => days.isNotEmpty && currentDayIndex >= days.length;
+  bool get isProgramCompleted =>
+      days.isNotEmpty && currentDayIndex >= days.length;
 
   /// Status dnia o danym indeksie (z uwzględnieniem trybu „dowolny dzień").
   WorkoutDayStatus statusForDay(int index) {
@@ -113,7 +154,9 @@ class WorkoutPlan {
     final locked = !allowAnyDay && index > currentDayIndex;
     if (locked) return WorkoutDayStatus.locked;
     if (isRestDay(days[index])) return WorkoutDayStatus.rest;
-    if (!allowAnyDay && index == currentDayIndex) return WorkoutDayStatus.active;
+    if (!allowAnyDay && index == currentDayIndex) {
+      return WorkoutDayStatus.active;
+    }
     return WorkoutDayStatus.available;
   }
 
@@ -134,6 +177,13 @@ class WorkoutPlan {
         'imageAsset': imageAsset,
         'allowAnyDay': allowAnyDay,
         'completedDays': completedDays.toList()..sort(),
+        if (activeVariantId.isNotEmpty) 'activeVariantId': activeVariantId,
+        if (variantHistory.isNotEmpty)
+          'variantHistory': [
+            for (final change in variantHistory) change.toJson(),
+          ],
+        if (media != null) 'media': media!.toJson(),
+        if (intensitySteps != 0) 'intensitySteps': intensitySteps,
       };
 
   factory WorkoutPlan.fromJson(Map<String, dynamic> json) => WorkoutPlan(
@@ -156,6 +206,19 @@ class WorkoutPlan {
             .map((value) => (value as num?)?.toInt())
             .whereType<int>()
             .toSet(),
+        activeVariantId: json['activeVariantId']?.toString() ?? '',
+        variantHistory: [
+          for (final raw in (json['variantHistory'] as List? ?? const []))
+            if (raw is Map)
+              ProgramVariantChange.fromJson(Map<String, dynamic>.from(raw)),
+        ],
+        media: json['media'] is Map
+            ? ProgramMedia.fromJson(
+                Map<String, dynamic>.from(json['media'] as Map),
+              )
+            : null,
+        intensitySteps: ((json['intensitySteps'] as num?)?.toInt() ?? 0)
+            .clamp(-kMaxIntensitySteps, kMaxIntensitySteps),
       );
 }
 
@@ -196,26 +259,74 @@ String normalizeWorkoutPlanGoal(String value) {
   return 'Sylwetka';
 }
 
+/// Charakter dnia w mikrocyklu programu.
+///
+/// Zapisywany razem z planem, żeby po wygenerowaniu programu dało się odróżnić
+/// dzień CIĘŻKI (siłowy) od techniki/mobilności/kondycji — wcześniej ta wiedza
+/// istniała tylko w generatorze katalogu i ginęła bezpowrotnie.
+enum WorkoutDayKind {
+  /// Dzień siłowy — CIĘŻKI: wymaga osobnego programu rozgrzewkowego.
+  strength('strength', 'Siłowy'),
+  technique('technique', 'Technika'),
+  mobility('mobility', 'Mobilność'),
+  conditioning('conditioning', 'Kondycja'),
+  rest('rest', 'Odpoczynek'),
+
+  /// Nieznany — starszy zapis albo plan własny; charakter wnioskowany z treści.
+  unknown('', 'Nieokreślony');
+
+  const WorkoutDayKind(this.key, this.label);
+
+  final String key;
+  final String label;
+
+  /// Czy ten dzień jest ciężki (wymaga rozgrzewki jako osobnego programu).
+  bool get isHeavy => this == WorkoutDayKind.strength;
+
+  static WorkoutDayKind fromKey(Object? value) {
+    final normalized = value?.toString().trim() ?? '';
+    if (normalized.isEmpty) return WorkoutDayKind.unknown;
+    for (final kind in WorkoutDayKind.values) {
+      if (kind.key == normalized || kind.name == normalized) return kind;
+    }
+    return WorkoutDayKind.unknown;
+  }
+}
+
 class WorkoutDay {
   const WorkoutDay({
     required this.weekday,
     required this.title,
     required this.items,
+    this.kind = WorkoutDayKind.unknown,
+    this.intensitySteps = 0,
   });
 
   final int weekday;
   final String title;
   final List<PlanItem> items;
 
+  /// Ręczna korekta intensywności TEGO dnia, sumowana z korektą całego
+  /// programu ([WorkoutPlan.intensitySteps]). Zakres ±[kMaxIntensitySteps].
+  final int intensitySteps;
+
+  /// Charakter dnia. [WorkoutDayKind.unknown] dla starszych zapisów i planów
+  /// własnych — wtedy „ciężkość" wnioskuje się z zawartości dnia.
+  final WorkoutDayKind kind;
+
   WorkoutDay copyWith({
     int? weekday,
     String? title,
     List<PlanItem>? items,
+    WorkoutDayKind? kind,
+    int? intensitySteps,
   }) {
     return WorkoutDay(
       weekday: weekday ?? this.weekday,
       title: title ?? this.title,
       items: items ?? this.items,
+      kind: kind ?? this.kind,
+      intensitySteps: intensitySteps ?? this.intensitySteps,
     );
   }
 
@@ -223,6 +334,8 @@ class WorkoutDay {
         'weekday': weekday,
         'title': title,
         'items': items.map((item) => item.toJson()).toList(),
+        if (kind != WorkoutDayKind.unknown) 'kind': kind.key,
+        if (intensitySteps != 0) 'intensitySteps': intensitySteps,
       };
 
   factory WorkoutDay.fromJson(Map<String, dynamic> json) => WorkoutDay(
@@ -234,6 +347,9 @@ class WorkoutDay {
               (value) => PlanItem.fromJson(Map<String, dynamic>.from(value)),
             )
             .toList(),
+        kind: WorkoutDayKind.fromKey(json['kind']),
+        intensitySteps: ((json['intensitySteps'] as num?)?.toInt() ?? 0)
+            .clamp(-kMaxIntensitySteps, kMaxIntensitySteps),
       );
 }
 

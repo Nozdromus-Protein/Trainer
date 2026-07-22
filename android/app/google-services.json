@@ -1,0 +1,47 @@
+{
+  "project_info": {
+    "project_number": "398578860255",
+    "project_id": "trainer-7071d",
+    "storage_bucket": "trainer-7071d.firebasestorage.app"
+  },
+  "client": [
+    {
+      "client_info": {
+        "mobilesdk_app_id": "1:398578860255:android:d77972dba0d45bcbaf296a",
+        "android_client_info": {
+          "package_name": "com.example.licznik_treningu"
+        }
+      },
+      "oauth_client": [
+        {
+          "client_id": "398578860255-1bqm035gg2gfkl4i02tq2dm619hcg4o5.apps.googleusercontent.com",
+          "client_type": 1,
+          "android_info": {
+            "package_name": "com.example.licznik_treningu",
+            "certificate_hash": "d63871cdb70118b99c3eacfc73e3f4bc6bde55ae"
+          }
+        },
+        {
+          "client_id": "398578860255-7goee90e3ntjsc81h025sbur2oog5uq4.apps.googleusercontent.com",
+          "client_type": 3
+        }
+      ],
+      "api_key": [
+        {
+          "current_key": "AIzaSyBhrFrgq8300g2fFgR689424evLxxEWzd0"
+        }
+      ],
+      "services": {
+        "appinvite_service": {
+          "other_platform_oauth_client": [
+            {
+              "client_id": "398578860255-7goee90e3ntjsc81h025sbur2oog5uq4.apps.googleusercontent.com",
+              "client_type": 3
+            }
+          ]
+        }
+      }
+    }
+  ],
+  "configuration_version": "1"
+}
