@@ -15193,8 +15193,13 @@ class CalorieBridgeStatusCard extends StatelessWidget {
             ] else
               row('Cel dzienny (sylwetka)', 'wybierz docelową sylwetkę'),
             row('Dziś przekazane (trening)', '$todayBurned kcal'),
-            row('Korekta dnia (pakiet)',
-                '+${todayAdjustment.totalAdjustmentKcal} kcal'),
+            row('Spalone dziś (cały dzień)',
+                '${todayAdjustment.totalAdjustmentKcal} kcal'),
+            row('Do celu w Kaloriach (sport)',
+                '+${todayAdjustment.sportKcal} kcal'),
+            if (todayAdjustment.baselineActivityKcal > 0)
+              row('Praca i kroki (w bazie)',
+                  '${todayAdjustment.baselineActivityKcal} kcal · nie podbija celu'),
             if (todayAdjustment.extraWaterMl > 0)
               row('Dodatkowa woda', '+${todayAdjustment.extraWaterMl} ml'),
             if (todayAdjustment.extraCarbsG > 0)
@@ -15413,6 +15418,54 @@ class TodayActivityCard extends StatelessWidget {
             ],
           ],
         ),
+      ),
+    );
+  }
+}
+
+/// Rozdziela dwie liczby, które łatwo pomylić: ile dziś SPALIŁEŚ, a ile z tego
+/// realnie wraca do celu kalorycznego w Liczniku Kalorii.
+///
+/// Praca zawodowa i zwykłe kroki są częścią bazowego zapotrzebowania, więc
+/// świecą tu jako informacja — nie jako korekta. Bez tego rozdzielenia dzień
+/// bez ciężkiego treningu potrafił raportować „+867 kcal korekty".
+class _AdjustmentSplitNote extends StatelessWidget {
+  const _AdjustmentSplitNote({required this.adjustment});
+
+  final TrainerDailyAdjustment adjustment;
+
+  @override
+  Widget build(BuildContext context) {
+    final theme = Theme.of(context);
+    final scheme = theme.colorScheme;
+    final baseline = adjustment.baselineActivityKcal;
+    return Container(
+      padding: const EdgeInsets.fromLTRB(12, 10, 12, 10),
+      decoration: BoxDecoration(
+        color: scheme.surfaceContainerHighest.withValues(alpha: 0.45),
+        borderRadius: BorderRadius.circular(12),
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Text(
+            'Spalone dziś: ${adjustment.totalAdjustmentKcal} kcal · '
+            'do celu: +${adjustment.sportKcal} kcal',
+            style: theme.textTheme.labelLarge
+                ?.copyWith(fontWeight: FontWeight.w900),
+          ),
+          const SizedBox(height: 3),
+          Text(
+            baseline > 0
+                ? 'Do celu wchodzi tylko sport po korekcie zaufania (siła 60%, '
+                    'bieg 70%). Praca i zwykłe kroki ($baseline kcal) są już '
+                    'w Twoim bazowym zapotrzebowaniu, więc nie liczą się drugi raz.'
+                : 'Do celu wchodzi tylko sport po korekcie zaufania (siła 60%, '
+                    'bieg 70%). Zwykłe kroki są już w bazowym zapotrzebowaniu.',
+            style: theme.textTheme.labelSmall
+                ?.copyWith(color: scheme.onSurfaceVariant, height: 1.35),
+          ),
+        ],
       ),
     );
   }
@@ -16663,8 +16716,13 @@ class DailyAdjustmentSummaryCard extends StatelessWidget {
                   Expanded(
                       child: _ActivityMetricTile(
                           icon: Icons.local_fire_department_outlined,
-                          value: '+${adjustment.totalAdjustmentKcal}',
-                          label: 'Korekta kcal')),
+                          // Kafelek pokazuje to, co REALNIE podnosi cel dnia,
+                          // czyli sam sport po korekcie zaufania. Wcześniej
+                          // była tu cała spalona energia dnia (razem z pracą
+                          // zawodową), więc dzień bez ciężkiego treningu
+                          // raportował korektę rzędu +867 kcal.
+                          value: '+${adjustment.sportKcal}',
+                          label: 'Do celu kcal')),
                 ],
               ),
               const SizedBox(height: 12),
@@ -16677,6 +16735,10 @@ class DailyAdjustmentSummaryCard extends StatelessWidget {
                   Icons.hiking_rounded, 'Chód mierzony', adjustment.walkKcal),
               kcalRow(Icons.sports_rounded, 'Inne aktywności',
                   adjustment.otherKcal),
+              const SizedBox(height: 8),
+              // Rozdzielenie dwóch różnych liczb, które wcześniej były mylone:
+              // ile spaliłeś vs ile z tego wraca do celu kalorycznego.
+              _AdjustmentSplitNote(adjustment: adjustment),
               const SizedBox(height: 4),
               Wrap(
                 spacing: 8,
@@ -40027,27 +40089,141 @@ class TrainingProfilePage extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final store = AppScope.of(context);
-    final theme = Theme.of(context);
     return ListView(
       padding: const EdgeInsets.fromLTRB(16, 12, 16, 24),
       children: [
-        Card(
-          color: theme.colorScheme.primaryContainer.withValues(alpha: 0.4),
-          child: const ListTile(
-            leading: Icon(Icons.self_improvement_rounded),
-            title: Text('Te dane zasilają regenerację i programy'),
-            subtitle: Text(
-                'Waga, wiek, płeć, poziom, tryb i dni treningowe wpływają na czasy regeneracji mięśni i dopasowanie programów 30-dniowych.'),
-          ),
-        ),
+        // Najpierw STAN, potem formularz — jednym rzutem oka widać, co jest
+        // ustawione, bez przewijania kilkunastu pól.
+        const _ProfileSummaryCard(),
         const SizedBox(height: 12),
         SettingsCard(settings: store.settings, onSave: store.updateSettings),
         const SizedBox(height: 12),
         // Po zmianie poziomu trzeba przeliczyć aktywny program — inaczej
         // zostaje zbudowany na starym poziomie.
         const ProgramLevelCard(),
-        TrainingModeCard(settings: store.settings),
       ],
+    );
+  }
+}
+
+/// Etykiety intensywności pracy zawodowej — jedno miejsce dla formularza
+/// profilu i dla podsumowania, żeby nie rozjechały się dwa słowniki.
+const Map<String, String> kWorkIntensityLabels = {
+  'none': 'Brak / dzień wolny',
+  'sedentary': 'Siedząca',
+  'light': 'Lekka, głównie na nogach',
+  'moderate': 'Umiarkowanie fizyczna',
+  'heavy': 'Ciężka fizyczna',
+};
+
+/// Liczba bez zbędnego „.0" (5 h zamiast 5.0 h).
+String trimTrailingZeros(double value) {
+  final rounded = (value * 10).roundToDouble() / 10;
+  return rounded == rounded.roundToDouble()
+      ? rounded.round().toString()
+      : rounded.toStringAsFixed(1);
+}
+
+/// Profil w skrócie: co jest ustawione i co z tego wynika.
+///
+/// Zastępuje dawny nagłówek „Te dane zasilają regenerację" (sam tekst, zero
+/// informacji) oraz osobną kartę trybu na dole strony, która powtarzała
+/// wartość ustawioną w formularzu wyżej.
+class _ProfileSummaryCard extends StatelessWidget {
+  const _ProfileSummaryCard();
+
+  @override
+  Widget build(BuildContext context) {
+    final store = AppScope.of(context);
+    final theme = Theme.of(context);
+    final scheme = theme.colorScheme;
+    final settings = store.settings;
+    final mode = normalizeTrainingMode(settings.trainingMode);
+    final level = normalizeTrainingLevel(settings.level);
+    final workLabel =
+        kWorkIntensityLabels[settings.workIntensity] ?? 'Brak / dzień wolny';
+    final hasWork = settings.workIntensity != 'none' &&
+        settings.workHoursPerDay > 0;
+    final days = settings.trainingWeekdays.length;
+
+    final modePriority = mode == 'Redukcja'
+        ? 'utrzymaj siłę, kontroluj objętość, nie tnij regeneracji'
+        : mode == 'Masa'
+            ? 'progres ciężaru i objętości przy dodatnim bilansie'
+            : mode == 'Kondycja'
+                ? 'czas pracy, tętno i stopniowo rosnąca objętość'
+                : 'siła i sylwetka przy stabilnym progresie';
+
+    Widget chip(IconData icon, String label) => Container(
+          padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
+          decoration: BoxDecoration(
+            color: scheme.surfaceContainerHighest.withValues(alpha: 0.6),
+            borderRadius: BorderRadius.circular(11),
+          ),
+          child: Row(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              Icon(icon, size: 14, color: scheme.primary),
+              const SizedBox(width: 5),
+              Text(label,
+                  style: theme.textTheme.labelMedium
+                      ?.copyWith(fontWeight: FontWeight.w800)),
+            ],
+          ),
+        );
+
+    return Card(
+      color: scheme.primaryContainer.withValues(alpha: 0.35),
+      child: Padding(
+        padding: const EdgeInsets.fromLTRB(16, 14, 16, 14),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Row(
+              children: [
+                Icon(Icons.badge_outlined, color: scheme.primary),
+                const SizedBox(width: 10),
+                Expanded(
+                  child: Text('Profil w skrócie',
+                      style: theme.textTheme.titleMedium
+                          ?.copyWith(fontWeight: FontWeight.w900)),
+                ),
+              ],
+            ),
+            const SizedBox(height: 10),
+            Wrap(
+              spacing: 8,
+              runSpacing: 8,
+              children: [
+                chip(Icons.monitor_weight_outlined,
+                    '${settings.bodyWeightKg.round()} kg'),
+                chip(Icons.height_rounded, '${settings.heightCm.round()} cm'),
+                chip(Icons.cake_outlined, '${settings.age} lat'),
+                chip(Icons.flag_outlined, level),
+                chip(Icons.tune_outlined, mode),
+                chip(Icons.event_repeat_rounded,
+                    '$days ${days == 1 ? 'dzień' : 'dni'} w tygodniu'),
+                chip(
+                    Icons.work_outline_rounded,
+                    hasWork
+                        ? '${workLabel.toLowerCase()} · '
+                            '${trimTrailingZeros(settings.workHoursPerDay)} h'
+                        : 'bez pracy fizycznej'),
+              ],
+            ),
+            const SizedBox(height: 10),
+            Text('Tryb „$mode": $modePriority.',
+                style: theme.textTheme.bodySmall?.copyWith(height: 1.35)),
+            const SizedBox(height: 4),
+            Text(
+              'Praca i codzienne chodzenie należą do bazowego zapotrzebowania. '
+              'Ponad nie doliczany jest tylko sport dnia.',
+              style: theme.textTheme.labelSmall
+                  ?.copyWith(color: scheme.onSurfaceVariant, height: 1.35),
+            ),
+          ],
+        ),
+      ),
     );
   }
 }
@@ -40902,13 +41078,7 @@ class _SettingsCardState extends State<SettingsCard> {
     'Mężczyzna',
     'Kobieta'
   ];
-  static const Map<String, String> _workIntensityLabels = {
-    'none': 'Brak / dzień wolny',
-    'sedentary': 'Siedząca',
-    'light': 'Lekka, głównie na nogach',
-    'moderate': 'Umiarkowanie fizyczna',
-    'heavy': 'Ciężka fizyczna',
-  };
+  static const Map<String, String> _workIntensityLabels = kWorkIntensityLabels;
 
   late final TextEditingController weight;
   late final TextEditingController height;
@@ -41000,27 +41170,49 @@ class _SettingsCardState extends State<SettingsCard> {
     super.dispose();
   }
 
-  /// Nagłówek sekcji formularza profilu (ikona + tytuł + opis).
-  Widget _sectionHeader(
-      ThemeData theme, IconData icon, String title, String subtitle) {
-    return Row(
-      children: [
-        Icon(icon, size: 20, color: theme.colorScheme.primary),
-        const SizedBox(width: 8),
-        Expanded(
-          child: Column(
-            crossAxisAlignment: CrossAxisAlignment.start,
-            children: [
-              Text(title,
-                  style: theme.textTheme.titleSmall
-                      ?.copyWith(fontWeight: FontWeight.w900)),
-              Text(subtitle,
-                  style: theme.textTheme.labelSmall
-                      ?.copyWith(color: theme.colorScheme.onSurfaceVariant)),
-            ],
+  /// ZWIJANA sekcja profilu (ikona + tytuł + opis + zawartość).
+  ///
+  /// Profil ma pięć obszarów i kilkanaście pól — jako jedna długa kolumna był
+  /// ścianą formularza, po której trzeba było scrollować w ciemno. Zwijane
+  /// sekcje pozwalają zobaczyć całą strukturę na jednym ekranie i otworzyć
+  /// tylko to, co się zmienia.
+  Widget _profileSection(
+    ThemeData theme,
+    IconData icon,
+    String title,
+    String subtitle, {
+    required List<Widget> children,
+    bool initiallyExpanded = false,
+  }) {
+    return Theme(
+      // Bez domyślnych linii ExpansionTile — sekcje mają własne obramowanie.
+      data: theme.copyWith(dividerColor: Colors.transparent),
+      child: Container(
+        margin: const EdgeInsets.only(bottom: 10),
+        decoration: BoxDecoration(
+          color: theme.colorScheme.surfaceContainerHighest
+              .withValues(alpha: 0.35),
+          borderRadius: BorderRadius.circular(16),
+          border: Border.all(
+            color: theme.colorScheme.outlineVariant.withValues(alpha: 0.4),
           ),
         ),
-      ],
+        child: ExpansionTile(
+          key: PageStorageKey<String>('profile_section_$title'),
+          initiallyExpanded: initiallyExpanded,
+          tilePadding: const EdgeInsets.symmetric(horizontal: 14),
+          childrenPadding: const EdgeInsets.fromLTRB(14, 0, 14, 14),
+          expandedCrossAxisAlignment: CrossAxisAlignment.stretch,
+          leading: Icon(icon, size: 22, color: theme.colorScheme.primary),
+          title: Text(title,
+              style: theme.textTheme.titleSmall
+                  ?.copyWith(fontWeight: FontWeight.w900)),
+          subtitle: Text(subtitle,
+              style: theme.textTheme.labelSmall
+                  ?.copyWith(color: theme.colorScheme.onSurfaceVariant)),
+          children: children,
+        ),
+      ),
     );
   }
 
@@ -41035,339 +41227,349 @@ class _SettingsCardState extends State<SettingsCard> {
         child: Column(
           crossAxisAlignment: CrossAxisAlignment.stretch,
           children: [
-            // === Twoje dane ===
-            _sectionHeader(theme, Icons.person_outline_rounded, 'Twoje dane',
-                'Zasilają regenerację, kcal i utratę wody'),
-            const SizedBox(height: 12),
-            Row(children: [
-              Expanded(
-                  child: TextField(
-                      controller: weight,
-                      keyboardType: TextInputType.number,
-                      decoration: const InputDecoration(
-                          labelText: 'Waga (kg)',
-                          prefixIcon: Icon(Icons.monitor_weight_outlined)))),
-              const SizedBox(width: 10),
-              Expanded(
-                  child: TextField(
-                      controller: height,
-                      keyboardType: TextInputType.number,
-                      decoration: const InputDecoration(
-                          labelText: 'Wzrost (cm)',
-                          prefixIcon: Icon(Icons.height_rounded)))),
-            ]),
-            const SizedBox(height: 10),
-            Row(children: [
-              Expanded(
-                  child: TextField(
-                      controller: age,
-                      keyboardType: TextInputType.number,
-                      decoration: const InputDecoration(
-                          labelText: 'Wiek',
-                          prefixIcon: Icon(Icons.cake_outlined)))),
-              const SizedBox(width: 10),
-              Expanded(
-                child: DropdownButtonFormField<String>(
-                  key: ValueKey('sex_$sex'),
-                  isExpanded: true,
-                  initialValue: sex,
-                  decoration: const InputDecoration(labelText: 'Płeć'),
-                  items: _sexOptions
-                      .map((v) => DropdownMenuItem(
-                          value: v,
-                          child: Text(v,
-                              maxLines: 1, overflow: TextOverflow.ellipsis)))
-                      .toList(),
-                  onChanged: (v) => setState(() => sex = v ?? sex),
+            _profileSection(
+              theme,
+              Icons.person_outline_rounded,
+              'Twoje dane',
+              'Waga, wzrost, wiek, płeć — zasilają regenerację i kcal',
+              initiallyExpanded: true,
+              children: [
+              Row(children: [
+                Expanded(
+                    child: TextField(
+                        controller: weight,
+                        keyboardType: TextInputType.number,
+                        decoration: const InputDecoration(
+                            labelText: 'Waga (kg)',
+                            prefixIcon: Icon(Icons.monitor_weight_outlined)))),
+                const SizedBox(width: 10),
+                Expanded(
+                    child: TextField(
+                        controller: height,
+                        keyboardType: TextInputType.number,
+                        decoration: const InputDecoration(
+                            labelText: 'Wzrost (cm)',
+                            prefixIcon: Icon(Icons.height_rounded)))),
+              ]),
+              const SizedBox(height: 10),
+              Row(children: [
+                Expanded(
+                    child: TextField(
+                        controller: age,
+                        keyboardType: TextInputType.number,
+                        decoration: const InputDecoration(
+                            labelText: 'Wiek',
+                            prefixIcon: Icon(Icons.cake_outlined)))),
+                const SizedBox(width: 10),
+                Expanded(
+                  child: DropdownButtonFormField<String>(
+                    key: ValueKey('sex_$sex'),
+                    isExpanded: true,
+                    initialValue: sex,
+                    decoration: const InputDecoration(labelText: 'Płeć'),
+                    items: _sexOptions
+                        .map((v) => DropdownMenuItem(
+                            value: v,
+                            child: Text(v,
+                                maxLines: 1, overflow: TextOverflow.ellipsis)))
+                        .toList(),
+                    onChanged: (v) => setState(() => sex = v ?? sex),
+                  ),
                 ),
-              ),
-            ]),
-
-            // === Praca i aktywność ogólna ===
-            const SizedBox(height: 18),
-            _sectionHeader(
+              ]),
+              ],
+            ),
+            _profileSection(
               theme,
               Icons.work_outline_rounded,
               'Praca i aktywność ogólna',
-              'Fallback, gdy zegarek nie zarejestruje ruchu w pracy',
-            ),
-            const SizedBox(height: 12),
-            Row(
+              'Część Twojego bazowego zapotrzebowania — nie korekta dnia',
+              initiallyExpanded: false,
               children: [
-                Expanded(
-                  flex: 3,
-                  child: DropdownButtonFormField<String>(
-                    key: ValueKey('work_intensity_$workIntensity'),
-                    isExpanded: true,
-                    initialValue: workIntensity,
-                    decoration: const InputDecoration(
-                      labelText: 'Charakter pracy',
-                      prefixIcon: Icon(Icons.badge_outlined),
-                    ),
-                    items: _workIntensityLabels.entries
-                        .map((entry) => DropdownMenuItem<String>(
-                              value: entry.key,
-                              child: Text(
-                                entry.value,
-                                maxLines: 1,
-                                overflow: TextOverflow.ellipsis,
-                              ),
-                            ))
-                        .toList(),
-                    onChanged: (value) => setState(
-                      () => workIntensity = value ?? workIntensity,
-                    ),
-                  ),
-                ),
-                const SizedBox(width: 10),
-                Expanded(
-                  flex: 2,
-                  child: TextField(
-                    controller: workHours,
-                    keyboardType: const TextInputType.numberWithOptions(
-                      decimal: true,
-                    ),
-                    decoration: const InputDecoration(
-                      labelText: 'Godzin/dzień',
-                      prefixIcon: Icon(Icons.schedule_outlined),
+              Row(
+                children: [
+                  Expanded(
+                    flex: 3,
+                    child: DropdownButtonFormField<String>(
+                      key: ValueKey('work_intensity_$workIntensity'),
+                      isExpanded: true,
+                      initialValue: workIntensity,
+                      decoration: const InputDecoration(
+                        labelText: 'Charakter pracy',
+                        prefixIcon: Icon(Icons.badge_outlined),
+                      ),
+                      items: _workIntensityLabels.entries
+                          .map((entry) => DropdownMenuItem<String>(
+                                value: entry.key,
+                                child: Text(
+                                  entry.value,
+                                  maxLines: 1,
+                                  overflow: TextOverflow.ellipsis,
+                                ),
+                              ))
+                          .toList(),
+                      onChanged: (value) => setState(
+                        () => workIntensity = value ?? workIntensity,
+                      ),
                     ),
                   ),
-                ),
-              ],
-            ),
-            const SizedBox(height: 8),
-            Wrap(
-              spacing: 6,
-              runSpacing: 4,
-              children: [
-                for (final entry in const <int, String>{
-                  1: 'Pn',
-                  2: 'Wt',
-                  3: 'Śr',
-                  4: 'Cz',
-                  5: 'Pt',
-                  6: 'So',
-                  7: 'Nd',
-                }.entries)
-                  FilterChip(
-                    label: Text(entry.value),
-                    selected: workWeekdays.contains(entry.key),
-                    onSelected: (selected) => setState(() {
-                      if (selected) {
-                        workWeekdays.add(entry.key);
-                      } else {
-                        workWeekdays.remove(entry.key);
-                      }
-                    }),
+                  const SizedBox(width: 10),
+                  Expanded(
+                    flex: 2,
+                    child: TextField(
+                      controller: workHours,
+                      keyboardType: const TextInputType.numberWithOptions(
+                        decimal: true,
+                      ),
+                      decoration: const InputDecoration(
+                        labelText: 'Godzin/dzień',
+                        prefixIcon: Icon(Icons.schedule_outlined),
+                      ),
+                    ),
                   ),
-              ],
-            ),
-            const SizedBox(height: 4),
-            Text(
-              'Praca nie jest dodawana do kroków ani danych zegarka. Trainer '
-              'wybiera wyższy, wiarygodniejszy szacunek, aby nie liczyć jej dwa razy.',
-              style: theme.textTheme.labelSmall
-                  ?.copyWith(color: theme.colorScheme.onSurfaceVariant),
-            ),
-
-            // === Poziom i cel ===
-            const SizedBox(height: 18),
-            _sectionHeader(theme, Icons.flag_outlined, 'Poziom i cel',
-                'Dopasowują programy 30-dniowe i progresję'),
-            const SizedBox(height: 12),
-            DropdownButtonFormField<String>(
-              isExpanded: true,
-              value: level,
-              decoration: const InputDecoration(
-                  labelText: 'Poziom zaawansowania',
-                  prefixIcon: Icon(Icons.workspace_premium_outlined)),
-              selectedItemBuilder: (context) => kTrainingLevels
-                  .map((v) => Align(
-                      alignment: Alignment.centerLeft,
-                      child: Text(v,
-                          maxLines: 1, overflow: TextOverflow.ellipsis)))
-                  .toList(),
-              items: kTrainingLevels
-                  .map((v) => DropdownMenuItem(
-                      value: v,
-                      child: Text(v,
-                          maxLines: 1, overflow: TextOverflow.ellipsis)))
-                  .toList(),
-              onChanged: (v) => setState(() => level = v ?? level),
-            ),
-            const SizedBox(height: 10),
-            DropdownButtonFormField<String>(
-              isExpanded: true,
-              value: trainingMode,
-              decoration: const InputDecoration(
-                labelText: 'Strategia składu ciała',
-                helperText:
-                    'Redukcja/masa/rekompozycja to strategia, nie typ treningu',
-                prefixIcon: Icon(Icons.tune_rounded),
+                ],
               ),
-              selectedItemBuilder: (context) => kTrainingModes
-                  .map((v) => Align(
-                      alignment: Alignment.centerLeft,
-                      child: Text(v,
-                          maxLines: 1, overflow: TextOverflow.ellipsis)))
-                  .toList(),
-              items: kTrainingModes
-                  .map((v) => DropdownMenuItem(
-                      value: v,
-                      child: Text(v,
-                          maxLines: 1, overflow: TextOverflow.ellipsis)))
-                  .toList(),
-              onChanged: (v) =>
-                  setState(() => trainingMode = v ?? trainingMode),
-            ),
-            const SizedBox(height: 6),
-            OutlinedButton.icon(
-              key: const Key('open_goal_profile_from_settings'),
-              onPressed: () => Navigator.of(context).push(
-                MaterialPageRoute<void>(
-                    builder: (_) => const BodyGoalProfilePage()),
-              ),
-              icon: const Icon(Icons.flag_rounded, size: 18),
-              label:
-                  const Text('Profil celu: sylwetka, strategia, typ treningu'),
-            ),
-            const SizedBox(height: 10),
-            TextField(
-                controller: goal,
-                maxLines: 2,
-                decoration: const InputDecoration(
-                    labelText: 'Cel treningowy (np. sylwetka, siła, kondycja)',
-                    prefixIcon: Icon(Icons.emoji_events_outlined))),
-
-            // === Tryb prowadzenia treningu (inteligentny trener) ===
-            const SizedBox(height: 18),
-            _sectionHeader(
-                theme,
-                Icons.auto_awesome_rounded,
-                'Prowadzenie treningu',
-                'Ile Trainer ustala za Ciebie podczas serii'),
-            const SizedBox(height: 12),
-            DropdownButtonFormField<GuidanceMode>(
-              key: const Key('guidance_mode_dropdown'),
-              isExpanded: true,
-              initialValue: guidanceMode,
-              decoration: const InputDecoration(
-                  labelText: 'Tryb prowadzenia',
-                  prefixIcon: Icon(Icons.assistant_direction_outlined)),
-              selectedItemBuilder: (context) => GuidanceMode.values
-                  .map((m) => Align(
-                      alignment: Alignment.centerLeft,
-                      child: Text(m.label,
-                          maxLines: 1, overflow: TextOverflow.ellipsis)))
-                  .toList(),
-              items: GuidanceMode.values
-                  .map((m) => DropdownMenuItem(
-                      value: m,
-                      child: Text(m.label,
-                          maxLines: 1, overflow: TextOverflow.ellipsis)))
-                  .toList(),
-              onChanged: (v) =>
-                  setState(() => guidanceMode = v ?? guidanceMode),
-            ),
-            const SizedBox(height: 4),
-            Text(guidanceMode.description,
-                style: theme.textTheme.labelSmall
-                    ?.copyWith(color: theme.colorScheme.onSurfaceVariant)),
-
-            // === Sprzęt i ograniczenia (strukturalne — steruje doborem ćwiczeń) ===
-            const SizedBox(height: 18),
-            _sectionHeader(theme, Icons.build_outlined, 'Sprzęt i ograniczenia',
-                'Programy używają tylko ćwiczeń pod Twój sprzęt'),
-            const SizedBox(height: 12),
-            DropdownButtonFormField<EquipmentMode>(
-              key: const Key('equipment_mode_dropdown'),
-              isExpanded: true,
-              initialValue: equipmentMode,
-              decoration: const InputDecoration(
-                  labelText: 'Tryb sprzętowy',
-                  prefixIcon: Icon(Icons.fitness_center_rounded)),
-              selectedItemBuilder: (context) => EquipmentMode.values
-                  .map((m) => Align(
-                      alignment: Alignment.centerLeft,
-                      child: Text(m.label,
-                          maxLines: 1, overflow: TextOverflow.ellipsis)))
-                  .toList(),
-              items: EquipmentMode.values
-                  .map((m) => DropdownMenuItem(
-                      value: m,
-                      child: Text(m.label,
-                          maxLines: 1, overflow: TextOverflow.ellipsis)))
-                  .toList(),
-              onChanged: (v) => setState(() {
-                if (v == null) return;
-                equipmentMode = v;
-                // Przy przejściu na tryb wybieralny zasil sensownym startem.
-                if (v == EquipmentMode.homeMixed && ownedEquipment.isEmpty) {
-                  ownedEquipment = {...kDefaultHomeMixedEquipment};
-                } else if (v == EquipmentMode.custom &&
-                    ownedEquipment.isEmpty) {
-                  ownedEquipment = {
-                    ...widget.settings.equipmentProfile.resolveOwned()
-                  }..removeAll(kAlwaysAvailableEquipment);
-                }
-              }),
-            ),
-            const SizedBox(height: 4),
-            Text(equipmentMode.description,
-                style: theme.textTheme.labelSmall
-                    ?.copyWith(color: theme.colorScheme.onSurfaceVariant)),
-            if (equipmentMode.isUserSelectable) ...[
-              const SizedBox(height: 10),
+              const SizedBox(height: 8),
               Wrap(
-                spacing: 8,
+                spacing: 6,
                 runSpacing: 4,
                 children: [
-                  for (final type in _selectableEquipment)
+                  for (final entry in const <int, String>{
+                    1: 'Pn',
+                    2: 'Wt',
+                    3: 'Śr',
+                    4: 'Cz',
+                    5: 'Pt',
+                    6: 'So',
+                    7: 'Nd',
+                  }.entries)
                     FilterChip(
-                      label: Text(type.label),
-                      selected: ownedEquipment.contains(type),
-                      onSelected: (sel) => setState(() {
-                        if (sel) {
-                          ownedEquipment.add(type);
+                      label: Text(entry.value),
+                      selected: workWeekdays.contains(entry.key),
+                      onSelected: (selected) => setState(() {
+                        if (selected) {
+                          workWeekdays.add(entry.key);
                         } else {
-                          ownedEquipment.remove(type);
+                          workWeekdays.remove(entry.key);
                         }
                       }),
                     ),
                 ],
               ),
-            ],
-            const SizedBox(height: 14),
-            Text('Ograniczenia i kontuzje',
-                style: theme.textTheme.titleSmall
-                    ?.copyWith(fontWeight: FontWeight.w900)),
-            const SizedBox(height: 6),
-            Wrap(
-              spacing: 8,
-              runSpacing: 4,
-              children: [
-                for (final limit in TrainingLimitation.values)
-                  FilterChip(
-                    label: Text(limit.label),
-                    selected: limitationFlags.contains(limit),
-                    onSelected: (sel) => setState(() {
-                      if (sel) {
-                        limitationFlags.add(limit);
-                      } else {
-                        limitationFlags.remove(limit);
-                      }
-                    }),
-                  ),
+              const SizedBox(height: 4),
+              Text(
+                'Praca nie jest dodawana do kroków ani danych zegarka. Trainer '
+                'wybiera wyższy, wiarygodniejszy szacunek, aby nie liczyć jej dwa razy.',
+                style: theme.textTheme.labelSmall
+                    ?.copyWith(color: theme.colorScheme.onSurfaceVariant),
+              ),
               ],
             ),
-            const SizedBox(height: 10),
-            TextField(
-                controller: limitations,
-                maxLines: 2,
+            _profileSection(
+              theme,
+              Icons.flag_outlined,
+              'Poziom i cel',
+              'Dopasowują programy 30-dniowe i progresję',
+              initiallyExpanded: false,
+              children: [
+              DropdownButtonFormField<String>(
+                isExpanded: true,
+                value: level,
                 decoration: const InputDecoration(
-                    labelText: 'Własne ograniczenie (opcjonalnie)',
-                    prefixIcon: Icon(Icons.healing_outlined))),
+                    labelText: 'Poziom zaawansowania',
+                    prefixIcon: Icon(Icons.workspace_premium_outlined)),
+                selectedItemBuilder: (context) => kTrainingLevels
+                    .map((v) => Align(
+                        alignment: Alignment.centerLeft,
+                        child: Text(v,
+                            maxLines: 1, overflow: TextOverflow.ellipsis)))
+                    .toList(),
+                items: kTrainingLevels
+                    .map((v) => DropdownMenuItem(
+                        value: v,
+                        child: Text(v,
+                            maxLines: 1, overflow: TextOverflow.ellipsis)))
+                    .toList(),
+                onChanged: (v) => setState(() => level = v ?? level),
+              ),
+              const SizedBox(height: 10),
+              DropdownButtonFormField<String>(
+                isExpanded: true,
+                value: trainingMode,
+                decoration: const InputDecoration(
+                  labelText: 'Strategia składu ciała',
+                  helperText:
+                      'Redukcja/masa/rekompozycja to strategia, nie typ treningu',
+                  prefixIcon: Icon(Icons.tune_rounded),
+                ),
+                selectedItemBuilder: (context) => kTrainingModes
+                    .map((v) => Align(
+                        alignment: Alignment.centerLeft,
+                        child: Text(v,
+                            maxLines: 1, overflow: TextOverflow.ellipsis)))
+                    .toList(),
+                items: kTrainingModes
+                    .map((v) => DropdownMenuItem(
+                        value: v,
+                        child: Text(v,
+                            maxLines: 1, overflow: TextOverflow.ellipsis)))
+                    .toList(),
+                onChanged: (v) =>
+                    setState(() => trainingMode = v ?? trainingMode),
+              ),
+              const SizedBox(height: 6),
+              OutlinedButton.icon(
+                key: const Key('open_goal_profile_from_settings'),
+                onPressed: () => Navigator.of(context).push(
+                  MaterialPageRoute<void>(
+                      builder: (_) => const BodyGoalProfilePage()),
+                ),
+                icon: const Icon(Icons.flag_rounded, size: 18),
+                label:
+                    const Text('Profil celu: sylwetka, strategia, typ treningu'),
+              ),
+              const SizedBox(height: 10),
+              TextField(
+                  controller: goal,
+                  maxLines: 2,
+                  decoration: const InputDecoration(
+                      labelText: 'Cel treningowy (np. sylwetka, siła, kondycja)',
+                      prefixIcon: Icon(Icons.emoji_events_outlined))),
+              ],
+            ),
+            _profileSection(
+              theme,
+              Icons.auto_awesome_rounded,
+              'Prowadzenie treningu',
+              'Ile Trainer ustala za Ciebie podczas serii',
+              initiallyExpanded: false,
+              children: [
+              DropdownButtonFormField<GuidanceMode>(
+                key: const Key('guidance_mode_dropdown'),
+                isExpanded: true,
+                initialValue: guidanceMode,
+                decoration: const InputDecoration(
+                    labelText: 'Tryb prowadzenia',
+                    prefixIcon: Icon(Icons.assistant_direction_outlined)),
+                selectedItemBuilder: (context) => GuidanceMode.values
+                    .map((m) => Align(
+                        alignment: Alignment.centerLeft,
+                        child: Text(m.label,
+                            maxLines: 1, overflow: TextOverflow.ellipsis)))
+                    .toList(),
+                items: GuidanceMode.values
+                    .map((m) => DropdownMenuItem(
+                        value: m,
+                        child: Text(m.label,
+                            maxLines: 1, overflow: TextOverflow.ellipsis)))
+                    .toList(),
+                onChanged: (v) =>
+                    setState(() => guidanceMode = v ?? guidanceMode),
+              ),
+              const SizedBox(height: 4),
+              Text(guidanceMode.description,
+                  style: theme.textTheme.labelSmall
+                      ?.copyWith(color: theme.colorScheme.onSurfaceVariant)),
+              ],
+            ),
+            _profileSection(
+              theme,
+              Icons.build_outlined,
+              'Sprzęt i ograniczenia',
+              'Programy używają tylko ćwiczeń pod Twój sprzęt',
+              initiallyExpanded: false,
+              children: [
+              DropdownButtonFormField<EquipmentMode>(
+                key: const Key('equipment_mode_dropdown'),
+                isExpanded: true,
+                initialValue: equipmentMode,
+                decoration: const InputDecoration(
+                    labelText: 'Tryb sprzętowy',
+                    prefixIcon: Icon(Icons.fitness_center_rounded)),
+                selectedItemBuilder: (context) => EquipmentMode.values
+                    .map((m) => Align(
+                        alignment: Alignment.centerLeft,
+                        child: Text(m.label,
+                            maxLines: 1, overflow: TextOverflow.ellipsis)))
+                    .toList(),
+                items: EquipmentMode.values
+                    .map((m) => DropdownMenuItem(
+                        value: m,
+                        child: Text(m.label,
+                            maxLines: 1, overflow: TextOverflow.ellipsis)))
+                    .toList(),
+                onChanged: (v) => setState(() {
+                  if (v == null) return;
+                  equipmentMode = v;
+                  // Przy przejściu na tryb wybieralny zasil sensownym startem.
+                  if (v == EquipmentMode.homeMixed && ownedEquipment.isEmpty) {
+                    ownedEquipment = {...kDefaultHomeMixedEquipment};
+                  } else if (v == EquipmentMode.custom &&
+                      ownedEquipment.isEmpty) {
+                    ownedEquipment = {
+                      ...widget.settings.equipmentProfile.resolveOwned()
+                    }..removeAll(kAlwaysAvailableEquipment);
+                  }
+                }),
+              ),
+              const SizedBox(height: 4),
+              Text(equipmentMode.description,
+                  style: theme.textTheme.labelSmall
+                      ?.copyWith(color: theme.colorScheme.onSurfaceVariant)),
+              if (equipmentMode.isUserSelectable) ...[
+                const SizedBox(height: 10),
+                Wrap(
+                  spacing: 8,
+                  runSpacing: 4,
+                  children: [
+                    for (final type in _selectableEquipment)
+                      FilterChip(
+                        label: Text(type.label),
+                        selected: ownedEquipment.contains(type),
+                        onSelected: (sel) => setState(() {
+                          if (sel) {
+                            ownedEquipment.add(type);
+                          } else {
+                            ownedEquipment.remove(type);
+                          }
+                        }),
+                      ),
+                  ],
+                ),
+              ],
+              const SizedBox(height: 14),
+              Text('Ograniczenia i kontuzje',
+                  style: theme.textTheme.titleSmall
+                      ?.copyWith(fontWeight: FontWeight.w900)),
+              const SizedBox(height: 6),
+              Wrap(
+                spacing: 8,
+                runSpacing: 4,
+                children: [
+                  for (final limit in TrainingLimitation.values)
+                    FilterChip(
+                      label: Text(limit.label),
+                      selected: limitationFlags.contains(limit),
+                      onSelected: (sel) => setState(() {
+                        if (sel) {
+                          limitationFlags.add(limit);
+                        } else {
+                          limitationFlags.remove(limit);
+                        }
+                      }),
+                    ),
+                ],
+              ),
+              const SizedBox(height: 10),
+              TextField(
+                  controller: limitations,
+                  maxLines: 2,
+                  decoration: const InputDecoration(
+                      labelText: 'Własne ograniczenie (opcjonalnie)',
+                      prefixIcon: Icon(Icons.healing_outlined))),
 
+              ],
+            ),
             const SizedBox(height: 16),
             FilledButton.icon(
               onPressed: () async {
