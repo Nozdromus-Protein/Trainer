@@ -20,6 +20,8 @@ class TrainerDailyAdjustment {
     required this.healthActiveKcal,
     required this.healthDerivedKcal,
     required this.totalAdjustmentKcal,
+    this.sportKcal = 0,
+    this.baselineActivityKcal = 0,
     required this.extraWaterMl,
     required this.extraCarbsG,
     required this.extraProteinG,
@@ -75,7 +77,19 @@ class TrainerDailyAdjustment {
 
   /// Łączna aktywność dnia po deduplikacji zegarka, pracy, kroków, biegów,
   /// chodu i treningu. Nadal równa [workoutKcal] + [healthDerivedKcal].
+  ///
+  /// UWAGA: to jest SPALONA energia dnia, a NIE liczba do doliczenia do celu
+  /// kalorycznego. Do celu idzie wyłącznie [sportKcal].
   final int totalAdjustmentKcal;
+
+  /// v3: kcal ze SPORTU po korekcie zaufania (siła 60%, bieg 70%, cardio 60%).
+  /// To jedyna część aktywności, którą Licznik Kalorii dolicza do celu dnia.
+  final int sportKcal;
+
+  /// v3: kcal z pracy zawodowej i zwykłych kroków. Należą do BAZOWEGO ZERA
+  /// użytkownika, więc jadą tylko informacyjnie — doliczenie ich do celu
+  /// oznaczałoby policzenie tego samego ruchu dwa razy.
+  final int baselineActivityKcal;
 
   /// Sugerowana dodatkowa woda łącznie (treningi + aktywność dzienna).
   final int extraWaterMl;
@@ -141,6 +155,8 @@ class TrainerDailyAdjustment {
     int? healthActiveKcal,
     int? healthDerivedKcal,
     int? totalAdjustmentKcal,
+    int? sportKcal,
+    int? baselineActivityKcal,
     int? extraWaterMl,
     int? extraCarbsG,
     int? extraProteinG,
@@ -168,6 +184,8 @@ class TrainerDailyAdjustment {
       healthActiveKcal: healthActiveKcal ?? this.healthActiveKcal,
       healthDerivedKcal: healthDerivedKcal ?? this.healthDerivedKcal,
       totalAdjustmentKcal: totalAdjustmentKcal ?? this.totalAdjustmentKcal,
+      sportKcal: sportKcal ?? this.sportKcal,
+      baselineActivityKcal: baselineActivityKcal ?? this.baselineActivityKcal,
       extraWaterMl: extraWaterMl ?? this.extraWaterMl,
       extraCarbsG: extraCarbsG ?? this.extraCarbsG,
       extraProteinG: extraProteinG ?? this.extraProteinG,
@@ -199,6 +217,8 @@ class TrainerDailyAdjustment {
         'healthActiveKcal': healthActiveKcal,
         'healthDerivedKcal': healthDerivedKcal,
         'totalAdjustmentKcal': totalAdjustmentKcal,
+        'sportKcal': sportKcal,
+        'baselineActivityKcal': baselineActivityKcal,
         'extraWaterMl': extraWaterMl,
         'extraCarbsG': extraCarbsG,
         'extraProteinG': extraProteinG,
@@ -243,6 +263,8 @@ class TrainerDailyAdjustment {
       healthActiveKcal: _intValue(json['healthActiveKcal']),
       healthDerivedKcal: _intValue(json['healthDerivedKcal']),
       totalAdjustmentKcal: _intValue(json['totalAdjustmentKcal']),
+      sportKcal: _intValue(json['sportKcal']),
+      baselineActivityKcal: _intValue(json['baselineActivityKcal']),
       extraWaterMl: _intValue(json['extraWaterMl']),
       extraCarbsG: _intValue(json['extraCarbsG']),
       extraProteinG: _intValue(json['extraProteinG']),

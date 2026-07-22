@@ -5,6 +5,47 @@ import '../domain/daily_adjustment.dart';
 import '../domain/health_connect_snapshot.dart';
 import '../domain/training_impact.dart';
 
+/// Współczynniki zaufania dla SPORTU — jedno miejsce, konfigurowalne.
+///
+/// To nie jest twierdzenie o rzeczywistym spalaniu, tylko korekta chroniąca
+/// przed zawyżaniem przez zegarek, podwójnym liczeniem (sesja + aktywne kcal
+/// + kroki) i kompensacją aktywności w ciągu dnia. Te same wartości ma
+/// Licznik Kalorii (`SportCreditFactors`), żeby obie aplikacje pokazywały
+/// identyczną liczbę.
+class SportCreditFactors {
+  const SportCreditFactors({
+    this.strength = 0.60,
+    this.running = 0.70,
+    this.cycling = 0.65,
+    this.otherCardio = 0.60,
+    this.measuredWalk = 0.60,
+  });
+
+  static const SportCreditFactors defaults = SportCreditFactors();
+
+  final double strength;
+  final double running;
+  final double cycling;
+  final double otherCardio;
+  final double measuredWalk;
+}
+
+/// Kcal ze sportu po korekcie zaufania. Zwykłe kroki i praca NIE wchodzą.
+int creditedSportKcal({
+  int strengthKcal = 0,
+  int runKcal = 0,
+  int walkKcal = 0,
+  int otherCardioKcal = 0,
+  SportCreditFactors factors = SportCreditFactors.defaults,
+}) {
+  final total = math.max(0, strengthKcal) * factors.strength +
+      math.max(0, runKcal) * factors.running +
+      math.max(0, walkKcal) * factors.measuredWalk +
+      math.max(0, otherCardioKcal) * factors.otherCardio;
+  if (!total.isFinite || total <= 0) return 0;
+  return total.round();
+}
+
 /// Liczy dzienną korektę aktywności ([TrainerDailyAdjustment]) na podstawie:
 ///  - zaliczonych kredytów aktywności (już po deduplikacji bieg/chód/sesje),
 ///  - snapshotu Health Connect (kroki, dystans, aktywne kcal),
@@ -104,6 +145,23 @@ TrainerDailyAdjustment buildTrainerDailyAdjustment({
           : 0;
   final generalMovementKcal = math.max(stepsKcal, workKcal);
 
+  // ── PODZIAŁ NA DWIE PULE ────────────────────────────────────────────────
+  //
+  // BAZA (praca + zwykłe kroki) to energia, którą Licznik Kalorii ma już
+  // zaszytą w bazowym zerze — wysyłamy ją wyłącznie informacyjnie. Doliczanie
+  // jej do celu dnia oznaczało, że 5 godzin sprzątania podbijało cel drugi raz
+  // (stąd „korekta +867 kcal" w dniu bez ciężkiego treningu).
+  //
+  // SPORT (trening siłowy, bieg, zmierzony chód, inne cardio) to jedyna część,
+  // którą wolno doliczyć — po korekcie zaufania z [kSportCreditFactors].
+  final baselineActivityKcal = generalMovementKcal;
+  final sportKcal = creditedSportKcal(
+    strengthKcal: workoutKcal,
+    runKcal: runKcal,
+    walkKcal: walkKcal,
+    otherCardioKcal: otherKcal,
+  );
+
   // Health Connect active calories may already contain the strength workout.
   // One max across the whole day prevents workout/watch double counting.
   final estimatedHealthKcal =
@@ -180,6 +238,8 @@ TrainerDailyAdjustment buildTrainerDailyAdjustment({
     healthActiveKcal: healthActiveKcal,
     healthDerivedKcal: healthDerivedKcal,
     totalAdjustmentKcal: totalAdjustmentKcal,
+    sportKcal: sportKcal,
+    baselineActivityKcal: baselineActivityKcal,
     extraWaterMl: extraWaterMl,
     extraCarbsG: extraCarbsG,
     extraProteinG: extraProteinG,

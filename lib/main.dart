@@ -2581,6 +2581,9 @@ class AppStore extends ChangeNotifier {
         sex: settings.sex,
         trainingDaysPerWeek: settings.trainingWeekdays.length,
         fatFreeMassKg: currentFatFreeMassKg,
+        // Praca zawodowa należy do BAZY celu, a nie do korekty dnia.
+        workIntensity: settings.workIntensity,
+        workHoursPerDay: settings.workHoursPerDay,
       );
 
   /// Publikuje pakiety korekty dnia do mostu dla Licznika Kalorii.
@@ -5130,6 +5133,11 @@ class AppStore extends ChangeNotifier {
     final session = activeWorkoutSession;
     if (session == null || session.completedSetCount == 0) return null;
     final endedAt = DateTime.now();
+    // CAŁA sesja należy do LOKALNEGO dnia, w którym się ZACZĘŁA. Trening
+    // 23:40 → 00:20 to nadal trening dnia poprzedniego; przypisanie po
+    // `endedAt` (albo po momencie kliknięcia „Zapisz") przenosiło go razem
+    // z kaloriami na kolejny dzień.
+    final workoutDate = workoutDayFor(session.startedAt, endedAt);
     final performed = session.exercises
         .where((exercise) => exercise.completedSets.isNotEmpty)
         .toList();
@@ -5186,7 +5194,7 @@ class AppStore extends ChangeNotifier {
         WorkoutLog(
           id: '${session.id}_${activeExercise.exerciseId}',
           exerciseId: activeExercise.exerciseId,
-          date: endedAt,
+          date: workoutDate,
           sets: counted.isEmpty ? sets.length : counted.length,
           reps: averageReps,
           weightKg: averageWeight,
@@ -5217,6 +5225,7 @@ class AppStore extends ChangeNotifier {
       completedLogs: completedLogs,
       settings: settings,
       endedAt: endedAt,
+      workoutDate: workoutDate,
     );
     await upsertTrainingImpact(impact);
     // Po zakończeniu treningu dociągnij świeże dane zdrowia i wyślij pakiet
@@ -42215,11 +42224,30 @@ int trainingDayCalorieBoost(DayTotals totals, AppSettings settings) {
   return boost.clamp(0, 650).toInt();
 }
 
+/// Lokalny DZIEŃ TRENINGOWY sesji — zawsze dzień jej ROZPOCZĘCIA.
+///
+/// Sesji przechodzącej przez północ nie dzielimy: cała należy do dnia startu.
+/// [startedAt] i [endedAt] zostają pełnymi znacznikami czasu (do czasu trwania
+/// i historii), a to jest jedyne źródło daty dnia treningowego.
+DateTime workoutDayFor(DateTime? startedAt, DateTime endedAt) {
+  final reference = startedAt ?? endedAt;
+  final local = reference.isUtc ? reference.toLocal() : reference;
+  return DateTime(local.year, local.month, local.day);
+}
+
+/// Klucz dnia treningowego („yyyy-MM-dd") liczony z lokalnej daty startu.
+String workoutDateKeyFor(DateTime? startedAt, DateTime endedAt) {
+  final day = workoutDayFor(startedAt, endedAt);
+  String two(int value) => value.toString().padLeft(2, '0');
+  return '${day.year}-${two(day.month)}-${two(day.day)}';
+}
+
 TrainingImpact buildTrainingImpactForCompletedWorkout({
   required ActiveWorkoutSession session,
   required List<WorkoutLog> completedLogs,
   required AppSettings settings,
   required DateTime endedAt,
+  DateTime? workoutDate,
 }) {
   // Aktywny czas netto (bez pauz/tła) — nie brutto od uruchomienia.
   final durationSeconds = math.max(0, session.netActiveSeconds(endedAt));
@@ -42255,7 +42283,8 @@ TrainingImpact buildTrainingImpactForCompletedWorkout({
     id: 'impact_${session.id}',
     sessionId: session.id,
     sessionName: '${session.planName} · ${session.dayTitle}',
-    date: endedAt,
+    // Dzień treningowy z lokalnego STARTU sesji — nie z zakończenia.
+    date: workoutDate ?? workoutDayFor(session.startedAt, endedAt),
     isTrainingDay: session.completedSetCount > 0,
     estimatedBurnedKcal: estimatedBurnedKcal,
     suggestedCalorieAdjustmentKcal: calorieAdjustment,

@@ -1113,6 +1113,48 @@ double activityFreeMaintenanceFromRestingEnergy(
   return restingEnergy / (1 - safeShare);
 }
 
+/// Netto kcal z PRACY ZAWODOWEJ w dniu roboczym: (MET − 1) × kg × godziny.
+///
+/// Praca należy do BAZOWEGO ZERA — nie jest sportem i nie może wracać jako
+/// „korekta dnia", bo wtedy ten sam ruch liczy się dwa razy.
+double occupationalEnergyKcal({
+  required double weightKg,
+  required String workIntensity,
+  required double workHoursPerDay,
+}) {
+  final met = switch (workIntensity.trim().toLowerCase()) {
+    'sedentary' => 1.4,
+    'light' => 1.8,
+    'moderate' => 2.4,
+    'heavy' => 3.2,
+    _ => 1.0,
+  };
+  if (met <= 1) return 0;
+  final safeWeight = weightKg.isFinite ? weightKg.clamp(30.0, 300.0) : 80.0;
+  final safeHours =
+      workHoursPerDay.isFinite ? workHoursPerDay.clamp(0.0, 16.0) : 0.0;
+  if (safeHours <= 0) return 0;
+  return (met - 1.0) * safeWeight * safeHours;
+}
+
+/// Netto kcal z CODZIENNEGO RUCHU poza pracą (NEAT: chodzenie, dom, zakupy).
+///
+/// To celowo NIE są klasyczne mnożniki PAL (1.35–1.9) — tamte zawierają już
+/// pracę i treningi, więc użyte tu liczyłyby aktywność podwójnie.
+///
+/// [movementFactor] opisuje STYL ŻYCIA, nie plan treningowy. Liczba
+/// zaplanowanych dni treningowych świadomie nie ma tu wpływu: wykonany trening
+/// podnosi cel dynamicznie, więc plan nie może podnosić go po raz drugi.
+double dailyMovementEnergyKcal({
+  required double restingEnergy,
+  double movementFactor = 1.15,
+}) {
+  final safeFactor = movementFactor.isFinite
+      ? movementFactor.clamp(1.0, 1.4)
+      : 1.15;
+  return (safeFactor - 1.0) * restingEnergy;
+}
+
 GoalNutritionTargets? computeGoalNutritionTargets({
   required UserBodyGoalProfile? profile,
   required double weightKg,
@@ -1121,47 +1163,59 @@ GoalNutritionTargets? computeGoalNutritionTargets({
   required String sex,
   required int trainingDaysPerWeek,
   double fatFreeMassKg = 0,
+  String workIntensity = 'none',
+  double workHoursPerDay = 0,
 }) {
   if (profile == null) return null;
   if (!weightKg.isFinite || !heightCm.isFinite) return null;
   if (weightKg <= 0 || heightCm <= 0) return null;
   final strategy = profile.effectiveStrategy;
 
-  // Mifflin is the resting base. Work, steps and training are deliberately
-  // excluded and credited once from the actual activity package of the day.
+  // BAZOWE ZERO ma warstwy: spoczynek + trawienie + praca zawodowa + codzienny
+  // ruch. Poza nim zostaje wyłącznie SPORT (trening, bieg), doliczany raz
+  // z faktycznego pakietu aktywności dnia. Wcześniej baza była „bez
+  // aktywności", więc praca i kroki wracały jako korekta dnia — ten sam ruch
+  // liczył się dwa razy, a makro zostawało policzone dla samej bazy.
   final bmr = mifflinStJeorRestingEnergy(
     weightKg: weightKg,
     heightCm: heightCm,
     age: age,
     sex: sex,
   );
-  final tdee = activityFreeMaintenanceFromRestingEnergy(bmr);
+  final maintenance = activityFreeMaintenanceFromRestingEnergy(bmr);
+  final occupational = occupationalEnergyKcal(
+    weightKg: weightKg,
+    workIntensity: workIntensity,
+    workHoursPerDay: workHoursPerDay,
+  );
+  final movement = dailyMovementEnergyKcal(restingEnergy: bmr);
+  final tdee = maintenance + occupational + movement;
 
   // --- Kcal ze strategii. ---
   final (kcalFactor, rationaleCore) = switch (strategy) {
     BodyCompositionStrategy.fatLoss => (
         0.82,
-        'baza bez aktywności minus kontrolowany deficyt (~18%)',
+        'baza z pracą i chodzeniem minus kontrolowany deficyt (~18%)',
       ),
     BodyCompositionStrategy.recomposition => (
         0.93,
-        'baza bez aktywności z niewielkim deficytem (rekompozycja)',
+        'baza z pracą i chodzeniem z niewielkim deficytem (rekompozycja)',
       ),
     BodyCompositionStrategy.muscleGain => (
         1.08,
-        'baza bez aktywności plus niewielka nadwyżka (budowa mięśni)',
+        'baza z pracą i chodzeniem plus niewielka nadwyżka (budowa mięśni)',
       ),
     BodyCompositionStrategy.maintenance => (
         1.0,
-        'baza bez aktywności (utrzymanie)'
+        'baza z pracą i chodzeniem (utrzymanie)'
       ),
     BodyCompositionStrategy.performance => (
         1.05,
-        'baza bez aktywności z zapasem pod wydolność',
+        'baza z pracą i chodzeniem z zapasem pod wydolność',
       ),
     BodyCompositionStrategy.automatic => (
         1.0,
-        'baza bez aktywności (do czasu '
+        'baza z pracą i chodzeniem (do czasu '
             'zatwierdzenia rekomendacji strategia liczona jak utrzymanie)'
       ),
   };
@@ -1254,7 +1308,8 @@ GoalNutritionTargets? computeGoalNutritionTargets({
     bmrKcal: bmr.round(),
     tdeeKcal: tdee.round(),
     rationale: 'Strategia: ${strategy.label} — $rationaleCore; $proteinBasis. '
-        'Praca, kroki, bieg i trening są doliczane osobno z aktywności dnia.',
+        'Baza obejmuje pracę zawodową i codzienny ruch, więc kroki nie liczą '
+        'się drugi raz. Ponad nią dochodzi tylko sport dnia.',
     sync: profile.syncMetadata,
     calorieTargetLocked: profile.calorieTargetLocked,
   );

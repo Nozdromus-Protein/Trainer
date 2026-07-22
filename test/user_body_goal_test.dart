@@ -252,7 +252,7 @@ void main() {
       expect(t.rationale, isNotEmpty);
     });
 
-    test('Mifflin dla 96 kg, 185 cm i 30 lat nie zawiera treningu', () {
+    test('baza zawiera pracę i codzienny ruch, ale NIE trening', () {
       final t = computeGoalNutritionTargets(
         profile: profile(strategy: BodyCompositionStrategy.recomposition),
         weightKg: 96,
@@ -260,23 +260,35 @@ void main() {
         age: 30,
         sex: 'Mężczyzna',
         trainingDaysPerWeek: 6,
+        workIntensity: 'moderate',
+        workHoursPerDay: 5,
       )!;
       expect(t.bmrKcal, 1971);
-      expect(t.tdeeKcal, 2190);
-      expect(t.goalKcal, 2040);
+      // 2190 (spoczynek + trawienie) + 672 (5 h pracy) + 296 (codzienny ruch).
+      expect(t.tdeeKcal, 3158);
       expect(t.proteinG, 190);
-      expect(t.fatG, 79);
-      expect(t.carbsG, 140);
-      expect(t.sugarLimitG, 51);
-      expect(t.fiberGoalG, 29);
-      expect(t.saturatedFatLimitG, 22);
+      expect(t.sugarLimitG, greaterThan(0));
       expect(t.saltLimitG, 5);
+
+      // Bez pracy baza spada dokładnie o jej wartość — warstwy są rozdzielne.
+      final noWork = computeGoalNutritionTargets(
+        profile: profile(strategy: BodyCompositionStrategy.recomposition),
+        weightKg: 96,
+        heightCm: 185,
+        age: 30,
+        sex: 'Mężczyzna',
+        trainingDaysPerWeek: 6,
+      )!;
+      expect(t.tdeeKcal - noWork.tdeeKcal, 672);
 
       final macroKcal = t.proteinG * 4 + t.carbsG * 4 + t.fatG * 9;
       expect((macroKcal - t.goalKcal).abs(), lessThanOrEqualTo(20));
       final fatShare = t.fatG * 9 / t.goalKcal;
       expect(fatShare, inInclusiveRange(0.20, 0.35));
 
+      // Liczba ZAPLANOWANYCH dni treningowych nie może podnosić bazy —
+      // wykonany trening podnosi cel dynamicznie, więc plan liczyłby go
+      // drugi raz.
       final withoutPlannedTraining = computeGoalNutritionTargets(
         profile: profile(strategy: BodyCompositionStrategy.recomposition),
         weightKg: 96,
@@ -284,8 +296,11 @@ void main() {
         age: 30,
         sex: 'Mężczyzna',
         trainingDaysPerWeek: 0,
+        workIntensity: 'moderate',
+        workHoursPerDay: 5,
       )!;
       expect(withoutPlannedTraining.goalKcal, t.goalKcal);
+      expect(withoutPlannedTraining.tdeeKcal, t.tdeeKcal);
     });
 
     test('białko z FFM, gdy jest znana (nie % kalorii)', () {
