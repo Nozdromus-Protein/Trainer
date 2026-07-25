@@ -1031,12 +1031,17 @@ PlanItem _smartItem(
   int? restOverride, // nadpisanie przerwy (dzień siłowy → dłuższa przerwa)
 }) {
   final ex = resolve(id);
-  if (ex.defaultDurationSec > 0) {
+  // O kształcie pozycji decyduje TYP WPISU ćwiczenia, a nie sam fakt, że ma
+  // ustawiony czas domyślny. Inaczej plan mógł kazać liczyć sekundy ćwiczeniu,
+  // którego panel wpisu zna wyłącznie serie i powtórzenia (i odwrotnie).
+  final entryType = ex.entryType;
+  if (entryType.showsDuration && !entryType.showsReps) {
+    final base = ex.defaultDurationSec > 0 ? ex.defaultDurationSec : 40;
     return PlanItem(
       exerciseId: id,
       sets: sets,
       reps: 0,
-      durationSec: ex.defaultDurationSec + durationBonus,
+      durationSec: base + durationBonus,
       note: note,
       restSeconds: restOverride ?? coreRest,
     );

@@ -19,10 +19,15 @@ class WorkoutSession {
     this.sessionStartedAt,
     this.sessionEndedAt,
     this.sessionNote = '',
+    this.performedAt,
   });
 
   final String id;
   final String exerciseId;
+
+  /// DZIEŃ treningowy (lokalna północ). Trening 23:40 → 00:20 należy w całości
+  /// do dnia, w którym się zaczął — na tym opiera się historia, statystyki dnia
+  /// i most do Kalorii, więc pole celowo NIE niesie godziny.
   final DateTime date;
   final int sets;
   final int reps;
@@ -38,6 +43,19 @@ class WorkoutSession {
   final DateTime? sessionStartedAt;
   final DateTime? sessionEndedAt;
   final String sessionNote;
+
+  /// MOMENT wykonania (z godziną) dla wpisów spoza sesji treningowej.
+  /// `null` = brak jawnego znacznika; patrz [effectivePerformedAt].
+  final DateTime? performedAt;
+
+  /// Realny moment wysiłku — używany przez model regeneracji.
+  ///
+  /// [date] to sama data dnia (północ), więc liczenie od niej wygaszało bodziec
+  /// o tyle godzin, ile minęło od północy: trening o 21:00 wyglądał zaraz po
+  /// zakończeniu jak sprzed 21 godzin i mapa mięśni pokazywała „zregenerowane".
+  /// Kolejność: jawny znacznik → koniec sesji → start sesji → dzień treningowy.
+  DateTime get effectivePerformedAt =>
+      performedAt ?? sessionEndedAt ?? sessionStartedAt ?? date;
 
   double get volume => workoutSets.isEmpty
       ? sets * reps * weightKg
@@ -64,6 +82,7 @@ class WorkoutSession {
         'sessionStartedAt': sessionStartedAt?.toIso8601String(),
         'sessionEndedAt': sessionEndedAt?.toIso8601String(),
         'sessionNote': sessionNote,
+        'performedAt': performedAt?.toIso8601String(),
       };
 
   factory WorkoutSession.fromJson(Map<String, dynamic> json) => WorkoutSession(
@@ -95,6 +114,7 @@ class WorkoutSession {
         sessionEndedAt:
             DateTime.tryParse(json['sessionEndedAt']?.toString() ?? ''),
         sessionNote: json['sessionNote']?.toString() ?? '',
+        performedAt: DateTime.tryParse(json['performedAt']?.toString() ?? ''),
       );
 }
 
@@ -117,7 +137,20 @@ class WorkoutLog extends WorkoutSession {
     super.sessionStartedAt,
     super.sessionEndedAt,
     super.sessionNote,
+    super.performedAt,
+    this.planId = '',
+    this.dayIndex = -1,
   });
+
+  /// Plan (zestaw), z którego pochodzi wpis. Pusty = wpis ręczny / spoza planu.
+  ///
+  /// Bez tego nie dało się stwierdzić, KTÓRY zestaw został dziś wykonany —
+  /// rozkład dwutorowy potrzebuje tego, żeby po pierwszorzędnym przejść do
+  /// drugorzędnego zamiast proponować w kółko ten sam program.
+  final String planId;
+
+  /// Indeks dnia w planie (−1 = nieznany / wpis spoza planu).
+  final int dayIndex;
 
   WorkoutLog copyWith({
     String? id,
@@ -137,6 +170,9 @@ class WorkoutLog extends WorkoutSession {
     DateTime? sessionStartedAt,
     DateTime? sessionEndedAt,
     String? sessionNote,
+    DateTime? performedAt,
+    String? planId,
+    int? dayIndex,
   }) {
     return WorkoutLog(
       id: id ?? this.id,
@@ -156,8 +192,18 @@ class WorkoutLog extends WorkoutSession {
       sessionStartedAt: sessionStartedAt ?? this.sessionStartedAt,
       sessionEndedAt: sessionEndedAt ?? this.sessionEndedAt,
       sessionNote: sessionNote ?? this.sessionNote,
+      performedAt: performedAt ?? this.performedAt,
+      planId: planId ?? this.planId,
+      dayIndex: dayIndex ?? this.dayIndex,
     );
   }
+
+  @override
+  Map<String, dynamic> toJson() => {
+        ...super.toJson(),
+        if (planId.isNotEmpty) 'planId': planId,
+        if (dayIndex >= 0) 'dayIndex': dayIndex,
+      };
 
   factory WorkoutLog.fromJson(Map<String, dynamic> json) {
     final session = WorkoutSession.fromJson(json);
@@ -179,6 +225,9 @@ class WorkoutLog extends WorkoutSession {
       sessionStartedAt: session.sessionStartedAt,
       sessionEndedAt: session.sessionEndedAt,
       sessionNote: session.sessionNote,
+      performedAt: session.performedAt,
+      planId: json['planId']?.toString() ?? '',
+      dayIndex: (json['dayIndex'] as num?)?.toInt() ?? -1,
     );
   }
 }

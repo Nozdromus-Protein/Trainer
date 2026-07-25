@@ -1241,6 +1241,10 @@ class AppStore extends ChangeNotifier {
   static const _warmupCompletionsKey = 'warmup_completions_v1';
   static const _plansWarmupMigrationKey = 'plans_warmup_migration_v1';
 
+  /// Migracja treści zestawów katalogowych na rytm „same dni ciężkie".
+  /// Bump wersji wymusza jednorazową przebudowę zapisanych programów.
+  static const _plansHeavyDaysMigrationKey = 'plans_heavy_days_migration_v1';
+
   /// Ukończone programy rozgrzewkowe: id rozgrzewki → moment ukończenia.
   /// Bramka ciężkiego dnia honoruje wpis tylko przez [kWarmupFreshness].
   final Map<String, DateTime> warmupCompletions = {};
@@ -1532,6 +1536,50 @@ class AppStore extends ChangeNotifier {
       if (migrated) await savePlans();
       await prefs.setBool(_plansWarmupMigrationKey, true);
     }
+
+    // Migracja treści programów katalogowych: rytm tygodnia to dziś SAME dni
+    // ciężkie (odpoczynek daje rozkład tygodnia, odciążenie — deload). Zestawy
+    // zapisane wcześniej trzymają jednak swoją starą treść, bo raz wystartowany
+    // program nigdy nie był przebudowywany — użytkownik dalej widziałby dni
+    // techniczne, mobilnościowe i odpoczynkowe. Przebudowujemy TREŚĆ,
+    // zachowując tożsamość planu i cały postęp.
+    if (!(prefs.getBool(_plansHeavyDaysMigrationKey) ?? false)) {
+      if (rebuildLightCatalogPlanDays()) await savePlans();
+      await prefs.setBool(_plansHeavyDaysMigrationKey, true);
+    }
+  }
+
+  /// Czy plan zawiera dni inne niż ciężkie (techniczne / mobilność / odpoczynek).
+  static bool planHasLightDays(WorkoutPlan plan) {
+    for (final day in plan.days) {
+      if (!day.kind.isHeavy) return true;
+      if (plan.isRestDay(day)) return true;
+    }
+    return false;
+  }
+
+  /// Przebudowuje zapisane programy KATALOGOWE, w których zostały dni lekkie
+  /// albo odpoczynkowe. Zwraca `true`, gdy cokolwiek zmieniono.
+  ///
+  /// Postęp ([WorkoutPlan.completedDays]), wariant, okładka, korekta
+  /// intensywności i aktywność planu zostają nietknięte — zmienia się wyłącznie
+  /// treść dni.
+  bool rebuildLightCatalogPlanDays() {
+    var changed = false;
+    for (var index = 0; index < plans.length; index++) {
+      final plan = plans[index];
+      final programId = catalogProgramIdForPlan(plan.id);
+      if (programId == null || plan.days.isEmpty) continue;
+      if (!planHasLightDays(plan)) continue;
+      final rebuilt = buildEquipmentAwareProgram(
+        this,
+        programId,
+        level: plan.level.isNotEmpty ? plan.level : settings.level,
+      );
+      plans[index] = plan.copyWith(days: rebuilt.days, note: rebuilt.note);
+      changed = true;
+    }
+    return changed;
   }
 
   Future<void> saveAll() async {
@@ -1657,6 +1705,137 @@ class AppStore extends ChangeNotifier {
     if (scheduled == null) return activeWorkoutPlan; // brak rozkładu
     if (scheduled.isRest) return null;
     return scheduledPlanForArea(scheduled.area);
+  }
+
+  // ── Dzisiejszy trening: dwa tory jako osobne, pełne zestawy ────────────────
+
+  /// Czy obszar był DZIŚ trenowany (log z partią główną tego obszaru).
+  bool _areaTrainedToday(TrainingFocusArea area, DateTime now) {
+    if (area.muscles.isEmpty) return false;
+    for (final log in logsForDay(now)) {
+      final def = ExerciseRepo.byId(log.exerciseId, customExercises);
+      for (final impact in def.effectiveMuscleImpacts) {
+        if (impact.role == MuscleRole.primary &&
+            area.muscles.contains(impact.muscleGroup)) {
+          return true;
+        }
+      }
+    }
+    return false;
+  }
+
+  /// Czy dany plan był DZIŚ realizowany.
+  ///
+  /// Nowe wpisy niosą `planId`; starsze (sprzed tego pola) rozpoznajemy po
+  /// nazwie sesji, żeby historia nie przestała się liczyć po aktualizacji.
+  bool _planTrainedToday(WorkoutPlan plan, DateTime now) {
+    for (final log in logsForDay(now)) {
+      if (log.planId == plan.id) return true;
+      if (log.planId.isEmpty &&
+          plan.name.isNotEmpty &&
+          log.sessionName.startsWith(plan.name)) {
+        return true;
+      }
+    }
+    return false;
+  }
+
+  /// Bloki treningowe na dziś w KOLEJNOŚCI WYKONANIA: najpierw tor
+  /// pierwszorzędny, potem drugorzędny.
+  ///
+  /// Do tej pory drugorzędny tor był tylko etykietą i dwoma ćwiczeniami
+  /// doklejonymi na koniec dnia pierwszorzędnego, więc po ukończeniu zestawu
+  /// głównego aplikacja proponowała… ten sam zestaw jeszcze raz. Teraz każdy tor
+  /// ma własny, pełny zestaw i własny status ukończenia.
+  List<TodayTrainingBlock> todayTrainingBlocks([DateTime? now]) {
+    final reference = now ?? DateTime.now();
+    final scheduled = todayScheduled;
+    if (scheduled == null || scheduled.isRest) return const [];
+
+    // Rozkład zdejmuje dodatek dnia, gdy jego partie są zmęczone. Jeśli to
+    // DZISIEJSZY trening je zmęczył, blok jest zrobiony — należy do podsumowania
+    // dnia, a nie do kosza. Bez tego zamknięty dzień gubił drugi zestaw.
+    var secondary = scheduled.secondaryArea;
+    if (secondary == null) {
+      final planned =
+          trainingScheduleConfig.planForWeekday(reference.weekday).secondary;
+      if (planned != null && _areaTrainedToday(planned, reference)) {
+        secondary = planned;
+      }
+    }
+
+    final result = <TodayTrainingBlock>[];
+    var order = 1;
+    for (final area in <TrainingFocusArea?>[scheduled.area, secondary]) {
+      if (area == null) continue;
+      result.add(_blockFor(area, order: order, now: reference));
+      order++;
+    }
+    return result;
+  }
+
+  TodayTrainingBlock _blockFor(
+    TrainingFocusArea area, {
+    required int order,
+    required DateTime now,
+  }) {
+    final catalogId = programIdForArea(area);
+    final plan = catalogId == null ? null : planForArea(area);
+    final trainedArea = _areaTrainedToday(area, now);
+
+    if (plan == null || plan.days.isEmpty) {
+      return TodayTrainingBlock(
+        order: order,
+        area: area,
+        catalogProgramId: catalogId,
+        isDone: trainedArea,
+      );
+    }
+
+    final index = plan.currentDayIndex.clamp(0, plan.days.length - 1);
+    final day = presentedDay(plan, plan.days[index], now);
+    var sets = 0;
+    var seconds = 0;
+    for (final item in day.items) {
+      final itemSets = item.sets < 1 ? 1 : item.sets;
+      sets += itemSets;
+      final work = item.durationSec > 0
+          ? item.durationSec
+          : (item.reps > 0 ? item.reps : 10) * 3;
+      seconds += itemSets * (work + item.restSeconds);
+    }
+    return TodayTrainingBlock(
+      order: order,
+      area: area,
+      catalogProgramId: catalogId,
+      planId: plan.id,
+      planName: plan.name,
+      dayIndex: index,
+      dayNumber: index + 1,
+      totalDays: plan.days.length,
+      dayTitle: day.title,
+      exerciseCount: day.items.length,
+      setCount: sets,
+      estimatedMinutes: seconds <= 0 ? 0 : math.max(1, (seconds / 60).round()),
+      isDone: plan.isProgramCompleted ||
+          _planTrainedToday(plan, now) ||
+          trainedArea,
+    );
+  }
+
+  /// Pierwszy NIEUKOŃCZONY blok dnia (`null` = wszystko zrobione / dzień wolny).
+  TodayTrainingBlock? nextTrainingBlockToday([DateTime? now]) {
+    for (final block in todayTrainingBlocks(now)) {
+      if (!block.isDone) return block;
+    }
+    return null;
+  }
+
+  /// Czy dzisiejszy trening jest DOMKNIĘTY — rozkład coś przewidywał i wszystkie
+  /// zaplanowane zestawy są wykonane.
+  bool isTodayTrainingClosed([DateTime? now]) {
+    final blocks = todayTrainingBlocks(now);
+    return blocks.isNotEmpty && blocks.every((block) => block.isDone);
   }
 
   /// Zapisuje nową konfigurację rozkładu (np. inna rotacja).
@@ -5213,6 +5392,10 @@ class AppStore extends ChangeNotifier {
           sessionStartedAt: session.startedAt,
           sessionEndedAt: endedAt,
           sessionNote: session.note,
+          // Zestaw i dzień, z którego pochodzi wpis — po tym rozkład dwutorowy
+          // poznaje, że pierwszorzędny program dnia jest już zrobiony.
+          planId: session.planId,
+          dayIndex: session.dayIndex,
         ),
       );
     }
@@ -5553,13 +5736,18 @@ class AppStore extends ChangeNotifier {
     // Inaczej dzień nóg zamieniał się w to, co użytkownik ostatnio otworzył.
     PlannerProgramContext? program;
     final scheduledToday = todayScheduled;
+    // Planujemy blok, który jest DZIŚ NA KOLEI: gdy tor pierwszorzędny jest już
+    // zrobiony, propozycja przechodzi na drugorzędny zamiast pokazywać w kółko
+    // ten sam zestaw.
+    final currentBlock = nextTrainingBlockToday(now);
+    final blockArea = currentBlock?.area ?? scheduledToday?.area;
     final WorkoutPlan? plan;
     if (scheduledToday == null) {
       plan = activeWorkoutPlan; // rozkład jeszcze nieustawiony
     } else if (scheduledToday.isRest) {
       plan = null;
     } else {
-      plan = scheduledPlanForArea(scheduledToday.area);
+      plan = scheduledPlanForArea(blockArea);
     }
     if (plan != null && !plan.isProgramCompleted && plan.days.isNotEmpty) {
       final index = plan.currentDayIndex.clamp(0, plan.days.length - 1);
@@ -5581,11 +5769,17 @@ class AppStore extends ChangeNotifier {
           ));
         }
       }
-      // Dodatek dnia z toru DRUGORZĘDNEGO doklejamy na koniec zestawu. Dzień
-      // „Klatka + Barki" ma realnie zawierać barki także wtedy, gdy klatkę
-      // realizuje gotowy program partii — inaczej druga kolumna rozkładu była
-      // tylko etykietą.
-      final extra = scheduledToday?.secondaryArea;
+      // Dodatek dnia z toru DRUGORZĘDNEGO doklejamy na koniec zestawu TYLKO
+      // wtedy, gdy ten tor nie ma własnego programu 30-dniowego (cardio,
+      // mobilność). Obszary z programem są osobnym, pełnym blokiem dnia
+      // ([todayTrainingBlocks]) — doklejanie ich dwoma ćwiczeniami dublowałoby
+      // pracę i zacierało kolejność „najpierw główny, potem dodatek".
+      final secondary = scheduledToday?.secondaryArea;
+      final extra = (currentBlock?.isPrimary ?? true) &&
+              secondary != null &&
+              programIdForArea(secondary) == null
+          ? secondary
+          : null;
       if (!isRest && extra != null && extra.muscles.isNotEmpty) {
         final used = {for (final item in day.items) item.exerciseId};
         var added = 0;
@@ -14055,6 +14249,76 @@ Future<void> showPlannerDeloadDialog(
   );
 }
 
+/// Jeden zestaw do wykonania DZIŚ: tor pierwszorzędny albo drugorzędny.
+///
+/// Oba tory są pełnoprawnymi zestawami wykonywanymi po kolei — [order] mówi,
+/// który jest pierwszy, a [isDone] czy jest już zamknięty.
+class TodayTrainingBlock {
+  const TodayTrainingBlock({
+    required this.order,
+    required this.area,
+    required this.catalogProgramId,
+    this.planId = '',
+    this.planName = '',
+    this.dayIndex = -1,
+    this.dayNumber = 0,
+    this.totalDays = 0,
+    this.dayTitle = '',
+    this.exerciseCount = 0,
+    this.setCount = 0,
+    this.estimatedMinutes = 0,
+    this.isDone = false,
+  });
+
+  /// 1 = pierwszorzędny (partia główna dnia), 2 = drugorzędny (dodatek).
+  final int order;
+  final TrainingFocusArea area;
+
+  /// Program 30-dniowy tego obszaru; `null` dla cardio/mobilności.
+  final String? catalogProgramId;
+
+  /// Id zapisanego planu — pusty, gdy program nie został jeszcze rozpoczęty.
+  final String planId;
+  final String planName;
+  final int dayIndex;
+  final int dayNumber;
+  final int totalDays;
+  final String dayTitle;
+  final int exerciseCount;
+  final int setCount;
+  final int estimatedMinutes;
+  final bool isDone;
+
+  bool get isStarted => planId.isNotEmpty && dayIndex >= 0;
+  bool get hasProgram => catalogProgramId != null;
+  bool get isPrimary => order <= 1;
+
+  String get trackLabel => isPrimary ? 'Pierwszorzędny' : 'Drugorzędny';
+
+  /// Zwięzły opis zawartości: „7 ćwiczeń · 21 serii · ~52 min".
+  String get contentLabel {
+    if (!isStarted) {
+      return hasProgram
+          ? 'Program jeszcze nierozpoczęty — dotknij, aby wystartować'
+          : 'Zestaw dobierany na miejscu';
+    }
+    final parts = <String>[
+      '$exerciseCount ${_plural(exerciseCount, 'ćwiczenie', 'ćwiczenia', 'ćwiczeń')}',
+      '$setCount ${_plural(setCount, 'seria', 'serie', 'serii')}',
+      if (estimatedMinutes > 0) '~$estimatedMinutes min',
+    ];
+    return parts.join(' · ');
+  }
+
+  static String _plural(int value, String one, String few, String many) {
+    if (value == 1) return one;
+    final mod10 = value % 10;
+    final mod100 = value % 100;
+    if (mod10 >= 2 && mod10 <= 4 && (mod100 < 12 || mod100 > 14)) return few;
+    return many;
+  }
+}
+
 /// Program z katalogu odpowiadający obszarowi rozkładu (null = cardio/mobilność,
 /// które mają własne kafelki zamiast programu 30-dniowego).
 String? programIdForArea(TrainingFocusArea? area) {
@@ -14082,6 +14346,9 @@ String? programIdForArea(TrainingFocusArea? area) {
 
 /// Kafelek „Kontynuuj program" — prowadzi do DNIA WYNIKAJĄCEGO Z PLANU
 /// (a nie do ostatnio klikniętego zestawu) i tam pokazuje jasny start.
+///
+/// Gdy tor pierwszorzędny jest już dziś zrobiony, kafelek prowadzi do toru
+/// DRUGORZĘDNEGO — wcześniej w kółko proponował ten sam, ukończony zestaw.
 class _ContinueProgramTile extends StatelessWidget {
   const _ContinueProgramTile();
 
@@ -14091,53 +14358,67 @@ class _ContinueProgramTile extends StatelessWidget {
     final theme = Theme.of(context);
     final scheme = theme.colorScheme;
     final scheduled = store.todayScheduled;
-    final area = scheduled?.area;
+    final block = store.nextTrainingBlockToday();
+    final area = block?.area ?? scheduled?.area;
     final programId = programIdForArea(area);
 
-    // Opis dnia bierzemy z [ScheduledDay.label] — obejmuje oba tory, więc
-    // dzień to „Klatka piersiowa + Barki", a nie sama klatka.
     final String title;
     final String subtitle;
     if (scheduled == null || scheduled.isRest || area == null) {
       title = 'Dziś dzień wolny';
       subtitle = 'Rozkład nie przewiduje treningu — możesz odpocząć.';
+    } else if (block == null) {
+      title = 'Dzisiejszy trening zamknięty';
+      subtitle = 'Wszystkie zestawy z rozkładu (${scheduled.label}) wykonane.';
     } else if (scheduled.isDeload) {
-      title = 'Kontynuuj program (deload)';
-      subtitle = 'Wg planu: ${scheduled.label} · lżejszy tydzień odciążenia';
+      title = block.isPrimary
+          ? 'Zacznij zestaw główny (deload)'
+          : 'Zacznij zestaw drugorzędny (deload)';
+      subtitle = '${block.order}/${store.todayTrainingBlocks().length} · '
+          '${block.area.label} · lżejszy tydzień odciążenia';
     } else {
-      title = 'Kontynuuj program';
-      subtitle = 'Wg planu na dziś: ${scheduled.label}'
+      title = block.isPrimary
+          ? 'Zacznij zestaw główny'
+          : 'Przejdź do zestawu drugorzędnego';
+      subtitle = '${block.order}/${store.todayTrainingBlocks().length} · '
+          '${block.area.label}'
           '${scheduled.moved ? ' · dzień przestawiony pod regenerację' : ''}';
     }
 
+    final closed = block == null && scheduled != null && !scheduled.isRest;
     return Material(
-      color: scheme.primary.withValues(alpha: 0.14),
+      color: scheme.primary.withValues(alpha: closed ? 0.07 : 0.14),
       borderRadius: BorderRadius.circular(14),
       child: InkWell(
         key: const Key('continue_program_tile'),
         borderRadius: BorderRadius.circular(14),
-        onTap: () async {
-          if (programId == null) {
-            openWorkoutProgramCatalog(context);
-            return;
-          }
-          final plan = await startCatalogProgram(context, programId);
-          if (!context.mounted || plan.days.isEmpty) return;
-          final index = plan.currentDayIndex.clamp(0, plan.days.length - 1);
-          await Navigator.of(context).push(MaterialPageRoute<void>(
-            builder: (_) =>
-                WorkoutDayDetailsPage(planId: plan.id, dayIndex: index),
-          ));
-        },
+        onTap: closed
+            ? null
+            : () async {
+                if (programId == null) {
+                  openWorkoutProgramCatalog(context);
+                  return;
+                }
+                final plan = await startCatalogProgram(context, programId);
+                if (!context.mounted || plan.days.isEmpty) return;
+                final index =
+                    plan.currentDayIndex.clamp(0, plan.days.length - 1);
+                await Navigator.of(context).push(MaterialPageRoute<void>(
+                  builder: (_) =>
+                      WorkoutDayDetailsPage(planId: plan.id, dayIndex: index),
+                ));
+              },
         child: Padding(
           padding: const EdgeInsets.fromLTRB(14, 12, 10, 12),
           child: Row(
             children: [
               Icon(
-                  scheduled?.isDeload == true
-                      ? Icons.self_improvement_rounded
-                      : Icons.playlist_play_rounded,
-                  color: scheduled?.isDeload == true
+                  closed
+                      ? Icons.check_circle_rounded
+                      : (scheduled?.isDeload == true
+                          ? Icons.self_improvement_rounded
+                          : Icons.playlist_play_rounded),
+                  color: scheduled?.isDeload == true && !closed
                       ? kDeloadColor
                       : scheme.primary),
               const SizedBox(width: 12),
@@ -14155,7 +14436,8 @@ class _ContinueProgramTile extends StatelessWidget {
                   ],
                 ),
               ),
-              Icon(Icons.chevron_right_rounded, color: scheme.primary),
+              if (!closed)
+                Icon(Icons.chevron_right_rounded, color: scheme.primary),
             ],
           ),
         ),
@@ -20308,6 +20590,12 @@ class _TrainingPlannerHeroCardState extends State<TrainingPlannerHeroCard> {
     final planned = _resolve(store);
     final radius = BorderRadius.circular(uiCornerRadius(context, 24));
     final isSimulated = _timeCap > 0 || _equipmentMode.isNotEmpty;
+    final blocks = store.todayTrainingBlocks();
+    // Dzień DOMKNIĘTY: rozkład coś przewidywał i oba tory są wykonane. Karta
+    // zostaje na ekranie (jest podsumowaniem obu programów), ale przestaje
+    // zapraszać do startu — bez niej znikałaby informacja, co się dziś zrobiło.
+    final closed = blocks.isNotEmpty && blocks.every((block) => block.isDone);
+    if (closed) return _buildClosedCard(context, blocks, radius);
 
     return Container(
       margin: const EdgeInsets.only(bottom: 16),
@@ -20384,6 +20672,11 @@ class _TrainingPlannerHeroCardState extends State<TrainingPlannerHeroCard> {
                   ),
                 ],
               ),
+            ],
+            // Rozpiska obu torów dnia z kolejnością i statusem.
+            if (blocks.isNotEmpty) ...[
+              const SizedBox(height: 14),
+              _TodayBlocksSection(blocks: blocks),
             ],
             const SizedBox(height: 12),
             // Meta: czas / intensywność / gotowość / obciążenie.
@@ -20620,6 +20913,95 @@ class _TrainingPlannerHeroCardState extends State<TrainingPlannerHeroCard> {
     );
   }
 
+  /// Karta po ZAMKNIĘCIU dnia: wygaszona, bez akcji startu, ale nadal
+  /// z podsumowaniem obu zestawów — dzień się skończył, informacja zostaje.
+  Widget _buildClosedCard(
+    BuildContext context,
+    List<TodayTrainingBlock> blocks,
+    BorderRadius radius,
+  ) {
+    final theme = Theme.of(context);
+    final scheme = theme.colorScheme;
+    final exercises = blocks.fold<int>(0, (sum, b) => sum + b.exerciseCount);
+    final sets = blocks.fold<int>(0, (sum, b) => sum + b.setCount);
+
+    return Container(
+      key: const Key('today_training_closed'),
+      margin: const EdgeInsets.only(bottom: 16),
+      decoration: BoxDecoration(
+        color: scheme.surfaceContainerHighest.withValues(alpha: 0.45),
+        borderRadius: radius,
+        border: Border.all(color: scheme.outlineVariant.withValues(alpha: 0.6)),
+      ),
+      child: Padding(
+        padding: const EdgeInsets.fromLTRB(16, 14, 16, 16),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.stretch,
+          children: [
+            Row(
+              children: [
+                Icon(Icons.lock_outline_rounded,
+                    size: 20, color: scheme.onSurfaceVariant),
+                const SizedBox(width: 8),
+                Expanded(
+                  child: Text(
+                    'DZISIEJSZY TRENING — ZAMKNIĘTY',
+                    maxLines: 1,
+                    overflow: TextOverflow.ellipsis,
+                    style: theme.textTheme.labelMedium?.copyWith(
+                      fontWeight: FontWeight.w900,
+                      color: scheme.onSurfaceVariant,
+                      letterSpacing: 0.8,
+                    ),
+                  ),
+                ),
+                Icon(Icons.task_alt_rounded, size: 20, color: scheme.primary),
+              ],
+            ),
+            const SizedBox(height: 10),
+            Text(
+              blocks.length > 1
+                  ? 'Oba zestawy z rozkładu wykonane'
+                  : 'Zestaw z rozkładu wykonany',
+              style: theme.textTheme.titleLarge
+                  ?.copyWith(fontWeight: FontWeight.w900),
+            ),
+            const SizedBox(height: 2),
+            Text(
+              'Razem $exercises ${TodayTrainingBlock._plural(exercises, 'ćwiczenie', 'ćwiczenia', 'ćwiczeń')}'
+              ' · $sets ${TodayTrainingBlock._plural(sets, 'seria', 'serie', 'serii')}'
+              ' — kolejny trening wg rozkładu.',
+              style: theme.textTheme.bodySmall?.copyWith(
+                  color: scheme.onSurfaceVariant, fontWeight: FontWeight.w600),
+            ),
+            const SizedBox(height: 14),
+            _TodayBlocksSection(blocks: blocks),
+            const SizedBox(height: 4),
+            Row(
+              children: [
+                Expanded(
+                  child: OutlinedButton.icon(
+                    onPressed: () => openMuscleRecoveryPage(context),
+                    icon: const Icon(Icons.self_improvement_rounded, size: 18),
+                    label: const Text('Regeneracja'),
+                  ),
+                ),
+                const SizedBox(width: 10),
+                Expanded(
+                  child: OutlinedButton.icon(
+                    onPressed: () => openWorkoutProgramCatalog(context),
+                    icon: const Icon(Icons.grid_view_rounded, size: 18),
+                    label: const Text('Programy'),
+                  ),
+                ),
+              ],
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
   Future<void> _showPlannerDecisions(
       BuildContext context, PlannedWorkout planned) async {
     await showModalBottomSheet<void>(
@@ -20724,6 +21106,152 @@ class _TrainingPlannerHeroCardState extends State<TrainingPlannerHeroCard> {
           ),
         );
       },
+    );
+  }
+}
+
+/// Otwiera zestaw danego bloku dnia (startuje program, jeśli trzeba).
+Future<void> openTrainingBlock(
+    BuildContext context, TodayTrainingBlock block) async {
+  final programId = block.catalogProgramId;
+  if (programId == null) {
+    openWorkoutProgramCatalog(context);
+    return;
+  }
+  final plan = await startCatalogProgram(context, programId);
+  if (!context.mounted || plan.days.isEmpty) return;
+  final index = plan.currentDayIndex.clamp(0, plan.days.length - 1);
+  await Navigator.of(context).push(MaterialPageRoute<void>(
+    builder: (_) => WorkoutDayDetailsPage(planId: plan.id, dayIndex: index),
+  ));
+}
+
+/// Rozpiska dnia: PEŁNA zawartość toru pierwszorzędnego i drugorzędnego wraz
+/// z kolejnością wykonania i statusem ukończenia.
+///
+/// Do tej pory drugi tor był w kafelku tylko słowem w tytule („Nogi + Barki"),
+/// więc nie było widać, ile realnie jest do zrobienia ani co idzie po czym.
+class _TodayBlocksSection extends StatelessWidget {
+  const _TodayBlocksSection({required this.blocks});
+
+  final List<TodayTrainingBlock> blocks;
+
+  @override
+  Widget build(BuildContext context) {
+    final theme = Theme.of(context);
+    final scheme = theme.colorScheme;
+    return Column(
+      key: const Key('today_blocks_section'),
+      crossAxisAlignment: CrossAxisAlignment.stretch,
+      children: [
+        Text(
+          blocks.length > 1
+              ? 'Kolejność na dziś — najpierw zestaw główny, potem dodatek'
+              : 'Zestaw na dziś',
+          style: theme.textTheme.labelLarge?.copyWith(
+              fontWeight: FontWeight.w900, color: scheme.onSurfaceVariant),
+        ),
+        const SizedBox(height: 8),
+        for (final block in blocks)
+          Padding(
+            padding: const EdgeInsets.only(bottom: 8),
+            child: _TodayBlockRow(block: block),
+          ),
+      ],
+    );
+  }
+}
+
+class _TodayBlockRow extends StatelessWidget {
+  const _TodayBlockRow({required this.block});
+
+  final TodayTrainingBlock block;
+
+  @override
+  Widget build(BuildContext context) {
+    final theme = Theme.of(context);
+    final scheme = theme.colorScheme;
+    final done = block.isDone;
+    final accent = done ? scheme.onSurfaceVariant : scheme.primary;
+    final title = block.isStarted && block.dayTitle.isNotEmpty
+        ? block.dayTitle
+        : block.area.label;
+
+    return Material(
+      color: scheme.surfaceContainerHighest.withValues(alpha: done ? 0.3 : 0.5),
+      borderRadius: BorderRadius.circular(14),
+      child: InkWell(
+        key: Key('today_block_${block.order}'),
+        borderRadius: BorderRadius.circular(14),
+        onTap: done ? null : () => openTrainingBlock(context, block),
+        child: Padding(
+          padding: const EdgeInsets.fromLTRB(12, 10, 10, 10),
+          child: Row(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Container(
+                width: 26,
+                height: 26,
+                alignment: Alignment.center,
+                decoration: BoxDecoration(
+                  color: accent.withValues(alpha: 0.16),
+                  shape: BoxShape.circle,
+                  border: Border.all(color: accent.withValues(alpha: 0.45)),
+                ),
+                child: done
+                    ? Icon(Icons.check_rounded, size: 15, color: accent)
+                    : Text('${block.order}',
+                        style: theme.textTheme.labelMedium?.copyWith(
+                            fontWeight: FontWeight.w900, color: accent)),
+              ),
+              const SizedBox(width: 10),
+              Expanded(
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Text(
+                      '${block.trackLabel.toUpperCase()} · ${block.area.label}',
+                      style: theme.textTheme.labelSmall?.copyWith(
+                          fontWeight: FontWeight.w900,
+                          letterSpacing: 0.5,
+                          color: accent),
+                    ),
+                    const SizedBox(height: 2),
+                    Text(
+                      title,
+                      maxLines: 2,
+                      overflow: TextOverflow.ellipsis,
+                      style: theme.textTheme.bodyMedium?.copyWith(
+                        fontWeight: FontWeight.w800,
+                        decoration: done ? TextDecoration.lineThrough : null,
+                        color: done ? scheme.onSurfaceVariant : null,
+                      ),
+                    ),
+                    const SizedBox(height: 2),
+                    Text(
+                      done
+                          ? 'Wykonane dziś · ${block.contentLabel}'
+                          : block.contentLabel,
+                      style: theme.textTheme.bodySmall
+                          ?.copyWith(color: scheme.onSurfaceVariant),
+                    ),
+                    if (block.isStarted && block.totalDays > 0)
+                      Text(
+                        'Dzień ${block.dayNumber}/${block.totalDays} · ${block.planName}',
+                        maxLines: 1,
+                        overflow: TextOverflow.ellipsis,
+                        style: theme.textTheme.labelSmall
+                            ?.copyWith(color: scheme.onSurfaceVariant),
+                      ),
+                  ],
+                ),
+              ),
+              if (!done)
+                Icon(Icons.chevron_right_rounded, color: scheme.primary),
+            ],
+          ),
+        ),
+      ),
     );
   }
 }
@@ -25366,9 +25894,16 @@ class _ActiveExercisePlayerPageState extends State<ActiveExercisePlayerPage> {
   }
 
   /// Podpis kafelka kolejki: serie/powtórzenia albo czas ćwiczenia.
+  ///
+  /// O tym, którą jednostkę pokazać, decyduje TYP WPISU — nie sam fakt, że
+  /// ćwiczenie ma jakiś czas domyślny. Inaczej ta sama pozycja potrafiła być
+  /// opisana sekundami tu, a seriami i powtórzeniami na ekranie ćwiczenia.
   String _restTileSubtitle(ActiveWorkoutExercise active, Exercise exercise) {
-    if (exercise.defaultDurationSec > 0) {
-      return '${active.plannedSets} × ${exercise.defaultDurationSec} s';
+    final entryType = exercise.entryType;
+    if (entryType.showsDuration && !entryType.showsReps) {
+      final seconds =
+          exercise.defaultDurationSec > 0 ? exercise.defaultDurationSec : 40;
+      return '${active.plannedSets} × $seconds s';
     }
     final weight = active.suggestedWeightKg > 0
         ? ' · ${_formatPlanWeight(active.suggestedWeightKg)} kg'
@@ -27409,10 +27944,15 @@ class _WorkoutSummaryPageState extends State<WorkoutSummaryPage> {
     );
   }
 
-  /// Podpowiedź rozciągania PO ciężkim dniu. Świadomie sugestia, nie bramka —
+  /// Podpowiedź rozciągania PO dniu siłowym. Świadomie sugestia, nie bramka —
   /// blokowanie treningu do czasu rozciągnięcia szybko zamienia się w klikanie
-  /// „pomiń". Pokazuje się tylko, gdy skończony dzień był ciężki i partia ma
+  /// „pomiń". Pokazuje się tylko, gdy skończony dzień był siłowy i partia ma
   /// swój zestaw rozciągania.
+  ///
+  /// NAZWA dnia zależy od tego, jak było NAPRAWDĘ: [WorkoutDayKind.isHeavy]
+  /// opisuje charakter dnia w programie, ale w tygodniu deloadu ten sam dzień
+  /// jest z założenia lżejszy. Mówienie wtedy „to był ciężki dzień" było
+  /// nieprawdą — chyba że realny wysiłek (RPE sesji) faktycznie był wysoki.
   Widget _buildStretchSuggestion(ThemeData theme) {
     final store = AppScope.of(context);
     final summary = widget.summary;
@@ -27434,6 +27974,14 @@ class _WorkoutSummaryPageState extends State<WorkoutSummaryPage> {
     final stretch = stretchWorkoutForPlan(summary.planId);
     if (stretch == null) return const SizedBox.shrink();
 
+    final inDeload = store.deloadStatusOn(summary.startedAt).isDeload;
+    final wasHard = !inDeload || summary.averageRpe >= 8.5;
+    final title = wasHard
+        ? 'To był ciężki dzień — rozciągnij się'
+        : 'Rozciągnij się po treningu';
+    final subtitle = '${stretch.title} · ~${stretch.estimatedMinutes} min'
+        '${inDeload && !wasHard ? ' · tydzień odciążenia' : ''}';
+
     final scheme = theme.colorScheme;
     return Padding(
       padding: const EdgeInsets.only(bottom: 10),
@@ -27453,11 +28001,11 @@ class _WorkoutSummaryPageState extends State<WorkoutSummaryPage> {
               child: Column(
                 crossAxisAlignment: CrossAxisAlignment.start,
                 children: [
-                  Text('To był ciężki dzień — rozciągnij się',
+                  Text(title,
                       style: theme.textTheme.titleSmall
                           ?.copyWith(fontWeight: FontWeight.w900)),
                   const SizedBox(height: 2),
-                  Text('${stretch.title} · ~${stretch.estimatedMinutes} min',
+                  Text(subtitle,
                       style: theme.textTheme.bodySmall
                           ?.copyWith(color: scheme.onSurfaceVariant)),
                 ],
@@ -45336,6 +45884,14 @@ class _AddWorkoutSheetContentState extends State<AddWorkoutSheetContent> {
               minutes: minutes),
       note: note.text.trim(),
       aiConfidence: widget.existing?.aiConfidence ?? 0,
+      // Wpis ręczny nie ma sesji, więc bez jawnego znacznika regeneracja
+      // liczyłaby go od północy wybranego dnia. Dla „dziś" bierzemy bieżącą
+      // godzinę, dla dnia z przeszłości — południe (środek dnia).
+      performedAt: widget.existing?.performedAt ??
+          (sameDay(store.selectedDate, DateTime.now())
+              ? DateTime.now()
+              : DateTime(store.selectedDate.year, store.selectedDate.month,
+                  store.selectedDate.day, 12)),
     );
     if (widget.existing == null) {
       await store.addLog(log);

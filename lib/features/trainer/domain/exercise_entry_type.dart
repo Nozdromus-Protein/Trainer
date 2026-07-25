@@ -225,18 +225,77 @@ enum ExerciseEntryType {
   }
 }
 
+/// Od jakiego czasu trwania ćwiczenie „w ruchu" ma sens jako cardio z dystansem.
+/// Krótsze drille (40–60 s w obwodzie) prowadzi się czasem, nie kilometrami.
+const int _kCardioDistanceMinSeconds = 300;
+
+/// PEŁNE słowa oznaczające przemieszczanie się. Świadomie bez dopasowania po
+/// fragmencie: „run" siedzi w „crunches", „chod" w „chodzone", a „bieg"
+/// w „przebiegu" — każde takie trafienie zamieniało ćwiczenie siłowe w cardio.
+const Set<String> _kCardioWords = {
+  'bieg', 'biegu', 'biegi', 'bieganie', 'biegowy', 'biegowe', //
+  'bieżnia', 'bieznia', 'bieżni', 'biezni',
+  'jog', 'jogging', 'run', 'running', 'sprint', 'sprinty',
+  'marsz', 'marszu', 'marszem', 'spacer', 'spaceru',
+  'chód', 'chod', 'chodu', 'chodem',
+  'rower', 'roweru', 'rowerze', 'rowerowy', 'bike', 'cycling',
+  'orbitrek', 'orbitreku', 'ergometr', 'ergometrze',
+  'kardio', 'cardio', 'walk', 'walking', 'nordic',
+};
+
+bool _hasCardioWord(String text) {
+  for (final token in text.split(RegExp(r'[^a-ząćęłńóśźż]+'))) {
+    if (token.isNotEmpty && _kCardioWords.contains(token)) return true;
+  }
+  return false;
+}
+
+bool _isCardioEquipment(String equipment) =>
+    equipment.contains('bież') ||
+    equipment.contains('biez') ||
+    equipment.contains('orbitrek') ||
+    equipment.contains('ergometr') ||
+    equipment.contains('rower');
+
 /// Heurystyczne wyprowadzenie typu wpisu dla ćwiczenia bez jawnego przypisania.
-/// Kolejność ma znaczenie: mobilność → cardio → czasowe → masa ciała → ciężar.
+///
+/// Kolejność ma znaczenie: mobilność → **ćwiczenie na powtórzenia** → cardio →
+/// czasowe → masa ciała → ciężar.
+///
+/// [defaultReps] rozstrzyga konflikt „ile powtórzeń kontra ile sekund". Bez
+/// niego dopasowanie po fragmencie nazwy wygrywało z twardymi danymi ćwiczenia:
+/// „Wykroki **chod**zone" (3 × 12 powtórzeń) trafiały na słowo kluczowe „chód"
+/// i dostawały panel cardio z dystansem i czasem, mimo że karta ćwiczenia
+/// pokazywała serie i powtórzenia. Ćwiczenie z dodatnimi powtórzeniami i bez
+/// czasu domyślnego JEST powtórzeniowe — żadne słowo w nazwie tego nie zmienia.
 ExerciseEntryType deriveEntryType({
   required String name,
   required String category,
   required String equipment,
   required int defaultDurationSec,
+  int defaultReps = 0,
 }) {
   final text = '$name $category'.toLowerCase();
   final eq = equipment.toLowerCase();
 
   bool hasAny(List<String> keys) => keys.any(text.contains);
+
+  bool isBodyweightEquipment() =>
+      (eq.contains('masa ciała') ||
+          eq.contains('masa ciala') ||
+          eq.contains('bez sprzętu') ||
+          eq.contains('bez sprzetu') ||
+          eq.contains('brak') ||
+          eq.trim().isEmpty ||
+          eq.contains('mata') ||
+          eq.contains('drążek') ||
+          eq.contains('drazek')) &&
+      !eq.contains('sztang') &&
+      !eq.contains('hant') &&
+      !eq.contains('kett') &&
+      !eq.contains('maszyn') &&
+      !eq.contains('wyciąg') &&
+      !eq.contains('wyciag');
 
   if (hasAny([
     'mobil',
@@ -249,18 +308,23 @@ ExerciseEntryType deriveEntryType({
   ])) {
     return ExerciseEntryType.mobility;
   }
-  if (hasAny([
-    'bieg',
-    'run',
-    'marsz',
-    'chód',
-    'chod',
-    'rower',
-    'bike',
-    'orbitrek',
-    'kardio',
-    'cardio'
-  ])) {
+
+  // Twarde dane ćwiczenia biją heurystykę z nazwy.
+  if (defaultReps > 0 && defaultDurationSec <= 0) {
+    return isBodyweightEquipment()
+        ? ExerciseEntryType.bodyweightReps
+        : ExerciseEntryType.repsWeight;
+  }
+
+  // Cardio z DYSTANSEM to przemieszczanie się w terenie, a nie każdy ruch,
+  // w którego nazwie padnie słowo kojarzone z bieganiem. Stąd dwa warunki:
+  // dopasowanie CAŁYCH SŁÓW (nie fragmentów) oraz realny czas trwania albo
+  // sprzęt cardio. Bez tego „C(run)ches" łapało się na „run", a 40-sekundowy
+  // „Bieg z piętami do pośladków" dostawał pole „Dystans (km)".
+  final locomotion = _hasCardioWord(text) || _isCardioEquipment(eq);
+  if (locomotion &&
+      (defaultDurationSec >= _kCardioDistanceMinSeconds ||
+          _isCardioEquipment(eq))) {
     return ExerciseEntryType.cardioDistanceTime;
   }
 

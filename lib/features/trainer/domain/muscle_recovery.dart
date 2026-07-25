@@ -509,10 +509,23 @@ class RecoveryCalculator {
     // średnie RPE + łączna objętość kg. Wpisy bez sessionId (np. ręczne)
     // grupują się w jeden "zestaw dnia", żeby nic nie wypadło z analizy.
     String dayKeyOf(DateTime date) => '${date.year}-${date.month}-${date.day}';
+
+    // Moment bodźca to REALNA godzina wysiłku ([WorkoutSession.effectivePerformedAt]),
+    // a nie północ dnia treningowego z [WorkoutLog.date]. Liczenie od północy
+    // wygaszało bodziec o tyle godzin, ile minęło od niej do treningu — sesja
+    // o 21:00 wyglądała tuż po zakończeniu na sprzed 21 godzin i mapa mięśni
+    // pokazywała „zregenerowane" mimo świeżo wykonanej pracy.
+    // Znaczniki z przyszłości (zła strefa/zegar) cofamy do [reference], żeby
+    // taki wpis nie wypadł z analizy.
+    DateTime stimulusAt(WorkoutLog log) {
+      final moment = log.effectivePerformedAt;
+      return moment.isAfter(reference) ? reference : moment;
+    }
+
     final sessionStats = <String, TrainingLoadStats>{};
     final dayStats = <String, TrainingLoadStats>{};
     for (final log in logs) {
-      if (log.date.isBefore(cutoff) || log.date.isAfter(reference)) continue;
+      if (stimulusAt(log).isBefore(cutoff)) continue;
       final sessionKey = log.sessionId.trim().isNotEmpty
           ? log.sessionId
           : 'solo_${dayKeyOf(log.date)}';
@@ -523,7 +536,7 @@ class RecoveryCalculator {
     }
 
     for (final log in logs) {
-      if (log.date.isBefore(cutoff) || log.date.isAfter(reference)) continue;
+      if (stimulusAt(log).isBefore(cutoff)) continue;
       final exercise = resolveExercise(log.exerciseId);
       final impacts = exercise.effectiveMuscleImpacts;
       if (impacts.isEmpty) continue;
@@ -561,7 +574,7 @@ class RecoveryCalculator {
                 dayFactor)
             .clamp(minRecoveryHours, maxRecoveryHours);
         events.putIfAbsent(impact.muscleGroup, () => []).add(_StimulusEvent(
-              date: log.date,
+              date: stimulusAt(log),
               stimulus: stimulus,
               recoveryHours: hours,
               sessionId: log.sessionId,
@@ -628,6 +641,22 @@ class RecoveryCalculator {
     return result;
   }
 
+  /// Sekundy REALNEJ PRACY wpisu (bez przerw między seriami).
+  ///
+  /// `WorkoutLog.durationSec` to czas przypisany ćwiczeniu razem z przerwami —
+  /// użyty wprost zawyżał objętość ćwiczeń czasowych mniej więcej dwukrotnie
+  /// (3 × 40 s pracy + 2 × 60 s przerwy liczyło się jak 240 s pracy).
+  static int _workSecondsOf(WorkoutLog log) {
+    if (log.workoutSets.isEmpty) return log.durationSec;
+    var seconds = 0;
+    for (final set in log.workoutSets) {
+      if (!set.isCompleted || set.isFailure) continue;
+      final perSet = set.activeSeconds > 0 ? set.activeSeconds : set.durationSec;
+      if (perSet > 0) seconds += perSet;
+    }
+    return seconds > 0 ? seconds : log.durationSec;
+  }
+
   /// Punkty intensywności wpisu (przed przemnożeniem przez rolę partii).
   double _logStimulus(WorkoutLog log, Exercise exercise) {
     final sets = log.sets <= 0 ? 1 : log.sets.clamp(1, 12);
@@ -636,9 +665,13 @@ class RecoveryCalculator {
     // Objętość względem punktu odniesienia 3×10.
     var volumeFactor = (sets * reps) / 30.0;
 
-    // Ćwiczenia czasowe: czas pracy zamiast powtórzeń (odniesienie 3×40 s).
-    if (log.durationSec > 0 && log.weightKg <= 0 && log.reps <= 1) {
-      volumeFactor = log.durationSec / 120.0;
+    // Ćwiczenia czasowe: czas PRACY zamiast powtórzeń (odniesienie 3×40 s).
+    // O tym, czy ćwiczenie jest czasowe, decyduje jego typ wpisu — nie to, że
+    // akurat nie zapisano ciężaru (obciążona deska też jest czasowa).
+    final entryType = exercise.entryType;
+    if (entryType.showsDuration && !entryType.showsReps) {
+      final work = _workSecondsOf(log);
+      if (work > 0) volumeFactor = work / 120.0;
     }
     volumeFactor = volumeFactor.clamp(0.15, 3.0);
 

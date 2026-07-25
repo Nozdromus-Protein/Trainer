@@ -1,5 +1,6 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
+import 'package:licznik_treningu/features/trainer/domain/deload_cycle.dart';
 import 'package:licznik_treningu/features/trainer/domain/trainer_models.dart';
 import 'package:licznik_treningu/main.dart';
 import 'package:shared_preferences/shared_preferences.dart';
@@ -11,16 +12,21 @@ const _item = PlanItem(
     durationSec: 0,
     note: 'Seria główna');
 
-CompletedWorkoutSummary _summary({required int dayIndex}) =>
+CompletedWorkoutSummary _summary({
+  required int dayIndex,
+  DateTime? startedAt,
+  double averageRpe = 8,
+}) =>
     CompletedWorkoutSummary(
       sessionId: 's1',
       name: 'Klatka piersiowa · Dzień 1',
-      startedAt: DateTime(2026, 7, 21, 18),
-      endedAt: DateTime(2026, 7, 21, 19),
+      startedAt: startedAt ?? DateTime(2026, 7, 21, 18),
+      endedAt: (startedAt ?? DateTime(2026, 7, 21, 18))
+          .add(const Duration(hours: 1)),
       exerciseCount: 3,
       setCount: 9,
       volume: 2400,
-      averageRpe: 8,
+      averageRpe: averageRpe,
       planId: 'program_chest_Średniozaawansowany',
       dayIndex: dayIndex,
     );
@@ -89,6 +95,52 @@ void main() {
     await tester.pumpAndSettle();
 
     expect(find.byKey(const Key('post_workout_stretch')), findsNothing);
+  });
+
+  testWidgets('w tygodniu deloadu nie nazywa dnia ciężkim', (tester) async {
+    final store = await _store();
+    // Deload zaczyna się dziś — trening wypada w jego oknie.
+    final today = DateTime.now();
+    await store.updateDeloadCycle(
+      reanchorDeloadStart(store.deloadCycle, today),
+    );
+    expect(store.deloadStatusToday.isDeload, isTrue,
+        reason: 'test ma sens tylko w oknie deloadu');
+
+    await tester.binding.setSurfaceSize(const Size(420, 1400));
+    addTearDown(() => tester.binding.setSurfaceSize(null));
+
+    await tester.pumpWidget(_wrap(
+      store,
+      _summary(dayIndex: 0, startedAt: today, averageRpe: 6),
+    ));
+    await tester.pumpAndSettle();
+
+    // Karta zostaje (rozciąganie po treningu ma sens), ale nie kłamie o wysiłku.
+    expect(find.byKey(const Key('post_workout_stretch')), findsOneWidget);
+    expect(find.text('To był ciężki dzień — rozciągnij się'), findsNothing);
+    expect(find.text('Rozciągnij się po treningu'), findsOneWidget);
+    expect(find.textContaining('tydzień odciążenia'), findsOneWidget);
+  });
+
+  testWidgets('deload z realnie wysokim wysiłkiem nadal jest ciężkim dniem',
+      (tester) async {
+    final store = await _store();
+    final today = DateTime.now();
+    await store.updateDeloadCycle(
+      reanchorDeloadStart(store.deloadCycle, today),
+    );
+
+    await tester.binding.setSurfaceSize(const Size(420, 1400));
+    addTearDown(() => tester.binding.setSurfaceSize(null));
+
+    await tester.pumpWidget(_wrap(
+      store,
+      _summary(dayIndex: 0, startedAt: today, averageRpe: 9),
+    ));
+    await tester.pumpAndSettle();
+
+    expect(find.text('To był ciężki dzień — rozciągnij się'), findsOneWidget);
   });
 
   testWidgets('trening bez programu też nie pokazuje podpowiedzi',

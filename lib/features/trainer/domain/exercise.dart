@@ -117,6 +117,7 @@ class Exercise {
       category: category,
       equipment: equipment,
       defaultDurationSec: defaultDurationSec,
+      defaultReps: defaultReps,
     );
   }
 

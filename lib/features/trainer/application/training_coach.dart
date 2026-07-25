@@ -378,8 +378,97 @@ double _levelStrengthFactor(String level) {
   }
 }
 
-/// Ułamek masy ciała jako punkt wyjścia dla ciężaru roboczego (ostrożny).
-double _bodyweightFractionFor(Exercise exercise) {
+// ============================================================================
+// Model obciążenia: czym ćwiczenie jest obciążane
+// ============================================================================
+
+/// Sposób obciążenia ćwiczenia — decyduje o punkcie startowym ORAZ o suficie
+/// realnego ciężaru.
+///
+/// PROBLEM, KTÓRY TO ROZWIĄZUJE: sam wzorzec ruchu (np. „przysiad") nie mówi
+/// nic o tym, ile da się w nim unieść. Goblet squat to przysiad, ale ciężar
+/// trzyma się w jednym hantlu/kettlebellu przy mostku — 0,75 masy ciała
+/// (rozsądne dla przysiadu ze sztangą) daje tam wartość fizycznie nieosiągalną.
+/// Dlatego ułamek masy ciała i twardy sufit liczymy PER IMPLEMENT, nie per ruch.
+enum ExerciseLoadStyle {
+  /// Brak ciężaru zewnętrznego (masa ciała, guma, ćwiczenie czasowe).
+  none,
+
+  /// Sztanga — ciężar całkowity na gryfie.
+  barbell,
+
+  /// Para hantli (jeden w każdej ręce) — wpisujemy ciężar JEDNEGO hantla.
+  dumbbellPair,
+
+  /// JEDEN ciężar trzymany oburącz: goblet, kettlebell przy mostku, hantel
+  /// pionowo. Tu limit narzuca chwyt i pozycja, a nie siła nóg.
+  singleImplement,
+
+  /// Maszyna / wyciąg — stos ciężarków.
+  machine,
+}
+
+const List<String> _singleImplementNames = [
+  'goblet',
+  'kettlebell',
+  'kettlebel',
+  'swing',
+  'wymach',
+  'przysiad z ciężarem przed',
+];
+
+const List<String> _dumbbellPairNames = [
+  'hantli',
+  'hantlami',
+  'hantle',
+  'dumbbell',
+];
+
+/// Sposób obciążenia ćwiczenia (sprzęt + nazwa).
+ExerciseLoadStyle loadStyleFor(Exercise exercise) {
+  final entryType = exercise.entryType;
+  if (!entryType.showsWeight || entryType.usesBodyweight) {
+    return ExerciseLoadStyle.none;
+  }
+  final name = exercise.name.toLowerCase();
+  final equipment = exercise.equipment.toLowerCase();
+
+  // Nazwa ma pierwszeństwo: „Goblet squat" ma sprzęt „hantel / kettlebell",
+  // ale sposób trzymania jednoznacznie wskazuje jeden implement.
+  if (_singleImplementNames.any(name.contains)) {
+    return ExerciseLoadStyle.singleImplement;
+  }
+  final types = EquipmentType.fromText(exercise.equipment);
+  if (types.contains(EquipmentType.barbell) && !equipment.startsWith('hant')) {
+    return ExerciseLoadStyle.barbell;
+  }
+  if (types.contains(EquipmentType.machine) ||
+      types.contains(EquipmentType.cable)) {
+    return ExerciseLoadStyle.machine;
+  }
+  if (types.contains(EquipmentType.kettlebell) &&
+      !types.contains(EquipmentType.dumbbell)) {
+    return ExerciseLoadStyle.singleImplement;
+  }
+  if (types.contains(EquipmentType.dumbbell)) {
+    // Hantel W LICZBIE POJEDYNCZEJ („hantel") to jeden ciężar; „hantle" /
+    // „z hantlami" to para.
+    if (_dumbbellPairNames.any(name.contains) ||
+        equipment.contains('hantle') ||
+        equipment.contains('hantlami')) {
+      return ExerciseLoadStyle.dumbbellPair;
+    }
+    return equipment.contains('hantel')
+        ? ExerciseLoadStyle.singleImplement
+        : ExerciseLoadStyle.dumbbellPair;
+  }
+  if (types.contains(EquipmentType.barbell)) return ExerciseLoadStyle.barbell;
+  return ExerciseLoadStyle.none;
+}
+
+/// Ułamek masy ciała jako punkt wyjścia dla ciężaru roboczego SZTANGOWEGO
+/// (ostrożny). Dla innych implementów jest przeliczany w [_startFractionFor].
+double _barbellFractionFor(Exercise exercise) {
   final groups = exercise.muscleGroups;
   final primary = groups.isEmpty ? MuscleGroup.other : groups.first;
   final name = exercise.name.toLowerCase();
@@ -407,6 +496,65 @@ double _bodyweightFractionFor(Exercise exercise) {
   }
 }
 
+/// Ułamek masy ciała na START dla danego implementu.
+double _startFractionFor(Exercise exercise, ExerciseLoadStyle style) {
+  final barbell = _barbellFractionFor(exercise);
+  switch (style) {
+    case ExerciseLoadStyle.none:
+      return 0;
+    case ExerciseLoadStyle.barbell:
+      return barbell;
+    case ExerciseLoadStyle.machine:
+      // Maszyna prowadzi ruch — nieco więcej niż wolny ciężar, ale bez przesady.
+      return barbell * 0.95;
+    case ExerciseLoadStyle.dumbbellPair:
+      // Ciężar JEDNEGO hantla ≈ 40% odpowiednika sztangowego.
+      return barbell * 0.40;
+    case ExerciseLoadStyle.singleImplement:
+      // Jeden ciężar trzymany przy tułowiu — ogranicza go chwyt i pozycja,
+      // nie siła partii. Stąd niski, płaski ułamek zamiast ułamka ruchu.
+      return math.min(barbell * 0.35, 0.28);
+  }
+}
+
+/// TWARDY sufit ciężaru roboczego dla ćwiczenia — granica fizycznego sensu.
+///
+/// Zwraca 0, gdy ćwiczenie nie używa ciężaru zewnętrznego. Sufit obowiązuje na
+/// KOŃCU doboru (po progresji i po skalowaniu fazą cyklu), więc żadna ścieżka
+/// nie może wypuścić wartości nieosiągalnej danym sprzętem.
+double maxPracticalLoadKg(Exercise exercise, CoachContext ctx) {
+  final style = loadStyleFor(exercise);
+  if (style == ExerciseLoadStyle.none) return 0;
+  final bw = ctx.bodyWeightKg > 0 ? ctx.bodyWeightKg : 75;
+  final sexMult = ctx.isFemale ? 0.7 : 1.0;
+  switch (style) {
+    case ExerciseLoadStyle.none:
+      return 0;
+    case ExerciseLoadStyle.barbell:
+      return bw * 2.5 * sexMult;
+    case ExerciseLoadStyle.machine:
+      return bw * 2.2 * sexMult;
+    case ExerciseLoadStyle.dumbbellPair:
+      // Jeden hantel: nawet mocni ludzie rzadko przekraczają 50–60 kg na rękę.
+      return math.min(bw * 0.75, 60.0) * sexMult;
+    case ExerciseLoadStyle.singleImplement:
+      // Goblet / kettlebell przy mostku — powyżej ~40 kg chwyt jest granicą.
+      return math.min(bw * 0.40, 40.0) * sexMult;
+  }
+}
+
+/// Przycina ciężar do [maxPracticalLoadKg] (0 = brak limitu / brak ciężaru).
+double clampToPracticalLoad(
+  double weightKg,
+  Exercise exercise,
+  CoachContext ctx,
+) {
+  if (weightKg <= 0) return weightKg;
+  final ceiling = maxPracticalLoadKg(exercise, ctx);
+  if (ceiling <= 0 || weightKg <= ceiling) return weightKg;
+  return roundToPlate(ceiling, step: safeWeightStepKg(exercise, ctx.level));
+}
+
 /// Zaokrągla ciężar do sensownego kroku (2.5 kg dla większych, 1 kg dla małych).
 double roundToPlate(double weightKg, {double step = 2.5}) {
   if (weightKg <= 0) return 0;
@@ -415,19 +563,22 @@ double roundToPlate(double weightKg, {double step = 2.5}) {
 }
 
 /// Ostrożny startowy ciężar dla ćwiczenia z ciężarem, gdy brak historii.
-/// NIE wynika ze zdjęcia sylwetki — z antropometrii, poziomu i typu ćwiczenia.
+/// NIE wynika ze zdjęcia sylwetki — z antropometrii, poziomu i SPOSOBU
+/// OBCIĄŻENIA ([loadStyleFor]), a na końcu jest przycięty do fizycznego sufitu.
 double estimateInitialWeight(Exercise exercise, CoachContext ctx) {
   final entryType = exercise.entryType;
   if (!entryType.showsWeight || entryType.usesBodyweight) return 0;
+  final style = loadStyleFor(exercise);
+  if (style == ExerciseLoadStyle.none) return 0;
   final bw = ctx.bodyWeightKg > 0 ? ctx.bodyWeightKg : 75;
-  final fraction = _bodyweightFractionFor(exercise);
+  final fraction = _startFractionFor(exercise, style);
   final levelMult = _levelStrengthFactor(ctx.level);
   final sexMult = ctx.isFemale ? 0.65 : 1.0;
   // Start kalibracyjny jest CELOWO ostrożny (×0.82), żeby pierwsze serie były
   // pewne i bezpieczne — dokładność rośnie po kilku wykonaniach.
   final raw = bw * fraction * levelMult * sexMult * 0.82;
   final step = safeWeightStepKg(exercise, ctx.level);
-  return roundToPlate(raw, step: step);
+  return clampToPracticalLoad(roundToPlate(raw, step: step), exercise, ctx);
 }
 
 // ============================================================================
@@ -583,6 +734,17 @@ SetRecommendation recommendSet({
             ? 'Ręczne podkręcenie — ciężar ok. $percent% roboczego.'
             : 'Faza cyklu — ciężar ok. $percent% roboczego.'));
   }
+
+  // OSTATNIA bramka: ciężar nie może przekroczyć fizycznego sensu ćwiczenia
+  // (np. goblet squat ≠ przysiad ze sztangą). Sufit stoi PO progresji i PO
+  // skalowaniu cyklem, więc żadna ścieżka go nie omija.
+  final cappedWeight = clampToPracticalLoad(weight, exercise, ctx);
+  if (cappedWeight < weight) {
+    reasons.add(
+        'Ciężar ograniczony do realnego maksimum dla tego sposobu trzymania '
+        '(${_fmt(cappedWeight)} kg).');
+  }
+  weight = cappedWeight;
 
   if (reasons.isEmpty) {
     reasons.add('Cel: ${_goalLabel(ctx.goal)}.');
@@ -901,6 +1063,18 @@ ProgressionDecision decideProgression({
   // Ciężar zewnętrzny — jeśli w górnym zakresie powtórzeń, zwiększ ciężar.
   if (last.reps >= range.max) {
     final step = safeWeightStepKg(exercise, ctx.level);
+    // Przy suficie implementu (np. goblet squat) dokładanie kilogramów nie ma
+    // dokąd pójść — progresujemy powtórzeniami/wariantem zamiast obiecywać
+    // ciężar, który i tak zostanie przycięty.
+    final ceiling = maxPracticalLoadKg(exercise, ctx);
+    if (ceiling > 0 && last.weightKg + step > ceiling) {
+      return const ProgressionDecision(
+        action: CoachProgressionAction.harderVariant,
+        reason:
+            'Osiągnięty praktyczny limit ciężaru w tym ćwiczeniu — czas na '
+            'trudniejszy wariant albo wolniejsze tempo.',
+      );
+    }
     return ProgressionDecision(
       action: CoachProgressionAction.increaseWeight,
       reason:
