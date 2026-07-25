@@ -2611,6 +2611,10 @@ class AppStore extends ChangeNotifier {
 
   Future<void> saveBodyMeasurements() async {
     await _trainerRepository.saveBodyMeasurements(bodyMeasurements);
+    // Waga i obwody idą mostem do Licznika Kalorii (zakładka „Postęp" nie ma
+    // własnego dziennika wagi) — bez tego nowy pomiar czekałby na publikację
+    // wywołaną przypadkiem przez zapis treningu albo aktywności.
+    await publishDailyAdjustmentsBridge(notify: false);
   }
 
   Future<void> saveTrainingImpacts() async {
@@ -2669,7 +2673,11 @@ class AppStore extends ChangeNotifier {
   bool get dailyAdjustmentsSynced {
     final published = _publishedAdjustmentsSignature;
     if (published == null || published.isEmpty) return false;
-    return published == _adjustmentsSignature(_buildRecentDailyAdjustments());
+    return published ==
+        _adjustmentsSignature(
+          _buildRecentDailyAdjustments(),
+          bodySnapshot: calorieBridgeBodySnapshot,
+        );
   }
 
   /// Pakiety korekty dla ostatnich dni (dzisiaj + 13 wstecz) oraz dni,
@@ -2705,7 +2713,10 @@ class AppStore extends ChangeNotifier {
 
   /// Sygnatura niezależna od createdAt/updatedAt (te zmieniają się przy
   /// każdym przeliczeniu) — tylko wartości, które widzi Licznik Kalorii.
-  String _adjustmentsSignature(List<TrainerDailyAdjustment> adjustments) {
+  String _adjustmentsSignature(
+    List<TrainerDailyAdjustment> adjustments, {
+    Map<String, dynamic>? bodySnapshot,
+  }) {
     final base = adjustments
         .map((a) =>
             '${a.dateKey}:${a.totalAdjustmentKcal}:${a.workoutKcal}:${a.stepsKcal}:${a.runKcal}'
@@ -2714,7 +2725,11 @@ class AppStore extends ChangeNotifier {
         .join('|');
     // Zmiana celów żywieniowych (profil celu) też wymaga ponownej publikacji.
     final targets = goalNutritionTargets;
-    return targets == null ? base : '$base#${targets.signature}';
+    final withTargets = targets == null ? base : '$base#${targets.signature}';
+    // ...tak samo nowy pomiar wagi/obwodów — to jedyne źródło tych danych
+    // dla zakładki „Postęp" w Liczniku Kalorii.
+    final bodySignature = _bodySnapshotSignature(bodySnapshot);
+    return bodySignature.isEmpty ? withTargets : '$withTargets@$bodySignature';
   }
 
   /// Aktualna masa ciała: najnowszy pomiar z wagą, inaczej profil.
@@ -2746,6 +2761,101 @@ class AppStore extends ChangeNotifier {
       bodyFatPercent: analysis.composition.bodyFatPercent,
     );
     return breakdown?.fatFreeMassKg ?? 0;
+  }
+
+  /// Migawka sylwetki dla Licznika Kalorii: masa ciała, historia pomiarów
+  /// i skład ciała z najnowszej wiarygodnej analizy.
+  ///
+  /// Trainer jest JEDYNYM właścicielem tych danych — Licznik nie prowadzi
+  /// własnego dziennika wagi, tylko pokazuje to, co przyjdzie tym mostem.
+  /// Dlatego jedzie tu pełna historia (rok wstecz), a nie sam ostatni pomiar.
+  /// null = nie ma czego publikować (brak pomiarów i brak masy w profilu).
+  Map<String, dynamic>? get calorieBridgeBodySnapshot {
+    String dateKeyOf(DateTime date) {
+      String two(int value) => value.toString().padLeft(2, '0');
+      return '${date.year}-${two(date.month)}-${two(date.day)}';
+    }
+
+    final sorted = [...bodyMeasurements]
+      ..sort((left, right) => right.date.compareTo(left.date));
+    final horizon = DateTime.now().subtract(const Duration(days: 365));
+    final history = <Map<String, dynamic>>[];
+    for (final measurement in sorted) {
+      if (measurement.date.isBefore(horizon)) continue;
+      final entry = <String, dynamic>{
+        'dateKey': dateKeyOf(measurement.date),
+        if (measurement.weightKg > 0) 'weightKg': measurement.weightKg,
+        if (measurement.waistCm > 0) 'waistCm': measurement.waistCm,
+        if (measurement.chestCm > 0) 'chestCm': measurement.chestCm,
+        if (measurement.armCm > 0) 'armCm': measurement.armCm,
+        if (measurement.thighCm > 0) 'thighCm': measurement.thighCm,
+        if (measurement.hipsCm > 0) 'hipsCm': measurement.hipsCm,
+        if (measurement.calfCm > 0) 'calfCm': measurement.calfCm,
+        if (measurement.shouldersCm > 0) 'shouldersCm': measurement.shouldersCm,
+        if (measurement.neckCm > 0) 'neckCm': measurement.neckCm,
+      };
+      // Sam klucz daty niczego nie wnosi — pomiar bez liczb pomijamy.
+      if (entry.length > 1) history.add(entry);
+    }
+
+    final weightNow = currentBodyWeightKg;
+    if (weightNow <= 0 && history.isEmpty) return null;
+
+    final analysis = latestReliableBodyAnalysis;
+    final breakdown = analysis == null
+        ? null
+        : computeBodyCompositionBreakdown(
+            bodyWeightKg: weightNow,
+            bodyFatPercent: analysis.composition.bodyFatPercent,
+          );
+    final ffmi = breakdown == null || settings.heightCm <= 0
+        ? null
+        : computeFfmi(
+            fatFreeMassKg: breakdown.fatFreeMassKg,
+            heightCm: settings.heightCm,
+          );
+    final profile = bodyGoalProfile;
+
+    return <String, dynamic>{
+      'schema': 1,
+      'updatedAt': DateTime.now().toIso8601String(),
+      if (weightNow > 0) 'weightKg': weightNow,
+      if (settings.heightCm > 0) 'heightCm': settings.heightCm,
+      if (breakdown != null) ...<String, dynamic>{
+        'bodyFatPercent': breakdown.bodyFatPercent,
+        'fatMassKg': breakdown.fatMassKg,
+        'fatFreeMassKg': breakdown.fatFreeMassKg,
+      },
+      if (ffmi != null) 'ffmi': ffmi,
+      if (analysis != null) ...<String, dynamic>{
+        'analysisDateKey': dateKeyOf(analysis.date),
+        if (analysis.currentSilhouette.isNotEmpty)
+          'currentSilhouetteLabel': analysis.currentSilhouette,
+        if (analysis.confidencePercent > 0)
+          'analysisConfidencePercent': analysis.confidencePercent,
+      },
+      if (profile != null) ...<String, dynamic>{
+        'targetPhysiqueLabel': profile.desiredPhysique.label,
+        'strategyLabel': profile.bodyCompositionStrategy.label,
+        if (profile.targetWeightKg != null)
+          'targetWeightKg': profile.targetWeightKg,
+        if (profile.targetWaistCm != null)
+          'targetWaistCm': profile.targetWaistCm,
+        if (profile.targetBodyFatMinPercent != null)
+          'targetBodyFatMinPercent': profile.targetBodyFatMinPercent,
+        if (profile.targetBodyFatMaxPercent != null)
+          'targetBodyFatMaxPercent': profile.targetBodyFatMaxPercent,
+      },
+      'measurements': history,
+    };
+  }
+
+  /// Sygnatura migawki sylwetki — bez `updatedAt`, który zmienia się przy
+  /// każdym odczycie i sam z siebie wymuszałby publikację w kółko.
+  String _bodySnapshotSignature(Map<String, dynamic>? snapshot) {
+    if (snapshot == null) return '';
+    final copy = Map<String, dynamic>.from(snapshot)..remove('updatedAt');
+    return jsonEncode(copy);
   }
 
   /// Dzienne cele żywieniowe z CENTRALNEGO PROFILU CELU. Kalorie wynikają
@@ -2781,12 +2891,18 @@ class AppStore extends ChangeNotifier {
       if (targets != null && !adjustments.any((a) => sameDay(a.date, today))) {
         adjustments.insert(0, dailyAdjustmentForDay(today));
       }
+      // Migawka sylwetki liczona RAZ — ten sam obiekt idzie do publikacji
+      // i do sygnatury, więc nie da się opublikować czegoś innego, niż
+      // zostało zapamiętane jako „już wysłane".
+      final bodySnapshot = calorieBridgeBodySnapshot;
       lastDailyAdjustmentsPublishAt =
           await _calorieAdapter.publishDailyAdjustments(
         adjustments,
         nutritionTargets: targets?.toJson(),
+        bodySnapshot: bodySnapshot,
       );
-      _publishedAdjustmentsSignature = _adjustmentsSignature(adjustments);
+      _publishedAdjustmentsSignature =
+          _adjustmentsSignature(adjustments, bodySnapshot: bodySnapshot);
       final prefs = await SharedPreferences.getInstance();
       await prefs.setString(
           _adjustmentsSignatureKey, _publishedAdjustmentsSignature!);
@@ -3010,6 +3126,8 @@ class AppStore extends ChangeNotifier {
 
   Future<void> saveBodyAnalyses() async {
     await _trainerRepository.saveBodyAnalyses(bodyAnalyses);
+    // Skład ciała (% tkanki, FFM) też jedzie migawką sylwetki do Kalorii.
+    await publishDailyAdjustmentsBridge(notify: false);
   }
 
   Future<void> _saveProgressPhotoDrafts() async {

@@ -230,4 +230,94 @@ void main() {
     expect(payload.single['estimatedBurnedKcal'], 240);
     expect(preferences.getString(TrainerCalorieLocalAdapter.latestImpactKey), isNotNull);
   });
+
+  test('pakiet korekty dnia niesie migawkę sylwetki dla Licznika Kalorii',
+      () async {
+    SharedPreferences.setMockInitialValues({});
+    final preferences = await SharedPreferences.getInstance();
+    final adapter = TrainerCalorieLocalAdapter(preferences: preferences);
+    final adjustment = TrainerDailyAdjustment(
+      id: 'adjustment-1',
+      date: DateTime(2026, 7, 24),
+      workoutKcal: 300,
+      stepsKcal: 120,
+      runKcal: 0,
+      walkKcal: 0,
+      otherKcal: 0,
+      healthActiveKcal: 400,
+      healthDerivedKcal: 120,
+      totalAdjustmentKcal: 420,
+      extraWaterMl: 500,
+      extraCarbsG: 30,
+      extraProteinG: 20,
+      workoutExtraWaterMl: 400,
+      workoutExtraCarbsG: 25,
+      workoutExtraProteinG: 18,
+      steps: 9000,
+      distanceKm: 6.4,
+      activityMinutes: 65,
+      sources: const ['trainer_workout'],
+      dataStatus: TrainerDailyAdjustment.statusFull,
+      includedKeys: const ['trainer_workout:session-1'],
+      createdAt: DateTime(2026, 7, 24, 20),
+      updatedAt: DateTime(2026, 7, 24, 20, 30),
+    );
+
+    await adapter.publishDailyAdjustments(
+      [adjustment],
+      bodySnapshot: const {
+        'schema': 1,
+        'weightKg': 82.4,
+        'bodyFatPercent': 18.2,
+        'measurements': [
+          {'dateKey': '2026-07-24', 'weightKg': 82.4, 'waistCm': 84.0},
+        ],
+      },
+    );
+
+    final payload = await adapter.loadDailyAdjustmentsPayload();
+    expect(payload, hasLength(1));
+    final body = payload.single['bodySnapshot'] as Map<String, dynamic>;
+    expect(body['weightKg'], 82.4);
+    expect(body['bodyFatPercent'], 18.2);
+    expect(body['measurements'], hasLength(1));
+  });
+
+  test('bez migawki sylwetki pakiet nie dostaje pustego klucza bodySnapshot',
+      () async {
+    SharedPreferences.setMockInitialValues({});
+    final preferences = await SharedPreferences.getInstance();
+    final adapter = TrainerCalorieLocalAdapter(preferences: preferences);
+    final adjustment = TrainerDailyAdjustment(
+      id: 'adjustment-2',
+      date: DateTime(2026, 7, 24),
+      workoutKcal: 0,
+      stepsKcal: 0,
+      runKcal: 0,
+      walkKcal: 0,
+      otherKcal: 0,
+      healthActiveKcal: 0,
+      healthDerivedKcal: 0,
+      totalAdjustmentKcal: 0,
+      extraWaterMl: 0,
+      extraCarbsG: 0,
+      extraProteinG: 0,
+      workoutExtraWaterMl: 0,
+      workoutExtraCarbsG: 0,
+      workoutExtraProteinG: 0,
+      steps: 0,
+      distanceKm: 0,
+      activityMinutes: 0,
+      sources: const [],
+      dataStatus: TrainerDailyAdjustment.statusNone,
+      includedKeys: const [],
+      createdAt: DateTime(2026, 7, 24, 20),
+      updatedAt: DateTime(2026, 7, 24, 20, 30),
+    );
+
+    await adapter.publishDailyAdjustments([adjustment]);
+
+    final payload = await adapter.loadDailyAdjustmentsPayload();
+    expect(payload.single.containsKey('bodySnapshot'), isFalse);
+  });
 }

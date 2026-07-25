@@ -45,10 +45,13 @@ class TrainerCalorieLocalAdapter {
   /// [nutritionTargets] — opcjonalne dzienne cele żywieniowe z docelowej
   /// sylwetki (kcal + makra); jadą w pełnym JSON-ie każdego pakietu (kolumna
   /// `payload` w ContentProviderze), więc nie wymagają zmian po stronie Kotlina.
+  /// [bodySnapshot] — masa ciała, obwody i skład ciała: Licznik Kalorii
+  /// pokazuje z tego zakładkę „Postęp" i NIE prowadzi własnego dziennika wagi.
   /// Zwraca moment publikacji — Trainer używa go jako statusu synchronizacji.
   Future<DateTime> publishDailyAdjustments(
     Iterable<TrainerDailyAdjustment> adjustments, {
     Map<String, dynamic>? nutritionTargets,
+    Map<String, dynamic>? bodySnapshot,
   }) async {
     final preferences = await _prefs;
     final byDate = <String, TrainerDailyAdjustment>{};
@@ -64,6 +67,7 @@ class TrainerCalorieLocalAdapter {
         {
           ...adjustment.toCalorieBridgeJson(),
           if (nutritionTargets != null) 'nutritionTargets': nutritionTargets,
+          if (bodySnapshot != null) 'bodySnapshot': bodySnapshot,
         },
     ];
     final publishedAt = DateTime.now();
