@@ -1004,20 +1004,29 @@ def normalize_exercise_form_result(raw: dict, req: AnalyzeExerciseFormRequest) -
     }
 
 
-async def generate_text_json_with_openai(prompt: str, max_output_tokens: int = 7000) -> dict:
+async def generate_text_json_with_openai(
+    prompt: str,
+    max_output_tokens: int = 7000,
+    images: Optional[List[Any]] = None,
+) -> dict:
     client = get_openai_client()
+
+    content: List[Dict[str, Any]] = [{"type": "input_text", "text": prompt}]
+    for image_bytes, mime in images or []:
+        encoded = base64.b64encode(image_bytes).decode("utf-8")
+        content.append(
+            {
+                "type": "input_image",
+                "image_url": f"data:{mime or 'image/jpeg'};base64,{encoded}",
+            }
+        )
 
     response = client.responses.create(
         model=OPENAI_MODEL,
         input=[
             {
                 "role": "user",
-                "content": [
-                    {
-                        "type": "input_text",
-                        "text": prompt,
-                    }
-                ],
+                "content": content,
             }
         ],
         max_output_tokens=max_output_tokens,
@@ -1045,8 +1054,17 @@ async def generate_text_json_with_openai(prompt: str, max_output_tokens: int = 7
     return result_json
 
 
-async def generate_text_json_with_gemini(prompt: str) -> dict:
+async def generate_text_json_with_gemini(
+    prompt: str,
+    images: Optional[List[Any]] = None,
+) -> dict:
     last_error = None
+
+    contents: List[Any] = [prompt]
+    for image_bytes, mime in images or []:
+        contents.append(
+            types.Part.from_bytes(data=image_bytes, mime_type=mime or "image/jpeg")
+        )
 
     for model_name in GEMINI_MODELS:
         model_unavailable = False
@@ -1057,7 +1075,7 @@ async def generate_text_json_with_gemini(prompt: str) -> dict:
 
                 response = current_client.models.generate_content(
                     model=model_name,
-                    contents=[prompt],
+                    contents=contents,
                 )
 
                 result_text = clean_json_text(response.text or "")
@@ -1108,28 +1126,32 @@ async def generate_text_json_with_gemini(prompt: str) -> dict:
     raise RuntimeError(f"Wszystkie modele/klucze Gemini zwróciły błąd w Trainer. Ostatni błąd: {last_error}")
 
 
-async def generate_text_json(prompt: str, selected_provider: Optional[str] = None) -> dict:
+async def generate_text_json(
+    prompt: str,
+    selected_provider: Optional[str] = None,
+    images: Optional[List[Any]] = None,
+) -> dict:
     provider = (selected_provider or AI_PROVIDER).strip().lower()
 
     if provider in ["openai", "gpt"]:
-        return await generate_text_json_with_openai(prompt)
+        return await generate_text_json_with_openai(prompt, images=images)
 
     if provider == "gemini":
-        return await generate_text_json_with_gemini(prompt)
+        return await generate_text_json_with_gemini(prompt, images=images)
 
     if provider == "openai_then_gemini":
         try:
-            return await generate_text_json_with_openai(prompt)
+            return await generate_text_json_with_openai(prompt, images=images)
         except Exception as openai_error:
             print("OPENAI TRAINER PADLO, PROBUJE GEMINI:", openai_error)
-            return await generate_text_json_with_gemini(prompt)
+            return await generate_text_json_with_gemini(prompt, images=images)
 
     if provider == "gemini_then_openai":
         try:
-            return await generate_text_json_with_gemini(prompt)
+            return await generate_text_json_with_gemini(prompt, images=images)
         except Exception as gemini_error:
             print("GEMINI TRAINER PADLO, PROBUJE OPENAI:", gemini_error)
-            return await generate_text_json_with_openai(prompt)
+            return await generate_text_json_with_openai(prompt, images=images)
 
     raise RuntimeError(f"Nieznany provider AI: {provider}. Ustaw openai, gpt, gemini, openai_then_gemini albo gemini_then_openai.")
 
@@ -1206,11 +1228,82 @@ class TrainerChatRequest(BaseModel):
     # Dodatkowe instrukcje z aplikacji (np. jak korzystać z kontekstu).
     instructions: Optional[str] = None
     history: Optional[List[Any]] = None
+    # Załączniki użytkownika: zdjęcia (data_base64) i pliki tekstowe (text).
+    # Wpis: {"name", "mime", "kind": "image"|"text", "text"?, "data_base64"?}.
+    attachments: Optional[List[Dict[str, Any]]] = None
     ai_provider: Optional[str] = None
     provider: Optional[str] = None
 
 
-def build_trainer_chat_prompt(req: TrainerChatRequest) -> str:
+# Limity załączników — chronią prompt i pamięć instancji.
+MAX_ATTACHMENT_IMAGES = 4
+MAX_ATTACHMENT_TEXT_CHARS = 40000
+MAX_ATTACHMENT_TEXT_TOTAL = 120000
+
+
+def split_chat_attachments(attachments):
+    """Dzieli załączniki na sekcję tekstową promptu i listę obrazów.
+
+    Zwraca (text_section, images), gdzie images to lista (bytes, mime_type).
+    Błędne wpisy są pomijane, ale zostawiają ślad w sekcji tekstowej — model
+    ma wiedzieć, że załącznik był, tylko nie dało się go odczytać.
+    """
+    if not attachments:
+        return "", []
+
+    text_chunks = []
+    images = []
+    used_chars = 0
+
+    for item in attachments:
+        if not isinstance(item, dict):
+            continue
+        name = str(item.get("name") or "załącznik")
+        kind = str(item.get("kind") or "").lower()
+        mime = str(item.get("mime") or "")
+        raw_base64 = str(item.get("data_base64") or "")
+
+        if kind == "image" or mime.startswith("image/"):
+            if len(images) >= MAX_ATTACHMENT_IMAGES:
+                text_chunks.append(
+                    f"[Załącznik {name}: pominięty — limit {MAX_ATTACHMENT_IMAGES} zdjęć]"
+                )
+                continue
+            try:
+                image_bytes = base64.b64decode(raw_base64, validate=False)
+            except Exception:
+                image_bytes = b""
+            if not image_bytes:
+                text_chunks.append(f"[Załącznik {name}: nie udało się odczytać zdjęcia]")
+                continue
+            images.append((image_bytes, mime or get_mime_type(image_bytes)))
+            text_chunks.append(f"[Załącznik {name}: zdjęcie przekazane do analizy]")
+            continue
+
+        content = str(item.get("text") or "")
+        if not content.strip():
+            text_chunks.append(f"[Załącznik {name}: pusty plik]")
+            continue
+        if len(content) > MAX_ATTACHMENT_TEXT_CHARS:
+            content = content[:MAX_ATTACHMENT_TEXT_CHARS] + "\n[...] (przycięte)"
+        if used_chars + len(content) > MAX_ATTACHMENT_TEXT_TOTAL:
+            text_chunks.append(f"[Załącznik {name}: pominięty — łączny limit tekstu]")
+            continue
+        used_chars += len(content)
+        text_chunks.append(f"--- Załącznik: {name} ---\n{content}\n--- koniec: {name} ---")
+
+    if not text_chunks:
+        return "", images
+
+    section = (
+        "\nZałączniki od użytkownika (traktuj jak część pytania):\n"
+        + "\n".join(text_chunks)
+        + "\n"
+    )
+    return section, images
+
+
+def build_trainer_chat_prompt(req: TrainerChatRequest, attachments_section: str = "") -> str:
     history_text = ""
     if req.history:
         lines = []
@@ -1255,7 +1348,7 @@ Ostatnie treningi (starszy format — może być puste, gdy dane są w kontekśc
 
 Aktywny plan treningowy:
 {json.dumps(req.active_plan or {}, ensure_ascii=False)}
-{instructions_section}
+{instructions_section}{attachments_section}
 Wcześniejsza rozmowa:
 {history_text}
 
@@ -1275,6 +1368,7 @@ Zasady:
 - Podawaj liczby z danych (np. "triceps 44% regeneracji", "objętość 3200 kg"),
   zamiast ogólników.
 - Nie diagnozuj medycznie. Przy bólu albo kontuzji zalecaj ostrożność i konsultację ze specjalistą.
+- Jeżeli są załączniki (zdjęcia albo pliki tekstowe), odnieś się do nich wprost.
 - Nie zmieniaj planu użytkownika samodzielnie — możesz tylko zaproponować zmianę.
 - Jeżeli danych brakuje w kontekście, powiedz wprost, jakich danych brakuje
   (np. brak zgód Health Connect, brak treningów), zamiast zgadywać.
@@ -1285,8 +1379,13 @@ Zasady:
 @app.post("/ai/chat")
 async def trainer_chat(req: TrainerChatRequest):
     try:
-        prompt = build_trainer_chat_prompt(req)
-        raw = await generate_text_json(prompt, req.ai_provider or req.provider)
+        attachments_section, images = split_chat_attachments(req.attachments)
+        prompt = build_trainer_chat_prompt(req, attachments_section)
+        raw = await generate_text_json(
+            prompt,
+            req.ai_provider or req.provider,
+            images=images,
+        )
         reply = str(
             raw.get("reply")
             or raw.get("message")

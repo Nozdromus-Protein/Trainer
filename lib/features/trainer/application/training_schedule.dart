@@ -20,6 +20,96 @@ import '../domain/body_muscle.dart';
 import '../domain/muscle_recovery.dart';
 import 'weekly_training_planner.dart';
 
+/// Strategia podziału tygodnia.
+///
+/// Rozkład DWUTOROWY dzieli tydzień na partie (klatka / plecy / nogi / brzuch)
+/// z dodatkiem, a PUSH / PULL / LEGS — na wzorce ruchu. W obu przypadkach dzień
+/// to nadal „partia główna + dodatek", więc reszta aplikacji (zestawy, deload,
+/// regeneracja) działa bez zmian.
+enum TrainingSplitStrategy {
+  twoTrack('twoTrack', 'Dwutorowy (partia + dodatek)'),
+  pushPullLegs('pushPullLegs', 'Push / Pull / Legs');
+
+  const TrainingSplitStrategy(this.key, this.label);
+
+  final String key;
+  final String label;
+
+  bool get isPushPullLegs => this == TrainingSplitStrategy.pushPullLegs;
+
+  /// Strategia DOMYŚLNA — Push / Pull / Legs. Rotacja trzech wzorców ruchu jest
+  /// czytelniejsza i lepiej znosi przestawianie dni pod regenerację niż podział
+  /// na pojedyncze partie.
+  static const TrainingSplitStrategy defaultStrategy =
+      TrainingSplitStrategy.pushPullLegs;
+
+  /// Nieznany albo brakujący klucz → strategia domyślna. Zapisy sprzed tego
+  /// pola nie niosą strategii, więc przechodzą na Push / Pull / Legs, a ich
+  /// własny plan tygodnia jest przekładany na bloki (patrz [pplAreaFor]).
+  static TrainingSplitStrategy fromKey(Object? value) {
+    final key = value?.toString().trim() ?? '';
+    for (final strategy in TrainingSplitStrategy.values) {
+      if (strategy.key == key || strategy.name == key) return strategy;
+    }
+    return defaultStrategy;
+  }
+}
+
+/// Blok Push / Pull / Legs odpowiadający partii z rozkładu dwutorowego.
+///
+/// Dzięki temu przejście na PPL nie kasuje ułożonego tygodnia: „Klatka" staje
+/// się dniem pchania, „Plecy" dniem ciągnięcia, „Nogi" zostają nogami.
+TrainingFocusArea? pplAreaFor(TrainingFocusArea? area) {
+  switch (area) {
+    case TrainingFocusArea.push:
+    case TrainingFocusArea.pull:
+    case TrainingFocusArea.legs:
+      return area;
+    case TrainingFocusArea.chestTriceps:
+    case TrainingFocusArea.shoulders:
+      return TrainingFocusArea.push;
+    case TrainingFocusArea.backBiceps:
+    case TrainingFocusArea.arms:
+      return TrainingFocusArea.pull;
+    default:
+      return null;
+  }
+}
+
+/// Obszary pierwszorzędne dostępne w danej strategii.
+List<TrainingFocusArea> primaryAreasFor(TrainingSplitStrategy strategy) =>
+    strategy.isPushPullLegs ? kPushPullLegsAreas : kPrimaryFocusAreas;
+
+/// Obszary, które mogą być DODATKIEM dnia w danej strategii.
+///
+/// W Push/Pull/Legs brzuch nie jest osobnym dniem — wchodzi jako dodatek,
+/// więc lista jest o niego szersza.
+List<TrainingFocusArea> secondaryAreasFor(TrainingSplitStrategy strategy) =>
+    strategy.isPushPullLegs
+        ? const [...kSecondaryFocusAreas, TrainingFocusArea.core]
+        : kSecondaryFocusAreas;
+
+/// Trzy poziomy odciążenia dnia — hierarchia z etapu:
+/// DELOAD ma pierwszeństwo, potem REGENERACJA, a na końcu sam ZESTAW.
+enum DayLoadTier {
+  /// Tydzień deloadu — dzień jest lekki z założenia.
+  deload('deload', 'deload (lżej)'),
+
+  /// Partie jeszcze nie w pełni gotowe — zestaw wykonany lżej.
+  recovery('recovery', 'lżejszy (regeneracja)'),
+
+  /// Pełny zestaw zgodnie z planem.
+  full('full', 'pełny zestaw');
+
+  const DayLoadTier(this.key, this.label);
+
+  final String key;
+  final String label;
+
+  /// Im niżej w hierarchii, tym mocniejsze odciążenie (deload = 0).
+  int get rank => index;
+}
+
 /// Plan JEDNEGO dnia tygodnia.
 ///
 /// `primary == null && secondary == null` oznacza DZIEŃ WOLNY.
@@ -85,6 +175,14 @@ const List<TrainingFocusArea> _defaultSecondaryCycle = [
   TrainingFocusArea.arms,
 ];
 
+/// Dodatki dnia w strategii Push / Pull / Legs — dobrane tak, by nie dublować
+/// bloku głównego: po pchaniu i po nogach brzuch, po ciągnięciu chwyt.
+const List<TrainingFocusArea> _pplSecondaryCycle = [
+  TrainingFocusArea.core,
+  TrainingFocusArea.forearms,
+  TrainingFocusArea.core,
+];
+
 /// Naprawia plan zapisany przez starsze wersje aplikacji, w których wszystkie
 /// obszary mogły trafić do jednego pola. Wartość z niewłaściwego toru jest
 /// przenoszona zamiast usuwana.
@@ -92,27 +190,46 @@ TrainingDayPlan normalizeTrainingDayPlan(
   TrainingDayPlan plan, {
   required int weekday,
   TrainingDayPlan? fallback,
+  TrainingSplitStrategy strategy = TrainingSplitStrategy.twoTrack,
 }) {
   if (plan.isRest) return TrainingDayPlan.rest;
 
-  TrainingFocusArea? primary =
-      kPrimaryFocusAreas.contains(plan.primary) ? plan.primary : null;
-  TrainingFocusArea? secondary =
-      kSecondaryFocusAreas.contains(plan.secondary) ? plan.secondary : null;
+  // Przejście na Push / Pull / Legs nie kasuje ułożonego tygodnia — partia
+  // z rozkładu dwutorowego staje się swoim blokiem ruchu.
+  if (strategy.isPushPullLegs && !kPushPullLegsAreas.contains(plan.primary)) {
+    final mapped = pplAreaFor(plan.primary) ?? pplAreaFor(plan.secondary);
+    if (mapped != null) {
+      plan = TrainingDayPlan(
+        primary: mapped,
+        // Dawna partia główna wraca jako dodatek, o ile pasuje do toru
+        // drugorzędnego (np. „Brzuch" po dniu nóg).
+        secondary: secondaryAreasFor(strategy).contains(plan.primary)
+            ? plan.primary
+            : plan.secondary,
+      );
+    }
+  }
 
-  if (primary == null && kPrimaryFocusAreas.contains(plan.secondary)) {
+  final secondaryAreas = secondaryAreasFor(strategy);
+  TrainingFocusArea? primary =
+      kAllPrimaryTrackAreas.contains(plan.primary) ? plan.primary : null;
+  TrainingFocusArea? secondary =
+      secondaryAreas.contains(plan.secondary) ? plan.secondary : null;
+
+  if (primary == null && kAllPrimaryTrackAreas.contains(plan.secondary)) {
     primary = plan.secondary;
   }
-  if (secondary == null && kSecondaryFocusAreas.contains(plan.primary)) {
+  if (secondary == null && secondaryAreas.contains(plan.primary)) {
     secondary = plan.primary;
   }
+  // Ten sam obszar nie może stać w obu torach naraz.
+  if (primary != null && primary == secondary) secondary = null;
 
   // Sam dodatek nie powinien zamieniać dnia treningowego w dzień wolny.
-  primary ??= kPrimaryFocusAreas.contains(fallback?.primary)
+  final cycle = primaryAreasFor(strategy);
+  primary ??= kAllPrimaryTrackAreas.contains(fallback?.primary)
       ? fallback!.primary
-      : _defaultPrimaryCycle[
-          ((weekday >= 1 && weekday <= 7 ? weekday : 1) - 1) %
-              _defaultPrimaryCycle.length];
+      : cycle[((weekday >= 1 && weekday <= 7 ? weekday : 1) - 1) % cycle.length];
 
   return TrainingDayPlan(primary: primary, secondary: secondary);
 }
@@ -120,18 +237,27 @@ TrainingDayPlan normalizeTrainingDayPlan(
 /// Domyślny plan tygodnia dla podanych dni treningowych (1 = pn … 7 = nd).
 ///
 /// Partie pierwszorzędne idą cyklicznie, dodatek dnia jest do nich dobrany —
-/// przy 6–7 dniach każda duża partia wypada w tygodniu dwa razy.
-Map<int, TrainingDayPlan> defaultWeekPlan(List<int> trainingWeekdays) {
+/// przy 6–7 dniach każda duża partia wypada w tygodniu dwa razy. W strategii
+/// Push / Pull / Legs cykl ma trzy bloki, więc przy 6 dniach każdy wypada
+/// dokładnie dwa razy.
+Map<int, TrainingDayPlan> defaultWeekPlan(
+  List<int> trainingWeekdays, {
+  TrainingSplitStrategy strategy = TrainingSplitStrategy.twoTrack,
+}) {
   final days = trainingWeekdays.where((d) => d >= 1 && d <= 7).toSet().toList()
     ..sort();
   final result = <int, TrainingDayPlan>{
     for (var weekday = 1; weekday <= 7; weekday++)
       weekday: TrainingDayPlan.rest,
   };
+  final primaryCycle =
+      strategy.isPushPullLegs ? kPushPullLegsAreas : _defaultPrimaryCycle;
+  final secondaryCycle =
+      strategy.isPushPullLegs ? _pplSecondaryCycle : _defaultSecondaryCycle;
   for (var i = 0; i < days.length; i++) {
     result[days[i]] = TrainingDayPlan(
-      primary: _defaultPrimaryCycle[i % _defaultPrimaryCycle.length],
-      secondary: _defaultSecondaryCycle[i % _defaultSecondaryCycle.length],
+      primary: primaryCycle[i % primaryCycle.length],
+      secondary: secondaryCycle[i % secondaryCycle.length],
     );
   }
   return result;
@@ -145,9 +271,13 @@ class TrainingScheduleConfig {
     this.weekdayPlans = const <int, TrainingDayPlan>{},
     this.rotationKeys = const <String>[],
     this.trainingWeekdays = const <int>[1, 2, 3, 4, 5, 6],
+    this.strategy = TrainingSplitStrategy.defaultStrategy,
   });
 
   final bool enabled;
+
+  /// Strategia podziału tygodnia (dwutorowa albo Push / Pull / Legs).
+  final TrainingSplitStrategy strategy;
 
   /// Data pierwszego uruchomienia rozkładu. Nie wpływa już na układ (jest
   /// deterministyczny per dzień tygodnia) — zostaje jako metryka i do migracji
@@ -168,7 +298,7 @@ class TrainingScheduleConfig {
   /// Plan tygodnia po rozwiązaniu: zawsze 7 wpisów (1–7).
   Map<int, TrainingDayPlan> get weekPlan {
     if (weekdayPlans.isNotEmpty) {
-      final fallback = defaultWeekPlan(trainingWeekdays);
+      final fallback = defaultWeekPlan(trainingWeekdays, strategy: strategy);
       return <int, TrainingDayPlan>{
         for (var weekday = 1; weekday <= 7; weekday++)
           weekday: weekdayPlans[weekday] == null
@@ -177,11 +307,12 @@ class TrainingScheduleConfig {
                   weekdayPlans[weekday]!,
                   weekday: weekday,
                   fallback: fallback[weekday],
+                  strategy: strategy,
                 ),
       };
     }
     if (rotationKeys.isNotEmpty) return _migratedFromRotation();
-    return defaultWeekPlan(trainingWeekdays);
+    return defaultWeekPlan(trainingWeekdays, strategy: strategy);
   }
 
   /// Plan dnia tygodnia (1 = poniedziałek … 7 = niedziela).
@@ -243,17 +374,24 @@ class TrainingScheduleConfig {
     Map<int, TrainingDayPlan>? weekdayPlans,
     List<String>? rotationKeys,
     List<int>? trainingWeekdays,
+    TrainingSplitStrategy? strategy,
+    bool clearWeekdayPlans = false,
   }) =>
       TrainingScheduleConfig(
         enabled: enabled ?? this.enabled,
         anchor: anchor ?? this.anchor,
-        weekdayPlans: weekdayPlans ?? this.weekdayPlans,
-        rotationKeys: rotationKeys ?? this.rotationKeys,
+        weekdayPlans: clearWeekdayPlans
+            ? const <int, TrainingDayPlan>{}
+            : (weekdayPlans ?? this.weekdayPlans),
+        rotationKeys:
+            clearWeekdayPlans ? const <String>[] : (rotationKeys ?? this.rotationKeys),
         trainingWeekdays: trainingWeekdays ?? this.trainingWeekdays,
+        strategy: strategy ?? this.strategy,
       );
 
   Map<String, dynamic> toJson() => {
         'enabled': enabled,
+        'strategy': strategy.key,
         if (anchor != null)
           'anchor': '${anchor!.year.toString().padLeft(4, '0')}-'
               '${anchor!.month.toString().padLeft(2, '0')}-'
@@ -273,6 +411,7 @@ class TrainingScheduleConfig {
     final rawPlans = json['weekdayPlans'];
     return TrainingScheduleConfig(
       enabled: json['enabled'] as bool? ?? true,
+      strategy: TrainingSplitStrategy.fromKey(json['strategy']),
       anchor: parsed == null
           ? null
           : DateTime(parsed.year, parsed.month, parsed.day),
@@ -318,6 +457,9 @@ class ScheduledDay {
     this.isDeload = false,
     this.movedFrom,
     this.note = '',
+    this.loadTier = DayLoadTier.full,
+    this.intensityScale = 1.0,
+    this.readinessPercent = 100,
   });
 
   final DateTime date;
@@ -338,7 +480,19 @@ class ScheduledDay {
   /// Dlaczego dzień został przestawiony.
   final String note;
 
+  /// Poziom odciążenia dnia w hierarchii Deload > Regeneracja > Zestaw.
+  final DayLoadTier loadTier;
+
+  /// Mnożnik obciążenia zestawu dla tego dnia (1.0 = pełny). Deload i słabsza
+  /// regeneracja go obniżają; NIE zastępuje gałki intensywności użytkownika.
+  final double intensityScale;
+
+  /// Gotowość (regeneracja %) bloku głównego w tym dniu.
+  final double readinessPercent;
+
   bool get moved => movedFrom != null;
+
+  bool get isLightened => loadTier != DayLoadTier.full;
 
   /// Etykieta dnia: „Klatka piersiowa + Barki".
   String get label {
@@ -346,6 +500,20 @@ class ScheduledDay {
     if (area == null) return secondaryArea!.label;
     if (secondaryArea == null) return area!.label;
     return '${area!.label} + ${secondaryArea!.label}';
+  }
+
+  /// Nazwa dnia z poziomem obciążenia — hierarchia jest widoczna w nazwie
+  /// zestawu: „Push + Brzuch · deload (lżej)" albo „· lżejszy (regeneracja 54%)".
+  String get labelWithLoad {
+    if (isRest) return label;
+    switch (loadTier) {
+      case DayLoadTier.deload:
+        return '$label · ${DayLoadTier.deload.label}';
+      case DayLoadTier.recovery:
+        return '$label · lżejszy (regeneracja ${readinessPercent.round()}%)';
+      case DayLoadTier.full:
+        return label;
+    }
   }
 
   /// Partie obciążane tego dnia (główne + dodatek).
@@ -361,6 +529,9 @@ class ScheduledDay {
     bool? isDeload,
     TrainingFocusArea? movedFrom,
     String? note,
+    DayLoadTier? loadTier,
+    double? intensityScale,
+    double? readinessPercent,
   }) =>
       ScheduledDay(
         date: date,
@@ -371,6 +542,9 @@ class ScheduledDay {
         isDeload: isDeload ?? this.isDeload,
         movedFrom: movedFrom ?? this.movedFrom,
         note: note ?? this.note,
+        loadTier: loadTier ?? this.loadTier,
+        intensityScale: intensityScale ?? this.intensityScale,
+        readinessPercent: readinessPercent ?? this.readinessPercent,
       );
 
   /// Postać przekazywana planerowi tygodnia (czyste dane, bez cyklu importów).
@@ -381,6 +555,12 @@ class ScheduledDay {
         isRest: isRest,
         isDeload: isDeload,
         note: note,
+        loadSuffix: loadTier == DayLoadTier.deload
+            ? DayLoadTier.deload.label
+            : loadTier == DayLoadTier.recovery
+                ? 'lżejszy (regeneracja ${readinessPercent.round()}%)'
+                : '',
+        intensityScale: intensityScale,
       );
 }
 
@@ -447,18 +627,38 @@ Map<int, TrainingFocusArea> secondaryByWeekday(TrainingScheduleConfig config) {
 /// (nic nie znika z tygodnia), a oba dni dostają czytelną adnotację.
 /// Dodatek dnia (tor drugorzędny) nie przestawia dni — gdy jest zmęczony,
 /// po prostu odpada z adnotacją, żeby nie ciągnąć całego rozkładu.
+///
+/// [readinessIgnoring] liczy gotowość z POMINIĘCIEM wskazanych partii. Używamy
+/// go dla dodatku dnia: partie, które i tak obciąża dziś blok główny (przedni
+/// bark i triceps w dniu klatki), nie mogą wyrzucić dodatku z tego samego dnia.
+/// To one blokowały „barki po klatce" — zestaw znikał, a dzień zamykał się sam.
 List<ScheduledDay> resolveScheduleWithRecovery(
   List<ScheduledDay> schedule,
   double Function(TrainingFocusArea area, DateTime date) readiness, {
   double minReadiness = 60,
   int lookAheadDays = 6,
+  double Function(
+    TrainingFocusArea area,
+    DateTime date,
+    Iterable<BodyMuscle> ignoreMuscles,
+  )? readinessIgnoring,
+
+  /// Dni JUŻ ZAMKNIĘTE (wykonane albo miniona data) — nie wolno ich przestawiać
+  /// ani odchudzać. Bez tego świeżo wytrenowana partia miała niską gotowość,
+  /// więc rozkład „naprawiał" dzisiejszy dzień, podmieniając zrobioną klatkę
+  /// na nogi. To, co się wydarzyło, jest faktem, a nie planem do poprawienia.
+  bool Function(ScheduledDay day)? isLocked,
 }) {
+  bool locked(ScheduledDay day) => isLocked?.call(day) ?? false;
   final result = [...schedule];
   for (var i = 0; i < result.length; i++) {
     final current = result[i];
     final area = current.area;
     if (area == null || current.isRest || current.moved) continue;
+    if (locked(current)) continue;
     if (readiness(area, current.date) >= minReadiness) continue;
+    // Ostatni dzień, do którego nie ma już czego przestawić — dalej pilnuje
+    // tego bramka odciążenia ([applyLoadHierarchy]).
 
     // Szukaj dnia treningowego, którego obszar da się wykonać dziś,
     // a bieżący obszar zdąży się zregenerować na jego termin.
@@ -466,6 +666,7 @@ List<ScheduledDay> resolveScheduleWithRecovery(
       final candidate = result[j];
       final other = candidate.area;
       if (other == null || candidate.isRest || candidate.moved) continue;
+      if (locked(candidate)) continue;
       if (other == area) continue;
       if (readiness(other, current.date) < minReadiness) continue;
       if (readiness(area, candidate.date) < minReadiness) continue;
@@ -486,12 +687,19 @@ List<ScheduledDay> resolveScheduleWithRecovery(
     }
   }
 
-  // Dodatek dnia odpada, gdy jego partie są jeszcze zmęczone.
+  // Dodatek dnia odpada, gdy jego WŁASNE partie są jeszcze zmęczone. Partie
+  // wspólne z blokiem głównym TEGO SAMEGO dnia są wyłączone z oceny — są dziś
+  // trenowane razem (barki po klatce, ramiona po plecach), więc ich zmęczenie
+  // nie może kasować dodatku. To ono zamykało dzień po pierwszym zestawie.
   for (var i = 0; i < result.length; i++) {
     final day = result[i];
     final extra = day.secondaryArea;
-    if (extra == null || day.isRest) continue;
-    if (readiness(extra, day.date) >= minReadiness) continue;
+    if (extra == null || day.isRest || locked(day)) continue;
+    final sharedWithMain = day.area?.muscles ?? const <BodyMuscle>[];
+    final extraReadiness = readinessIgnoring == null
+        ? readiness(extra, day.date)
+        : readinessIgnoring(extra, day.date, sharedWithMain);
+    if (extraReadiness >= minReadiness) continue;
     final note = day.note.isEmpty
         ? '${extra.label} pomijamy — jeszcze się regeneruje.'
         : '${day.note} ${extra.label} pomijamy — jeszcze się regeneruje.';
@@ -500,27 +708,129 @@ List<ScheduledDay> resolveScheduleWithRecovery(
   return result;
 }
 
+/// Nakłada HIERARCHIĘ ODCIĄŻENIA: Deload ⟶ Regeneracja ⟶ Zestaw ćwiczeń.
+///
+/// Kolejność jest sztywna i nienegocjowalna:
+///  1. DELOAD — gdy dzień wypada w oknie deloadu, jest lekki z definicji
+///     i regeneracja nie może go już „podkręcić";
+///  2. REGENERACJA — dzień, którego nie dało się przestawić, a partie nie są
+///     w pełni gotowe, dostaje ZESTAW W LŻEJSZEJ WERSJI (tyle, ile trzeba —
+///     im niższa gotowość, tym mocniejsze odciążenie);
+///  3. ZESTAW — dopiero na końcu obowiązuje pełna wersja zaplanowanego zestawu.
+///
+/// Zwraca dni z ustawionym [ScheduledDay.loadTier] i [ScheduledDay.intensityScale];
+/// nazwa dnia ([ScheduledDay.labelWithLoad]) niesie ten sam poziom.
+List<ScheduledDay> applyLoadHierarchy(
+  List<ScheduledDay> schedule,
+  double Function(TrainingFocusArea area, DateTime date) readiness, {
+  double minReadiness = 60,
+  double deloadScale = 0.6,
+
+  /// Dni zamknięte (wykonane / minione) zostają jak są — nie doklejamy im
+  /// „lżejszy (regeneracja 30%)", bo to zmęczenie pochodzi z ICH treningu.
+  bool Function(ScheduledDay day)? isLocked,
+}) {
+  return [
+    for (final day in schedule)
+      if (day.isRest || day.area == null || (isLocked?.call(day) ?? false))
+        day
+      else
+        _withLoadTier(day, readiness, minReadiness, deloadScale),
+  ];
+}
+
+ScheduledDay _withLoadTier(
+  ScheduledDay day,
+  double Function(TrainingFocusArea area, DateTime date) readiness,
+  double minReadiness,
+  double deloadScale,
+) {
+  final area = day.area!;
+  final percent = readiness(area, day.date);
+  // 1. Deload wygrywa ze wszystkim.
+  if (day.isDeload) {
+    return day.copyWith(
+      loadTier: DayLoadTier.deload,
+      intensityScale: deloadScale,
+      readinessPercent: percent,
+    );
+  }
+  // 2. Regeneracja: zestaw zostaje, ale w lżejszej wersji — dokładnie na tyle,
+  // na ile brakuje gotowości (nigdy poniżej 65% obciążenia).
+  if (percent < minReadiness) {
+    final deficit = (minReadiness - percent) / minReadiness; // 0..1
+    final scale = (1 - deficit * 0.35).clamp(0.65, 1.0).toDouble();
+    final note = day.note.isEmpty
+        ? '${area.label}: gotowość ${percent.round()}% — zestaw w lżejszej wersji.'
+        : '${day.note} Zestaw w lżejszej wersji (gotowość ${percent.round()}%).';
+    return day.copyWith(
+      loadTier: DayLoadTier.recovery,
+      intensityScale: scale,
+      readinessPercent: percent,
+      note: note,
+    );
+  }
+  // 3. Pełny zestaw.
+  return day.copyWith(
+    loadTier: DayLoadTier.full,
+    intensityScale: 1.0,
+    readinessPercent: percent,
+  );
+}
+
 /// Gotowość obszaru liczona z mapy regeneracji, z prognozą na przyszłe dni.
 ///
 /// Im dalej w przyszłość, tym więcej godzin na regenerację — dzięki temu
 /// rozkład na kolejne tygodnie nie jest blokowany dzisiejszym zmęczeniem.
+/// Gotowość obszaru liczona z partii, które go DEFINIUJĄ
+/// ([TrainingFocusArea.signatureMuscles]), z prognozą na przyszłe dni.
+///
+/// Partie pomocnicze (triceps i przedni bark w dniu klatki, biceps w dniu
+/// pleców) celowo NIE decydują o przełożeniu dnia. Wcześniej jedna zmęczona
+/// partia wspierająca wystarczała, żeby cały blok wypadł jako niegotowy — dzień
+/// klatki nie mógł stanąć po dniu barków, a rotacja push / pull / legs blokowała
+/// się sama. Zmęczenie partii pomocniczych nadal widać w ostrzeżeniach dnia.
+///
+/// [ignoreMuscles] pozwala pominąć partie, które i tak są dziś trenowane przez
+/// blok główny — używa tego dobór DODATKU dnia.
+///
+/// [bestMuscle] przełącza agregację z NAJSŁABSZEJ partii na NAJLEPSZĄ.
+///
+/// Blok GŁÓWNY oceniamy najsłabszą partią — zmęczone uda naprawdę blokują dzień
+/// nóg. DODATEK dnia oceniamy najlepszą: „Ramiona" to biceps i triceps, więc
+/// zmęczony triceps po dniu pchania nie może skasować całego dodatku, skoro na
+/// biceps jest pełna gotowość. Dodatek odpada dopiero wtedy, gdy NIC z jego
+/// partii nie jest gotowe.
 double scheduleReadiness(
   TrainingFocusArea area,
   DateTime date,
   DateTime now,
-  Map<BodyMuscle, MuscleRecoveryState> recovery,
-) {
-  if (area.muscles.isEmpty) return 100;
+  Map<BodyMuscle, MuscleRecoveryState> recovery, {
+  Iterable<BodyMuscle> ignoreMuscles = const [],
+  bool bestMuscle = false,
+}) {
+  final muscles = [
+    for (final muscle in area.signatureMuscles)
+      if (!ignoreMuscles.contains(muscle)) muscle,
+  ];
+  if (muscles.isEmpty) return 100;
   final hoursAhead =
       _dateOnly(date).difference(_dateOnly(now)).inHours.toDouble();
   var worst = 100.0;
-  for (final muscle in area.muscles) {
+  var best = 0.0;
+  var hasAny = false;
+  for (final muscle in muscles) {
     final state = recovery[muscle];
-    if (state == null || !state.hasData) continue;
-    final base = state.recoveryPercent ?? 100;
+    // Partia bez danych jest w pełni zregenerowana.
+    final base = state == null || !state.hasData
+        ? 100.0
+        : (state.recoveryPercent ?? 100);
     // Regeneracja postępuje ~2 pkt/godz. — prosta, przewidywalna prognoza.
     final projected = (base + hoursAhead * 2).clamp(0, 100).toDouble();
     if (projected < worst) worst = projected;
+    if (projected > best) best = projected;
+    hasAny = true;
   }
-  return worst;
+  if (!hasAny) return 100;
+  return bestMuscle ? best : worst;
 }

@@ -132,11 +132,13 @@ void main() {
       mets: List<double>.filled(5, 5),
     );
 
-    // 5 ćwiczeń × 6 min × (5-1) MET netto dla 80 kg = ok. 168 kcal.
-    expect(forecast.kcalMin, closeTo(148, 1));
-    expect(forecast.kcalMax, closeTo(195, 1));
-    expect(forecast.creditedKcalMin, closeTo(89, 1));
-    expect(forecast.creditedKcalMax, closeTo(118, 1));
+    // Model czasu: 3 serie × 10 powt. × 3,5 s pracy + przerwy między seriami
+    // (ostatnia seria bez pełnej przerwy) ≈ 5,5 min na ćwiczenie.
+    // 5 ćwiczeń × 5,5 min × (5−1) MET netto dla 80 kg ≈ 154 kcal.
+    expect(forecast.kcalMin, closeTo(136, 1));
+    expect(forecast.kcalMax, closeTo(179, 1));
+    expect(forecast.creditedKcalMin, closeTo(82, 1));
+    expect(forecast.creditedKcalMax, closeTo(108, 1));
     expect((forecast.carbsMinG * 4 - forecast.creditedKcalMin).abs(),
         lessThanOrEqualTo(2));
     expect((forecast.carbsMaxG * 4 - forecast.creditedKcalMax).abs(),

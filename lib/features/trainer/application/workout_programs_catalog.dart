@@ -633,6 +633,7 @@ List<WorkoutPlan> buildWorkoutProgramCatalog({
   double bodyWeightKg = 0,
   double heightCm = 0,
   int age = 0,
+  VolumeLimitsConfig volumeLimits = VolumeLimitsConfig.standard,
 }) {
   return [
     for (final meta in kWorkoutProgramCatalog)
@@ -643,6 +644,7 @@ List<WorkoutPlan> buildWorkoutProgramCatalog({
         bodyWeightKg: bodyWeightKg,
         heightCm: heightCm,
         age: age,
+        volumeLimits: volumeLimits,
       ),
   ];
 }
@@ -677,6 +679,7 @@ WorkoutPlan buildWorkoutProgram(
   double bodyWeightKg = 0,
   double heightCm = 0,
   int age = 0,
+  VolumeLimitsConfig volumeLimits = VolumeLimitsConfig.standard,
 }) {
   final template = _templates[programId] ?? _templates['program_core']!;
   var profile = _profileFor(level);
@@ -704,7 +707,7 @@ WorkoutPlan buildWorkoutProgram(
   final days = <WorkoutDay>[
     for (var d = 1; d <= 30; d++)
       _buildDay(d, template, profile, normalizedLevel, resolveExercise,
-          lowImpact: lowImpact),
+          lowImpact: lowImpact, volumeLimits: volumeLimits),
   ];
   return WorkoutPlan(
     id: '${programId}_$normalizedLevel',
@@ -724,6 +727,7 @@ WorkoutDay _buildDay(
   String level,
   Exercise Function(String) resolve, {
   bool lowImpact = false,
+  VolumeLimitsConfig volumeLimits = VolumeLimitsConfig.standard,
 }) {
   final week = (dayNumber - 1) ~/ 7; // 0..4
   final kind = _weekRhythm[(dayNumber - 1) % _weekRhythm.length];
@@ -885,6 +889,9 @@ WorkoutDay _buildDay(
         addStretch(4);
         break;
     }
+    // Program obwodowy (brzuch) świadomie łamie strukturę „kilka ćwiczeń ×
+    // kilka serii": to jedno duże koło z wieloma pozycjami po jednej serii.
+    // Limity objętości opisują zestaw SIŁOWY, więc obwodu nie przycinają.
     return WorkoutDay(
         weekday: ((dayNumber - 1) % 7) + 1,
         title: title,
@@ -951,16 +958,124 @@ WorkoutDay _buildDay(
       addStretch(4);
       break;
   }
+  // Limity objętości (min/max ćwiczeń, serii i powtórzeń na partię) działają
+  // PRZED sortowaniem i PRZED ręczną korektą intensywności — to ona świadomie
+  // wychodzi poza limity, więc nie może być nimi przycięta.
+  final limited = _withVolumeLimits(
+    _dedupById(items),
+    resolve,
+    level: level,
+    config: volumeLimits,
+    pool: [...mainPool, ...accessoryPool],
+    sets: profile.baseSets + setBonus,
+    repBonus: repBonus + profile.repShift,
+    durationBonus: durationBonus,
+    strengthRest: profile.strengthRest,
+    coreRest: profile.coreRest,
+    offset: offset,
+  );
   // Dzień CIĘŻKI idzie od najcięższego boju do najlżejszej pracy — bez
   // przeplatania go rozciąganiem. Mobilność ma swoje własne dni.
-  final ordered = _kindOf(kind).isHeavy
-      ? _sortByIntensityDesc(_dedupById(items), resolve)
-      : _dedupById(items);
+  final ordered =
+      _kindOf(kind).isHeavy ? _sortByIntensityDesc(limited, resolve) : limited;
   return WorkoutDay(
       weekday: ((dayNumber - 1) % 7) + 1,
       title: title,
       items: ordered,
       kind: _kindOf(kind));
+}
+
+/// Doprowadza zestaw dnia do LIMITÓW OBJĘTOŚCI partii:
+///  1. uzupełnia PARTIĘ WIODĄCĄ dnia, gdy ma mniej ćwiczeń niż minimum,
+///  2. przycina serie i powtórzenia do granic partii,
+///  3. usuwa nadmiar ćwiczeń ponad maksimum (odpadają najlżejsze).
+///
+/// Uzupełniamy tylko partię wiodącą (tę, wokół której zbudowany jest dzień) —
+/// dokładanie ruchów każdej partii pobocznej rozdmuchałoby dzień do kilkunastu
+/// pozycji, mimo że limit mówi o partii, którą się dziś TRENUJE.
+///
+/// Limit powtórzeń bierzemy BEZ zawężania celem: dzień „Siła A" w programie na
+/// masę ma prawo iść po 5 powtórzeń. Zakres celu zawęża rekomendacje trenera
+/// ([targetRepRange]), a nie projekt zestawu.
+List<PlanItem> _withVolumeLimits(
+  List<PlanItem> items,
+  Exercise Function(String) resolve, {
+  required String level,
+  required VolumeLimitsConfig config,
+  required List<String> pool,
+  required int sets,
+  required int repBonus,
+  required int durationBonus,
+  required int strengthRest,
+  required int coreRest,
+  required int offset,
+}) {
+  if (!config.enabled || items.isEmpty) return items;
+  var result = items;
+
+  final leading = _leadingGroupOf(result, resolve);
+  if (leading != null) {
+    final additions = topUpToMinimumExercises(
+      items: result,
+      pool: _pick(pool, pool.length, offset),
+      resolve: resolve,
+      group: leading,
+      level: level,
+      config: config,
+    );
+    if (additions.isNotEmpty) {
+      result = [
+        ...result,
+        for (final id in additions)
+          _smartItem(
+            id,
+            resolve,
+            sets: sets,
+            strengthRest: strengthRest,
+            coreRest: coreRest,
+            durationBonus: durationBonus,
+            repBonus: repBonus,
+            weightHint: false,
+            note: 'Uzupełnienie objętości partii',
+          ),
+      ];
+    }
+  }
+
+  return enforceVolumeLimits(
+    result,
+    resolve,
+    level: level,
+    config: config,
+    weightOf: exerciseIntensityScore,
+  );
+}
+
+/// Partia WIODĄCA dnia: ta z największą liczbą pozycji roboczych; przy remisie
+/// wygrywa partia pierwszej (najcięższej) pozycji.
+MuscleGroup? _leadingGroupOf(
+  List<PlanItem> items,
+  Exercise Function(String) resolve,
+) {
+  final counts = <MuscleGroup, int>{};
+  MuscleGroup? first;
+  for (final item in items) {
+    final exercise = resolve(item.exerciseId);
+    if (!isWorkingVolumeItem(item, exercise)) continue;
+    final group = primaryMuscleGroupOf(exercise);
+    first ??= group;
+    counts[group] = (counts[group] ?? 0) + 1;
+  }
+  if (counts.isEmpty) return null;
+  var best = first!;
+  var bestCount = counts[best] ?? 0;
+  counts.forEach((group, count) {
+    if (count > bestCount) {
+      best = group;
+      bestCount = count;
+    }
+  });
+  return best;
 }
 
 /// Porządkuje pozycje od najcięższej do najlżejszej.

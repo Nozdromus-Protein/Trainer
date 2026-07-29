@@ -46,6 +46,8 @@ void main() {
     final store = await makeStore();
     await store.updateSettings(store.settings.copyWith(
       trainingSchedule: const TrainingScheduleConfig(
+        // Stary zapis pochodzi z rozkładu dwutorowego — tak też go czytamy.
+        strategy: TrainingSplitStrategy.twoTrack,
         weekdayPlans: {
           1: TrainingDayPlan(
             primary: TrainingFocusArea.shoulders,

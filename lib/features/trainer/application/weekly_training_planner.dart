@@ -30,14 +30,27 @@ import 'workout_programs_catalog.dart';
 /// zmieniły się tylko etykiety, bo biceps/triceps mają teraz własny obszar.
 enum TrainingFocusArea {
   // — tor pierwszorzędny —
-  chestTriceps('Klatka piersiowa',
-      [BodyMuscle.chest, BodyMuscle.triceps, BodyMuscle.frontShoulders]),
-  backBiceps('Plecy', [
-    BodyMuscle.lats,
-    BodyMuscle.upperBack,
-    BodyMuscle.biceps,
-    BodyMuscle.rearShoulders
-  ]),
+  //
+  // Drugi argument to WSZYSTKIE partie, które ten dzień obciąża (do prognoz
+  // i ostrzeżeń), trzeci — partie DEFINIUJĄCE obszar ([signatureMuscles]).
+  // Rozdzielenie jest kluczowe: triceps i przedni bark PRACUJĄ w dniu klatki,
+  // ale nie są „klatką". Bez tego dzień klatki wypadał jako niegotowy po dniu
+  // barków, a zestaw barków znikał z dnia klatki — mimo że to normalny trening.
+  chestTriceps(
+    'Klatka piersiowa',
+    [BodyMuscle.chest, BodyMuscle.triceps, BodyMuscle.frontShoulders],
+    [BodyMuscle.chest],
+  ),
+  backBiceps(
+    'Plecy',
+    [
+      BodyMuscle.lats,
+      BodyMuscle.upperBack,
+      BodyMuscle.biceps,
+      BodyMuscle.rearShoulders
+    ],
+    [BodyMuscle.lats, BodyMuscle.upperBack],
+  ),
   legs('Nogi', [
     BodyMuscle.quads,
     BodyMuscle.hamstrings,
@@ -45,6 +58,31 @@ enum TrainingFocusArea {
     BodyMuscle.calvesBack
   ]),
   core('Brzuch / core', [BodyMuscle.abs, BodyMuscle.obliques]),
+  // — tor pierwszorzędny w strategii Push / Pull / Legs —
+  //
+  // Push i Pull to CAŁE bloki ruchu, nie pojedyncze partie: dzień pchania
+  // obciąża klatkę, przedni bark i triceps, dzień ciągnięcia — plecy, tylny
+  // bark, biceps i przedramiona. Dzięki temu regeneracja liczona dla bloku
+  // uwzględnia wszystko, co ten dzień realnie męczy.
+  push('Push (pchanie)', [
+    BodyMuscle.chest,
+    BodyMuscle.frontShoulders,
+    BodyMuscle.triceps,
+    BodyMuscle.serratusAnterior,
+  ]),
+  pull(
+    'Pull (ciągnięcie)',
+    [
+      BodyMuscle.lats,
+      BodyMuscle.upperBack,
+      BodyMuscle.rhomboids,
+      BodyMuscle.rearShoulders,
+      BodyMuscle.biceps,
+      BodyMuscle.forearmsFront,
+      BodyMuscle.traps,
+    ],
+    [BodyMuscle.lats, BodyMuscle.upperBack, BodyMuscle.biceps],
+  ),
   // — tor drugorzędny —
   shoulders('Barki',
       [BodyMuscle.frontShoulders, BodyMuscle.rearShoulders, BodyMuscle.traps]),
@@ -55,10 +93,26 @@ enum TrainingFocusArea {
       [BodyMuscle.quads, BodyMuscle.calvesBack, BodyMuscle.hamstrings]),
   mobility('Mobilność / rozciąganie', []);
 
-  const TrainingFocusArea(this.label, this.muscles);
+  const TrainingFocusArea(this.label, this.muscles, [this.signature = const []]);
 
   final String label;
+
+  /// WSZYSTKIE partie obciążane przez ten obszar — także pomocnicze.
+  /// Do prognoz, mapy mięśni i ostrzeżeń „co dziś odpoczywa".
   final List<BodyMuscle> muscles;
+
+  /// Partie DEFINIUJĄCE obszar (puste = wszystkie z [muscles]).
+  final List<BodyMuscle> signature;
+
+  /// Partie, po których poznajemy ten obszar: czy został dziś przetrenowany
+  /// i czy jest gotowy na dziś.
+  ///
+  /// Świadomie WĘŻSZE niż [muscles]. Triceps i przedni bark pracują w dniu
+  /// klatki, ale to nie znaczy, że dzień barków „już był" ani że klatka jest
+  /// niegotowa dzień po barkach — inaczej push / pull / legs blokowałyby się
+  /// nawzajem na okrągło.
+  List<BodyMuscle> get signatureMuscles =>
+      signature.isEmpty ? muscles : signature;
 
   /// Czy obszar należy do toru pierwszorzędnego (duże partie).
   bool get isPrimaryTrack => kPrimaryFocusAreas.contains(this);
@@ -70,6 +124,25 @@ const List<TrainingFocusArea> kPrimaryFocusAreas = [
   TrainingFocusArea.backBiceps,
   TrainingFocusArea.legs,
   TrainingFocusArea.core,
+];
+
+/// Obszary pierwszorzędne strategii PUSH / PULL / LEGS.
+///
+/// Osobna lista, bo to inny podział tego samego ciała: dzień niesie CAŁY wzorzec
+/// ruchu (pchanie / ciągnięcie / nogi), a nie pojedynczą partię. Rozkład
+/// dwutorowy zostaje bez zmian dla tych, którzy go używają.
+const List<TrainingFocusArea> kPushPullLegsAreas = [
+  TrainingFocusArea.push,
+  TrainingFocusArea.pull,
+  TrainingFocusArea.legs,
+];
+
+/// Wszystkie obszary, które mogą stać na pozycji GŁÓWNEJ dnia — niezależnie od
+/// wybranej strategii. Używane przy naprawie zapisanych planów.
+const List<TrainingFocusArea> kAllPrimaryTrackAreas = [
+  ...kPrimaryFocusAreas,
+  TrainingFocusArea.push,
+  TrainingFocusArea.pull,
 ];
 
 /// Obszary DRUGORZĘDNE — dodatek doklejany do dnia obok partii głównej.
@@ -115,6 +188,8 @@ class ScheduledFocusDay {
     this.isRest = false,
     this.isDeload = false,
     this.note = '',
+    this.loadSuffix = '',
+    this.intensityScale = 1.0,
   });
 
   final DateTime date;
@@ -130,12 +205,23 @@ class ScheduledFocusDay {
   /// Adnotacja rozkładu (np. „dzień przestawiony pod regenerację").
   final String note;
 
-  /// Etykieta dnia: „Klatka piersiowa + Barki".
+  /// Poziom odciążenia dnia dopisywany do nazwy zestawu („deload (lżej)",
+  /// „lżejszy (regeneracja 54%)"). Pusty = pełny zestaw.
+  final String loadSuffix;
+
+  /// Mnożnik obciążenia zestawu wynikający z hierarchii
+  /// Deload > Regeneracja > Zestaw (1.0 = pełny).
+  final double intensityScale;
+
+  /// Etykieta dnia: „Klatka piersiowa + Barki" (z poziomem obciążenia).
   String get label {
     if (isRest || (primary == null && secondary == null)) return 'Dzień wolny';
-    if (primary == null) return secondary!.label;
-    if (secondary == null) return primary!.label;
-    return '${primary!.label} + ${secondary!.label}';
+    final base = primary == null
+        ? secondary!.label
+        : secondary == null
+            ? primary!.label
+            : '${primary!.label} + ${secondary!.label}';
+    return loadSuffix.isEmpty ? base : '$base · $loadSuffix';
   }
 
   /// Partie obciążane tego dnia (główne + dodatek).
@@ -880,6 +966,10 @@ WeeklyTrainingAdvice buildWeeklyTrainingAdvice({
   if (scheduledToday != null) {
     final day = scheduledToday;
     if (!day.isRest) {
+      // Hierarchia Deload > Regeneracja > Zestaw: skala dnia z rozkładu mnoży
+      // się z fazą cyklu, więc dzień „lżejszy pod regenerację" naprawdę dobiera
+      // spokojniejszą pracę, a nie tylko dostaje inną nazwę.
+      final dayIntensity = intensityFactor * day.intensityScale;
       final lighterToday = day.isDeload || suggestLighter;
       final result = <SuggestedExercise>[];
       final primary = day.primary;
@@ -891,7 +981,7 @@ WeeklyTrainingAdvice buildWeeklyTrainingAdvice({
           userLevel: level,
           recovery: recovery,
           preferLowIntensity: lighterToday,
-          intensityFactor: intensityFactor,
+          intensityFactor: dayIntensity,
           limit: 4,
         ));
       }
@@ -905,7 +995,7 @@ WeeklyTrainingAdvice buildWeeklyTrainingAdvice({
           userLevel: level,
           recovery: recovery,
           preferLowIntensity: lighterToday,
-          intensityFactor: intensityFactor,
+          intensityFactor: dayIntensity,
           limit: 3,
         )) {
           if (used.add(suggestion.exerciseId)) result.add(suggestion);

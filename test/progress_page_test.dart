@@ -42,7 +42,7 @@ void main() {
     expect(formatProgressVolume(12650), '12.7k kg');
   });
 
-  testWidgets('progress page shows basic stats, charts and muscle frequency without overflow', (tester) async {
+  testWidgets('progress page shows basic stats and a topic tile per value', (tester) async {
     SharedPreferences.setMockInitialValues({});
     final store = AppStore();
     await store.load();
@@ -141,28 +141,70 @@ void main() {
     );
     expect(tester.takeException(), isNull);
 
-    // Wykresy są teraz w leniwej liście sliverów — przewiń, aby je zbudować.
+    // Zamiast jednej długiej listy wykresów zakładka jest siatką kafelków:
+    // jedna wartość = jeden kafelek = jedna strona.
     await tester.scrollUntilVisible(
-      find.text('Objętość tygodniowa'),
+      find.byKey(const Key('progress_topic_volume')),
       300,
       scrollable: find.byType(Scrollable).first,
     );
+    expect(find.byKey(const Key('progress_topic_volume')), findsOneWidget);
     expect(find.text('Objętość tygodniowa'), findsOneWidget);
 
     await tester.scrollUntilVisible(
-      find.text('Liczba treningów'),
+      find.byKey(const Key('progress_topic_muscle_frequency')),
       300,
       scrollable: find.byType(Scrollable).first,
     );
-    expect(find.text('Liczba treningów'), findsOneWidget);
+    // Wykres częstotliwości partii NIE jest jeszcze zbudowany — leży na
+    // stronie tematu, nie na zakładce.
+    expect(find.text('Najrzadziej trenowane partie'), findsNothing);
+    expect(tester.takeException(), isNull);
+  });
+
+  testWidgets('topic tile opens a page with the chart, description and tips', (tester) async {
+    SharedPreferences.setMockInitialValues({});
+    final store = AppStore();
+    await store.load();
+    final now = DateTime.now();
+    store.logs
+      ..clear()
+      ..addAll([
+        _progressLog(
+          id: 'push-1',
+          sessionId: 'push-session',
+          sessionName: 'Plan Push · Góra',
+          exerciseId: 'pushup',
+          date: DateTime(now.year, now.month, now.day, 18),
+          sets: _sets(weight: 20, repetitions: 10, count: 2),
+        ),
+      ]);
+
+    await tester.binding.setSurfaceSize(const Size(420, 900));
+    addTearDown(() => tester.binding.setSurfaceSize(null));
+    await tester.pumpWidget(
+      AppScope(
+        store: store,
+        child: MaterialApp(
+          theme: buildTheme(const Color(0xFF24D6A3), true),
+          home: const Scaffold(body: ProgressPage()),
+        ),
+      ),
+    );
+    await tester.pump();
 
     await tester.scrollUntilVisible(
-      find.text('Najrzadziej trenowane partie'),
+      find.byKey(const Key('progress_topic_muscle_frequency')),
       300,
       scrollable: find.byType(Scrollable).first,
     );
+    await tester.tap(find.byKey(const Key('progress_topic_muscle_frequency')));
+    await tester.pumpAndSettle();
+
+    // Dopiero tu buduje się ciężka karta — razem z opisem i wskazówkami.
     expect(find.text('Najczęściej trenowane partie'), findsOneWidget);
-    expect(find.text('Najrzadziej trenowane partie'), findsOneWidget);
+    expect(find.text('Co to jest'), findsOneWidget);
+    expect(find.text('Wskazówki'), findsOneWidget);
     expect(tester.takeException(), isNull);
   });
 }

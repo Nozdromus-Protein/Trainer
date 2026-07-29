@@ -25,6 +25,8 @@ class ActiveWorkoutSession {
     this.accumulatedPauseSeconds = 0,
     this.pauseStartedAt,
     this.partCount = 1,
+    this.lastSetCompletedAt,
+    this.restEndedAt,
   });
 
   final String id;
@@ -67,6 +69,48 @@ class ActiveWorkoutSession {
 
   /// Liczba części treningu (po długiej przerwie rośnie — podział na części).
   final int partCount;
+
+  // ===== Pomiar REALNEGO tempa (odpoczynek i czas serii) =====
+
+  /// Kiedy zapisano ostatnią serię — początek odliczania odpoczynku.
+  final DateTime? lastSetCompletedAt;
+
+  /// Kiedy odpoczynek faktycznie się skończył (timer dobiegł końca albo został
+  /// pominięty/skrócony). Dzięki temu wiemy, ile użytkownik NAPRAWDĘ odpoczywał
+  /// i ile trwała sama praca — zamiast wierzyć, że trzymał się planu.
+  final DateTime? restEndedAt;
+
+  /// Realny odpoczynek przed kolejną serią (s) wraz z informacją, czy pomiar
+  /// jest pewny. Gdy nie było zdarzenia końca przerwy (np. ekran gracza nie był
+  /// otwarty), odtwarzamy go z luki między zapisami i oznaczamy jako niepewny.
+  ({int restSec, int workSec, bool verified}) measureRestAndWork({
+    required int plannedRestSec,
+    DateTime? now,
+  }) {
+    final start = lastSetCompletedAt;
+    if (start == null) return (restSec: 0, workSec: 0, verified: false);
+    final moment = now ?? DateTime.now();
+    final gapMs = moment.difference(start).inMilliseconds;
+    if (gapMs < 0) return (restSec: 0, workSec: 0, verified: false);
+    final ended = restEndedAt;
+    if (ended != null && !ended.isBefore(start) && !ended.isAfter(moment)) {
+      // Mamy ZDARZENIE końca przerwy — pomiar jest pewny nawet wtedy, gdy
+      // wypadł na zero sekund (przerwa pominięta natychmiast).
+      final restMs = ended.difference(start).inMilliseconds;
+      return (
+        restSec: restMs ~/ 1000,
+        workSec: (gapMs - restMs) ~/ 1000,
+        verified: true
+      );
+    }
+    // Bez zdarzenia: zakładamy, że przerwa trwała tyle, ile plan (albo całą
+    // lukę, gdy była krótsza), a reszta luki to praca. Pomiar niepewny.
+    final gap = gapMs ~/ 1000;
+    if (gap <= 0) return (restSec: 0, workSec: 0, verified: false);
+    final planned = plannedRestSec > 0 ? plannedRestSec : 0;
+    final rest = planned == 0 ? 0 : (gap < planned ? gap : planned);
+    return (restSec: rest, workSec: gap - rest, verified: false);
+  }
 
   ActiveWorkoutExercise? get currentExercise {
     if (exercises.isEmpty) return null;
@@ -220,6 +264,9 @@ class ActiveWorkoutSession {
     int? partCount,
     bool clearActiveSegmentStartedAt = false,
     bool clearPauseStartedAt = false,
+    DateTime? lastSetCompletedAt,
+    DateTime? restEndedAt,
+    bool clearRestEndedAt = false,
   }) {
     return ActiveWorkoutSession(
       id: id ?? this.id,
@@ -251,6 +298,8 @@ class ActiveWorkoutSession {
       pauseStartedAt:
           clearPauseStartedAt ? null : pauseStartedAt ?? this.pauseStartedAt,
       partCount: partCount ?? this.partCount,
+      lastSetCompletedAt: lastSetCompletedAt ?? this.lastSetCompletedAt,
+      restEndedAt: clearRestEndedAt ? null : restEndedAt ?? this.restEndedAt,
     );
   }
 
@@ -276,6 +325,9 @@ class ActiveWorkoutSession {
         'accumulatedPauseSeconds': accumulatedPauseSeconds,
         'pauseStartedAt': pauseStartedAt?.toIso8601String(),
         'partCount': partCount,
+        if (lastSetCompletedAt != null)
+          'lastSetCompletedAt': lastSetCompletedAt!.toIso8601String(),
+        if (restEndedAt != null) 'restEndedAt': restEndedAt!.toIso8601String(),
       };
 
   factory ActiveWorkoutSession.fromJson(Map<String, dynamic> json) {
@@ -325,6 +377,9 @@ class ActiveWorkoutSession {
       pauseStartedAt:
           DateTime.tryParse(json['pauseStartedAt']?.toString() ?? ''),
       partCount: (json['partCount'] as num?)?.toInt() ?? 1,
+      lastSetCompletedAt:
+          DateTime.tryParse(json['lastSetCompletedAt']?.toString() ?? ''),
+      restEndedAt: DateTime.tryParse(json['restEndedAt']?.toString() ?? ''),
     );
   }
 }

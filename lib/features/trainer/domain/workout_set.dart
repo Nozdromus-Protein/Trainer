@@ -16,6 +16,9 @@ class WorkoutSet {
     this.activeSeconds = 0,
     this.isTimeVerified = true,
     this.rpeSource = '',
+    this.restBeforeSec = 0,
+    this.plannedRestSec = 0,
+    this.isRestVerified = false,
   });
 
   final String id;
@@ -60,6 +63,33 @@ class WorkoutSet {
   ///  * `''`        — starszy zapis; źródło wyprowadzane heurystycznie niżej.
   final String rpeSource;
 
+  /// REALNY odpoczynek przed tą serią (s); 0 = nie zmierzono (np. pierwsza
+  /// seria ćwiczenia). Pozwala odróżnić „zrobiłem plan po pełnej przerwie"
+  /// od „zrobiłem plan po połowie przerwy" — to druga sytuacja jest cięższa.
+  final int restBeforeSec;
+
+  /// Ile przerwy przewidywał plan przed tą serią (s); 0 = nieznane.
+  final int plannedRestSec;
+
+  /// Czy [restBeforeSec] pochodzi z realnego zdarzenia (koniec albo pominięcie
+  /// timera), a nie z odtworzenia luki między zapisami serii.
+  final bool isRestVerified;
+
+  /// Czy w ogóle mamy czym porównać przerwę z planem.
+  ///
+  /// Zero sekund to POPRAWNY pomiar (przerwa pominięta od razu), więc samo
+  /// `restBeforeSec > 0` nie wystarcza — liczy się potwierdzony pomiar.
+  bool get hasRestMeasurement =>
+      plannedRestSec > 0 && (isRestVerified || restBeforeSec > 0);
+
+  /// Czy odpoczynek przed serią był istotnie krótszy niż zaplanowany.
+  bool get restWasShortened =>
+      hasRestMeasurement && restBeforeSec < plannedRestSec * 0.85;
+
+  /// Czy odpoczynek przed serią był istotnie dłuższy niż zaplanowany.
+  bool get restWasExtended =>
+      hasRestMeasurement && restBeforeSec > plannedRestSec * 1.2;
+
   /// Czy RPE zostało świadomie wpisane przez użytkownika.
   /// Zgodność wsteczna: starszy zapis bez [rpeSource], bez wyniku ([outcome])
   /// i bez szacunku traktujemy jak ręczny wpis (panel wymuszał wybór RPE).
@@ -102,6 +132,9 @@ class WorkoutSet {
     int? activeSeconds,
     bool? isTimeVerified,
     String? rpeSource,
+    int? restBeforeSec,
+    int? plannedRestSec,
+    bool? isRestVerified,
   }) {
     return WorkoutSet(
       id: id ?? this.id,
@@ -120,6 +153,9 @@ class WorkoutSet {
       activeSeconds: activeSeconds ?? this.activeSeconds,
       isTimeVerified: isTimeVerified ?? this.isTimeVerified,
       rpeSource: rpeSource ?? this.rpeSource,
+      restBeforeSec: restBeforeSec ?? this.restBeforeSec,
+      plannedRestSec: plannedRestSec ?? this.plannedRestSec,
+      isRestVerified: isRestVerified ?? this.isRestVerified,
     );
   }
 
@@ -140,6 +176,9 @@ class WorkoutSet {
         if (activeSeconds > 0) 'activeSeconds': activeSeconds,
         if (!isTimeVerified) 'isTimeVerified': isTimeVerified,
         if (rpeSource.isNotEmpty) 'rpeSource': rpeSource,
+        if (restBeforeSec > 0) 'restBeforeSec': restBeforeSec,
+        if (plannedRestSec > 0) 'plannedRestSec': plannedRestSec,
+        if (isRestVerified) 'isRestVerified': isRestVerified,
       };
 
   factory WorkoutSet.fromJson(Map<String, dynamic> json) => WorkoutSet(
@@ -163,5 +202,8 @@ class WorkoutSet {
         activeSeconds: (json['activeSeconds'] as num?)?.toInt() ?? 0,
         isTimeVerified: json['isTimeVerified'] as bool? ?? true,
         rpeSource: json['rpeSource']?.toString() ?? '',
+        restBeforeSec: (json['restBeforeSec'] as num?)?.toInt() ?? 0,
+        plannedRestSec: (json['plannedRestSec'] as num?)?.toInt() ?? 0,
+        isRestVerified: json['isRestVerified'] as bool? ?? false,
       );
 }

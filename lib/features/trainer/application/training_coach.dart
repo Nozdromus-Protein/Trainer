@@ -781,6 +781,18 @@ String _goalLabel(String goal) {
 // Szacowanie wysiłku (ukryte RPE) + pewność
 // ============================================================================
 
+/// Szacuje wysiłek serii (ukryte RPE) z REALNYCH SYGNAŁÓW.
+///
+/// PROBLEM, KTÓRY TO ROZWIĄZUJE: „Wykonane zgodnie z planem" dawało zawsze
+/// RPE 7 — niezależnie od tego, czy była to pierwsza czy piąta seria, po pełnej
+/// czy po połowie przerwy, przy ciężarze rekordowym czy rozgrzewkowym. Taka
+/// wartość nie niosła żadnej informacji, a mimo to zasilała progresję.
+///
+/// Teraz punkt wyjścia zależy od MIEJSCA SERII W ĆWICZENIU (piąta seria tego
+/// samego ciężaru jest z definicji cięższa od pierwszej), a każdy zmierzony
+/// sygnał — przerwa, czas pracy, ciężar względem historii, regeneracja, tętno,
+/// zmęczenie sesją — przesuwa wynik i podnosi PEWNOŚĆ oceny. Brak sygnałów
+/// oznacza niską pewność, a nie udawany pomiar.
 ExertionEstimate estimateExertion({
   required SetOutcome outcome,
   required Exercise exercise,
@@ -791,36 +803,94 @@ ExertionEstimate estimateExertion({
   bool timeVerified = true,
   int plannedRestSeconds = 0,
   int actualRestSeconds = 0,
+  bool restVerified = false,
   double recoveryPercent = 100,
   int? heartRateBpm,
   int age = 30,
   int setIndex = 0,
   int firstSetReps = 0,
+  int plannedSets = 0,
+
+  /// Najcięższa robocza wartość z historii tego ćwiczenia (0 = brak historii).
+  /// Pozwala odróżnić serię rekordową od serii lekkiej przy tym samym „planie".
+  double referenceWeightKg = 0,
+
+  /// Ile serii zapisano już w CAŁEJ sesji (zmęczenie treningiem, nie ćwiczeniem).
+  int sessionCompletedSets = 0,
 }) {
   final factors = <String>[];
   double rpe;
-  double confidence = 0.6;
+  double confidence = 0.35;
 
+  // --- Punkt wyjścia: pozycja serii w ćwiczeniu. ---
+  //
+  // Ten sam ciężar w piątej serii kosztuje wyraźnie więcej niż w pierwszej.
+  // Bez tego każda seria „zgodna z planem" miała identyczne RPE.
+  final setBase = 6.2 + 0.45 * setIndex.clamp(0, 6);
   switch (outcome) {
     case SetOutcome.asPlanned:
-      rpe = 7.0;
-      factors.add('Seria ukończona zgodnie z planem.');
-      confidence += 0.15;
+      rpe = setBase;
+      factors.add(setIndex == 0
+          ? 'Pierwsza seria ukończona zgodnie z planem.'
+          : 'Seria ${setIndex + 1} ukończona zgodnie z planem — kolejne serie '
+              'kosztują więcej.');
+      confidence += 0.12;
       break;
     case SetOutcome.notCompleted:
       rpe = 9.0;
       factors.add('Seria nieukończona — bliskie maksimum lub za duży ciężar.');
-      confidence += 0.1;
+      confidence += 0.12;
       break;
     case SetOutcome.interrupted:
       rpe = 6.0;
       factors.add('Seria przerwana — wysiłek trudny do oceny.');
-      confidence -= 0.3;
+      confidence -= 0.25;
       break;
     case SetOutcome.didDifferently:
-      rpe = 7.0;
+      rpe = setBase;
       factors.add('Wykonano inaczej niż zaplanowano.');
       break;
+  }
+
+  // Ostatnia zaplanowana seria domyka ćwiczenie — zwykle najcięższa.
+  if (plannedSets > 1 && setIndex >= plannedSets - 1 && outcome != SetOutcome.interrupted) {
+    rpe += 0.25;
+  }
+
+  // --- Ciężar względem tego, co już dźwigałeś w tym ćwiczeniu. ---
+  if (referenceWeightKg > 0 && weightKg > 0) {
+    final ratio = weightKg / referenceWeightKg;
+    if (ratio >= 1.02) {
+      rpe += 0.7;
+      factors.add(
+          'Ciężar wyższy niż dotąd w tym ćwiczeniu (${(ratio * 100).round()}% rekordu roboczego).');
+    } else if (ratio <= 0.85) {
+      rpe -= 0.6;
+      factors.add(
+          'Ciężar poniżej Twojego roboczego (${(ratio * 100).round()}%) — praca lżejsza.');
+    }
+    confidence += 0.1;
+  }
+
+  // --- Przerwa: ile REALNIE odpoczywałeś przed tą serią. ---
+  //
+  // Krótsza przerwa to ta sama praca w gorszych warunkach — realnie cięższa.
+  // To także odpowiedź na „skróciłem odpoczynek": zestaw ma to zauważyć.
+  if (plannedRestSeconds > 0 && actualRestSeconds > 0) {
+    final ratio = actualRestSeconds / plannedRestSeconds;
+    if (ratio <= 0.6) {
+      rpe += 0.9;
+      factors.add(
+          'Przerwa skrócona do ${(ratio * 100).round()}% planu — seria była gęstsza.');
+    } else if (ratio <= 0.85) {
+      rpe += 0.45;
+      factors.add('Przerwa krótsza niż plan (${(ratio * 100).round()}%).');
+    } else if (ratio >= 1.6) {
+      rpe -= 0.4;
+      factors.add(
+          'Przerwa dłuższa niż plan (${(ratio * 100).round()}%) — więcej czasu na odbudowę.');
+    }
+    confidence += restVerified ? 0.15 : 0.06;
   }
 
   // Spadek wydajności między seriami (nie sam czas!).
@@ -843,9 +913,20 @@ ExertionEstimate estimateExertion({
   }
 
   // Regeneracja: słaba partia → subiektywnie ciężej.
-  if (recoveryPercent < 60) {
+  if (recoveryPercent < 40) {
+    rpe += 0.8;
+    factors.add('Bardzo niska regeneracja partii (${recoveryPercent.round()}%).');
+  } else if (recoveryPercent < 60) {
     rpe += 0.5;
     factors.add('Niska regeneracja partii (${recoveryPercent.round()}%).');
+  }
+
+  // Zmęczenie całą sesją — końcówka długiego treningu kosztuje więcej.
+  if (sessionCompletedSets >= 20) {
+    rpe += 0.5;
+    factors.add('Końcówka długiego treningu ($sessionCompletedSets serii).');
+  } else if (sessionCompletedSets >= 12) {
+    rpe += 0.25;
   }
 
   // Tętno (jeśli z zegarka) — realny sygnał wysiłku + pewność.
@@ -864,38 +945,49 @@ ExertionEstimate estimateExertion({
     factors.add('Brak danych tętna z zegarka.');
   }
 
-  // Czas serii — TYLKO jako sygnał pewności, nie jako miara wysiłku.
+  // --- Czas pracy serii względem typowego dla tego ćwiczenia. ---
+  //
+  // Wyraźnie dłuższa seria to zwolnienie tempa pod obciążeniem (grind),
+  // wyraźnie krótsza — praca w zapasie. Skrajnie długi czas nadal traktujemy
+  // jako błąd pomiaru (obniża pewność), a nie jako morderczy wysiłek.
   final typical =
       _typicalSetSeconds(exercise, actualReps > 0 ? actualReps : plannedReps);
   if (activeSeconds > 0 && timeVerified) {
     if (typical > 0 && activeSeconds > typical * 4) {
       confidence -= 0.35;
       factors.add('Nietypowo długi czas serii — oznaczony jako niepewny.');
-    } else if (typical > 0 &&
-        activeSeconds >= typical * 0.5 &&
-        activeSeconds <= typical * 2.5) {
-      confidence += 0.15;
-      factors.add('Czas serii w typowym zakresie.');
+    } else if (typical > 0) {
+      final ratio = activeSeconds / typical;
+      if (ratio >= 1.4) {
+        rpe += 0.6;
+        factors.add(
+            'Seria trwała dłużej niż typowo (${(ratio * 100).round()}%) — tempo zwolniło.');
+      } else if (ratio <= 0.7) {
+        rpe -= 0.4;
+        factors.add(
+            'Seria poszła szybciej niż typowo (${(ratio * 100).round()}%) — ruch był pewny.');
+      }
+      if (ratio >= 0.5 && ratio <= 2.5) {
+        confidence += 0.15;
+        factors.add('Czas serii w typowym zakresie.');
+      }
     }
   } else if (activeSeconds > 0 && !timeVerified) {
-    confidence -= 0.3;
+    confidence -= 0.15;
     factors.add('Czas niezweryfikowany (tło aplikacji / zatrzymany timer).');
   }
 
-  // Odpoczynek zgodny z planem podnosi pewność.
-  if (plannedRestSeconds > 0 && actualRestSeconds > 0) {
-    final ratio = actualRestSeconds / plannedRestSeconds;
-    if (ratio >= 0.7 && ratio <= 1.6) {
-      confidence += 0.05;
-    } else {
-      confidence -= 0.05;
-    }
-  }
+  if (actualReps > 0) confidence += 0.06;
 
   rpe = rpe.clamp(1.0, 10.0);
   confidence = confidence.clamp(0.1, 0.98);
   return ExertionEstimate(rpe: rpe, confidence: confidence, factors: factors);
 }
+
+/// Orientacyjny typowy czas serii (s) — punkt odniesienia dla realnego tempa
+/// (patrz `session_pace.dart`) i dla wykrywania nietypowo długiego czasu.
+int typicalSetSeconds(Exercise exercise, int reps) =>
+    _typicalSetSeconds(exercise, reps);
 
 /// Orientacyjny typowy czas serii (s) — do wykrywania nietypowo długiego czasu.
 int _typicalSetSeconds(Exercise exercise, int reps) {

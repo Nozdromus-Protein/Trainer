@@ -17,6 +17,7 @@ import 'dart:math' as math;
 
 import '../domain/body_muscle.dart';
 import '../domain/exercise.dart';
+import 'session_pace.dart';
 import 'training_coach.dart';
 import 'weekly_training_planner.dart';
 
@@ -407,13 +408,25 @@ double _forecastStrategyFactor(String goal) {
 }
 
 /// Szacowany czas jednego ćwiczenia w sekundach (praca + odpoczynek).
-int _exerciseSeconds(PlannedExercise ex) {
-  final workSeconds = ex.durationSec > 0
-      ? ex.sets * ex.durationSec
-      : ex.sets * (ex.reps > 0 ? ex.reps : 10) * 3;
-  final restSeconds = ex.sets * ex.restSeconds;
-  return workSeconds + restSeconds;
-}
+///
+/// [pace] to REALNE tempo użytkownika (ile z planowanej przerwy naprawdę
+/// wykorzystuje i jak szybko robi serie), a [intensityFactor] — korekta
+/// intensywności zestawu. Bez nich prognoza czasu opisywała plan, a nie
+/// trening: kto skraca odpoczynek, dostawał zawyżone minuty, a podkręcenie
+/// intensywności nie zmieniało czasu w ogóle.
+int _exerciseSeconds(
+  PlannedExercise ex, {
+  SessionPace pace = SessionPace.neutral,
+  double intensityFactor = 1.0,
+}) =>
+    estimateExerciseSeconds(
+      sets: ex.sets,
+      reps: ex.reps,
+      durationSec: ex.durationSec,
+      restSeconds: ex.restSeconds,
+      pace: pace,
+      intensityFactor: intensityFactor,
+    );
 
 /// Liczy prognozę (czas/kcal/woda/węglowodany/intensywność) z listy
 /// gotowych ćwiczeń. Wartości zawsze jako zakres.
@@ -423,9 +436,12 @@ WorkoutForecast forecastForExercises({
   required String goal,
   required bool lighter,
   required List<double> mets,
+  SessionPace pace = SessionPace.neutral,
+  double intensityFactor = 1.0,
 }) {
   if (exercises.isEmpty) return WorkoutForecast.empty;
   final safeWeight = bodyWeightKg.isFinite && bodyWeightKg > 0 ? bodyWeightKg : 75.0;
+  final intensity = intensityFactor.clamp(0.5, 1.8).toDouble();
 
   var totalSeconds = 0;
   var kcal = 0.0;
@@ -433,11 +449,18 @@ WorkoutForecast forecastForExercises({
   for (var i = 0; i < exercises.length; i++) {
     final ex = exercises[i];
     setCount += ex.sets;
-    final seconds = _exerciseSeconds(ex);
+    final seconds =
+        _exerciseSeconds(ex, pace: pace, intensityFactor: intensity);
     totalSeconds += seconds;
     final minutes = math.max(1.0, seconds / 60);
     final met = i < mets.length ? mets[i] : 5.0;
-    kcal += _metKcal(met, safeWeight, minutes);
+    // Cięższa praca to wyższy realny MET; krótsze przerwy podnoszą gęstość
+    // treningu, więc ta sama minuta kosztuje więcej energii.
+    final densityBoost = pace.hasRestData && pace.restRatio < 1
+        ? (1 + (1 - pace.restRatio).clamp(0.0, 0.5) * 0.3)
+        : 1.0;
+    final metFactor = (1 + (intensity - 1) * 0.5) * densityBoost;
+    kcal += _metKcal(met * metFactor, safeWeight, minutes);
   }
 
   final totalMinutes = math.max(1, (totalSeconds / 60).round());
@@ -476,10 +499,12 @@ WorkoutForecast forecastForExercises({
         )
       : 0;
 
-  final intensity = _intensityLabel(
+  final intensityLabel = _intensityLabel(
     setCount: setCount,
     goal: goal,
     lighter: lighter,
+    intensityFactor: intensity,
+    pace: pace,
   );
 
   return WorkoutForecast(
@@ -493,23 +518,37 @@ WorkoutForecast forecastForExercises({
     waterMaxMl: waterMax,
     carbsMinG: carbsMin,
     carbsMaxG: carbsMax,
-    intensityLabel: intensity,
+    intensityLabel: intensityLabel,
     setCount: setCount,
   );
 }
 
+/// Etykieta intensywności: objętość + cel, skorygowane o ręczne podkręcenie
+/// zestawu ([intensityFactor]) i realną gęstość pracy (krótsze przerwy).
 String _intensityLabel({
   required int setCount,
   required String goal,
   required bool lighter,
+  double intensityFactor = 1.0,
+  SessionPace pace = SessionPace.neutral,
 }) {
   if (lighter) return 'niska';
   final g = goal.toLowerCase();
   final strengthBias = g.contains('sił') || g.contains('sil');
-  if (setCount <= 8) return strengthBias ? 'średnia' : 'niska';
-  if (setCount <= 14) return strengthBias ? 'średnio-wysoka' : 'średnia';
-  if (setCount <= 20) return 'średnio-wysoka';
-  return 'wysoka';
+  const scale = ['niska', 'średnia', 'średnio-wysoka', 'wysoka'];
+  var level = setCount <= 8
+      ? (strengthBias ? 1 : 0)
+      : setCount <= 14
+          ? (strengthBias ? 2 : 1)
+          : setCount <= 20
+              ? 2
+              : 3;
+  // Podkręcenie/zbicie intensywności zestawu przesuwa etykietę o jeden stopień.
+  if (intensityFactor >= 1.08) level++;
+  if (intensityFactor <= 0.92) level--;
+  // Wyraźnie skracane przerwy = gęstszy trening przy tej samej objętości.
+  if (pace.shortensRest) level++;
+  return scale[level.clamp(0, scale.length - 1)];
 }
 
 // ============================================================================
@@ -664,6 +703,12 @@ PlannedWorkout buildPlannedWorkout({
   required double bodyWeightKg,
   required String goal,
   double timeCapMinutes = 0,
+
+  /// Realne tempo użytkownika (przerwy i czas serii) z ostatnich treningów.
+  SessionPace pace = SessionPace.neutral,
+
+  /// Korekta intensywności zestawu (gałka programu/dnia × faza cyklu).
+  double intensityFactor = 1.0,
 }) {
   final load = assessTrainingLoad(signals);
   final deload = assessDeload(signals, load);
@@ -690,7 +735,8 @@ PlannedWorkout buildPlannedWorkout({
   // --- Dzień programu 30-dniowego. ---
   if (program != null && !program.isRest && program.exercises.isNotEmpty) {
     var exercises = [for (final input in program.exercises) _plannedFromInput(input)];
-    exercises = _applyTimeCap(exercises, timeCapMinutes);
+    exercises = _applyTimeCap(exercises, timeCapMinutes,
+        pace: pace, intensityFactor: intensityFactor);
     final mets = [for (final input in program.exercises) input.exercise.met];
     final trimmedMets = mets.take(exercises.length).toList();
     final readiness = _lowestReadiness(exercises);
@@ -700,6 +746,8 @@ PlannedWorkout buildPlannedWorkout({
       goal: goal,
       lighter: false,
       mets: trimmedMets,
+      pace: pace,
+      intensityFactor: intensityFactor,
     );
     final calibrating = exercises.where((e) => e.isCalibrating).length;
     if (calibrating > 0) confidence -= 0.08;
@@ -775,7 +823,8 @@ PlannedWorkout buildPlannedWorkout({
 
   // --- Dynamiczny zestaw z regeneracji. ---
   var exercises = [for (final input in dynamicExercises) _plannedFromInput(input)];
-  exercises = _applyTimeCap(exercises, timeCapMinutes);
+  exercises = _applyTimeCap(exercises, timeCapMinutes,
+      pace: pace, intensityFactor: intensityFactor);
   final mets = [for (final input in dynamicExercises) input.exercise.met];
   final trimmedMets = mets.take(exercises.length).toList();
   final readiness = _lowestReadiness(exercises);
@@ -785,6 +834,8 @@ PlannedWorkout buildPlannedWorkout({
     goal: goal,
     lighter: false,
     mets: trimmedMets,
+    pace: pace,
+    intensityFactor: intensityFactor,
   );
   final bestArea = advice.areaReadiness.isEmpty ? null : advice.areaReadiness.first;
   // Tytuł bierze się z ROZKŁADU, gdy jest ustawiony — dzień nazywa się tak,
@@ -823,10 +874,17 @@ PlannedWorkout buildPlannedWorkout({
 /// Skraca zestaw do limitu czasu, zachowując główne ćwiczenia (od początku listy)
 /// i najpierw ograniczając serie ćwiczeń pomocniczych. Nigdy nie usuwa
 /// pierwszego (najważniejszego) ćwiczenia.
-List<PlannedExercise> _applyTimeCap(List<PlannedExercise> exercises, double capMinutes) {
+List<PlannedExercise> _applyTimeCap(
+  List<PlannedExercise> exercises,
+  double capMinutes, {
+  SessionPace pace = SessionPace.neutral,
+  double intensityFactor = 1.0,
+}) {
   if (capMinutes <= 0 || exercises.isEmpty) return exercises;
   final capSeconds = capMinutes * 60;
-  var total = exercises.fold<int>(0, (sum, e) => sum + _exerciseSeconds(e));
+  int seconds(PlannedExercise ex) =>
+      _exerciseSeconds(ex, pace: pace, intensityFactor: intensityFactor);
+  var total = exercises.fold<int>(0, (sum, e) => sum + seconds(e));
   if (total <= capSeconds) return exercises;
 
   final result = [...exercises];
@@ -839,7 +897,7 @@ List<PlannedExercise> _applyTimeCap(List<PlannedExercise> exercises, double capM
       final ex = result[i];
       if (ex.sets > 2) {
         final reduced = _withSets(ex, ex.sets - 1);
-        total -= _exerciseSeconds(ex) - _exerciseSeconds(reduced);
+        total -= seconds(ex) - seconds(reduced);
         result[i] = reduced;
         changed = true;
       }
@@ -849,7 +907,7 @@ List<PlannedExercise> _applyTimeCap(List<PlannedExercise> exercises, double capM
   // Krok 2: usuwaj ćwiczenia pomocnicze od końca (nigdy pierwszego).
   while (total > capSeconds && result.length > 1) {
     final removed = result.removeLast();
-    total -= _exerciseSeconds(removed);
+    total -= seconds(removed);
   }
   return result;
 }

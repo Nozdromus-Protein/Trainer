@@ -5,6 +5,7 @@ import 'dart:math' as math;
 import 'dart:typed_data';
 import 'dart:ui' as ui;
 
+import 'package:file_picker/file_picker.dart';
 import 'package:flutter/foundation.dart' show kDebugMode, kIsWeb;
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart'
@@ -18,6 +19,7 @@ import 'package:video_player/video_player.dart';
 import 'features/trainer/application/daily_adjustment_calculator.dart';
 import 'features/trainer/application/equipment_program_filter.dart';
 import 'features/trainer/application/exercise_library_filter.dart';
+import 'features/trainer/application/session_pace.dart';
 import 'features/trainer/application/training_coach.dart';
 import 'features/trainer/application/training_schedule.dart';
 import 'features/trainer/application/exercise_search.dart';
@@ -37,6 +39,7 @@ import 'features/trainer/domain/program_exercises.dart';
 import 'features/trainer/domain/trainer_models.dart';
 import 'features/trainer/presentation/splash_screen.dart';
 
+part 'ai_chat_attachments.dart';
 part 'ai_trainer_page.dart';
 
 const String kAppName = 'Trainer';
@@ -547,6 +550,11 @@ class _FitnessAppState extends State<FitnessApp> with WidgetsBindingObserver {
   bool loaded = false;
   Timer? _autoSyncTimer;
 
+  /// Postęp wczytywania pokazywany na splashu (pasek + podpis kroku).
+  final ValueNotifier<AppLoadProgress> _loadProgress =
+      ValueNotifier<AppLoadProgress>(
+          const AppLoadProgress(0, 'Uruchamiam aplikację…'));
+
   @override
   void initState() {
     super.initState();
@@ -555,7 +563,11 @@ class _FitnessAppState extends State<FitnessApp> with WidgetsBindingObserver {
     // Inicjalizacja konta/chmury (Firebase) w tle — bezpieczna: brak
     // konfiguracji Firebase zostawia aplikację w trybie lokalnym.
     unawaited(trainerAccountService.init());
-    store.load().then((_) {
+    store.load(
+      onProgress: (progress, label) {
+        if (mounted) _loadProgress.value = AppLoadProgress(progress, label);
+      },
+    ).then((_) {
       if (mounted) setState(() => loaded = true);
       // Automatyczna synchronizacja przy starcie (w tle, bez blokowania UI).
       unawaited(store.autoSyncHealthConnect(force: true));
@@ -580,6 +592,7 @@ class _FitnessAppState extends State<FitnessApp> with WidgetsBindingObserver {
   @override
   void dispose() {
     _autoSyncTimer?.cancel();
+    _loadProgress.dispose();
     WidgetsBinding.instance.removeObserver(this);
     super.dispose();
   }
@@ -616,12 +629,14 @@ class _FitnessAppState extends State<FitnessApp> with WidgetsBindingObserver {
   Widget build(BuildContext context) {
     if (!loaded) {
       // Splash tylko na czas realnego wczytywania danych (AppStore.load) —
-      // znika automatycznie, bez sztucznego opóźniania startu.
+      // znika automatycznie, bez sztucznego opóźniania startu. Pasek jest
+      // OKREŚLONY: widać procent i nazwę kroku, a komplet danych wchodzi do
+      // pamięci już tutaj, więc zakładki otwierają się bez doczytywania.
       return MaterialApp(
         debugShowCheckedModeBanner: false,
         theme: buildTheme(Colors.teal, false),
         darkTheme: buildTheme(Colors.teal, true),
-        home: const TrainerSplashScreen(),
+        home: TrainerSplashScreen(progress: _loadProgress),
       );
     }
 
@@ -1241,6 +1256,9 @@ class AppStore extends ChangeNotifier {
   static const _warmupCompletionsKey = 'warmup_completions_v1';
   static const _plansWarmupMigrationKey = 'plans_warmup_migration_v1';
 
+  /// Limity objętości zestawu (min/max ćwiczeń, serii i powtórzeń na partię).
+  static const _volumeLimitsKey = 'workout_volume_limits_v1';
+
   /// Migracja treści zestawów katalogowych na rytm „same dni ciężkie".
   /// Bump wersji wymusza jednorazową przebudowę zapisanych programów.
   static const _plansHeavyDaysMigrationKey = 'plans_heavy_days_migration_v1';
@@ -1249,13 +1267,27 @@ class AppStore extends ChangeNotifier {
   /// Bramka ciężkiego dnia honoruje wpis tylko przez [kWarmupFreshness].
   final Map<String, DateTime> warmupCompletions = {};
 
+  /// Limity objętości zestawu — dolne i górne granice na partię mięśniową.
+  /// Domyślne wartości pochodzą z [kDefaultMuscleVolumeLimits]; użytkownik
+  /// może je nadpisać (zapisujemy TYLKO nadpisania).
+  VolumeLimitsConfig volumeLimits = VolumeLimitsConfig.standard;
+
   /// Zdarzenia „odhaczone" per ikona paska Dzisiaj (jak przeczytane wiadomości).
   final Map<String, List<String>> _activityIconSeenNews = {};
 
   final Map<String, WorkoutAiAnalysis> _workoutAiAnalyses = {};
 
-  Future<void> load() async {
+  /// Wczytuje KOMPLET danych aplikacji przed pokazaniem interfejsu.
+  ///
+  /// [onProgress] raportuje postęp (0..1) i nazwę bieżącego kroku — splash
+  /// pokazuje z tego pasek i podpis małym druczkiem. Etapy są dobrane tak, by
+  /// odpowiadały realnej pracy, a nie równym odcinkom paska.
+  Future<void> load({void Function(double progress, String step)? onProgress}) async {
+    void step(double progress, String label) => onProgress?.call(progress, label);
+
+    step(0.04, 'Otwieram bazę treningów…');
     final trainerData = await _trainerRepository.load();
+    step(0.28, 'Wczytuję sesje, plany i ćwiczenia…');
     logs
       ..clear()
       ..addAll(trainerData.sessions);
@@ -1303,6 +1335,7 @@ class AppStore extends ChangeNotifier {
       await saveActiveWorkoutSession();
     }
 
+    step(0.40, 'Wczytuję ustawienia i personalizację…');
     final prefs = await SharedPreferences.getInstance();
     final hasStoredPlans = prefs.containsKey(TrainerLocalRepository.plansKey);
     final rawSettings = prefs.getString(_settingsKey);
@@ -1362,6 +1395,7 @@ class AppStore extends ChangeNotifier {
     // Migracja NIE dotyka planów, postępów programów ani celu kalorii —
     // buduje wyłącznie nowy profil ze starych pól (trainingMode,
     // targetSilhouette, targetWeightKg). Stare pola zostają nietknięte.
+    step(0.52, 'Składam cel sylwetki i etapy…');
     final rawGoalProfile = prefs.getString(_bodyGoalProfileKey);
     if (rawGoalProfile != null && rawGoalProfile.isNotEmpty) {
       try {
@@ -1409,6 +1443,7 @@ class AppStore extends ChangeNotifier {
       );
     }
 
+    step(0.62, 'Wczytuję pomiary, limity i rozgrzewki…');
     final rawPhotoDrafts = prefs.getString(_progressPhotoDraftsKey);
     if (rawPhotoDrafts != null && rawPhotoDrafts.isNotEmpty) {
       try {
@@ -1432,6 +1467,17 @@ class AppStore extends ChangeNotifier {
             final at = DateTime.tryParse(value.toString());
             if (at != null) warmupCompletions[key.toString()] = at;
           });
+        }
+      } catch (_) {}
+    }
+
+    final rawVolumeLimits = prefs.getString(_volumeLimitsKey);
+    if (rawVolumeLimits != null && rawVolumeLimits.isNotEmpty) {
+      try {
+        final decoded = jsonDecode(rawVolumeLimits);
+        if (decoded is Map) {
+          volumeLimits =
+              VolumeLimitsConfig.fromJson(Map<String, dynamic>.from(decoded));
         }
       } catch (_) {}
     }
@@ -1487,6 +1533,7 @@ class AppStore extends ChangeNotifier {
       } catch (_) {}
     }
 
+    step(0.74, 'Odświeżam most do Licznika Kalorii…');
     final rawAdjustmentsSignature = prefs.getString(_adjustmentsSignatureKey);
     if (rawAdjustmentsSignature != null && rawAdjustmentsSignature.isNotEmpty) {
       _publishedAdjustmentsSignature = rawAdjustmentsSignature;
@@ -1547,6 +1594,18 @@ class AppStore extends ChangeNotifier {
       if (rebuildLightCatalogPlanDays()) await savePlans();
       await prefs.setBool(_plansHeavyDaysMigrationKey, true);
     }
+
+    // Rozgrzewka pamięci: dotykamy ciężkich, leniwie inicjalizowanych zbiorów,
+    // żeby ich budowa NIE wypadła na pierwsze wejście w zakładkę (to właśnie
+    // ścinało klatki przy otwieraniu „Ćwiczeń" i „Treningu"). Statyczne pola
+    // Darta inicjalizują się przy pierwszym dostępie — tu i teraz, na splashu.
+    step(0.88, 'Przygotowuję bazę ćwiczeń…');
+    // Samo dotknięcie listy wystarcza: statyczne pole zbuduje się TERAZ,
+    // a nie przy pierwszym wejściu w zakładkę „Ćwiczenia".
+    warmedExerciseCount = ExerciseRepo.combined(customExercises).length;
+    step(0.96, 'Przygotowuję programy treningowe…');
+    warmedProgramCount = kWorkoutProgramCatalog.length;
+    step(1, 'Gotowe');
   }
 
   /// Czy plan zawiera dni inne niż ciężkie (techniczne / mobilność / odpoczynek).
@@ -1641,14 +1700,67 @@ class AppStore extends ChangeNotifier {
     final base = buildSchedule(trainingScheduleConfig, start, days);
     if (base.isEmpty) return base;
     final recovery = muscleRecoveryMap(now);
+    double readiness(TrainingFocusArea area, DateTime date) =>
+        scheduleReadiness(area, date, now, recovery);
+    // 1. Regeneracja PRZESTAWIA dni (rotacja partii/bloków w tygodniu).
+    //    Dodatek dnia oceniamy z pominięciem partii, które i tak obciąża dziś
+    //    blok główny — inaczej „barki po klatce" kasowały same siebie —
+    //    i średnią zamiast najsłabszej partii, bo dodatek to mały blok.
+    //    Dni już wykonane (i minione) są nietykalne: zrobiony trening nie jest
+    //    planem do poprawienia.
     final resolved = resolveScheduleWithRecovery(
       base,
-      (area, date) => scheduleReadiness(area, date, now, recovery),
+      readiness,
+      readinessIgnoring: (area, date, ignore) => scheduleReadiness(
+          area, date, now, recovery,
+          ignoreMuscles: ignore, bestMuscle: true),
+      isLocked: (day) => isScheduleDayLocked(day, now),
     );
-    return [
+    // 2. Oznaczamy okno deloadu…
+    final withDeload = [
       for (final day in resolved)
         isDeloadDate(day.date) ? day.copyWith(isDeload: true) : day,
     ];
+    // 3. …i dopiero na końcu nakładamy hierarchię obciążenia:
+    //    Deload > Regeneracja > Zestaw ćwiczeń. Dzień, którego nie dało się
+    //    przestawić, zostaje — ale w lżejszej wersji, a nazwa to pokazuje.
+    return applyLoadHierarchy(
+      withDeload,
+      readiness,
+      deloadScale:
+          deloadStatusToday.isDeload ? deloadStatusToday.intensityFactor : 0.6,
+      isLocked: (day) => isScheduleDayLocked(day, now),
+    );
+  }
+
+  /// Czy dzień rozkładu jest ZAMKNIĘTY — miniony albo z wykonanymi zestawami.
+  ///
+  /// Zamkniętego dnia regeneracja już nie przestawia i nie odchudza: świeżo
+  /// wytrenowana partia ma z definicji niską gotowość, więc bez tej blokady
+  /// rozkład podmieniał zrobiony dzień klatki na „nogi".
+  bool isScheduleDayLocked(ScheduledDay day, [DateTime? now]) {
+    final reference = now ?? DateTime.now();
+    final today = DateTime(reference.year, reference.month, reference.day);
+    final date = DateTime(day.date.year, day.date.month, day.date.day);
+    if (date.isBefore(today)) return true;
+    // Wystarczy JEDEN zapisany zestaw: dzień jest już w trakcie realizacji,
+    // więc nie wolno podmieniać mu partii pod nosem. Po pierwszym zestawie
+    // trenowana partia i tak ma niską gotowość — to nie powód do przeplanowania.
+    return logsForDay(date).isNotEmpty;
+  }
+
+  /// Czy WSZYSTKIE zestawy tego dnia rozkładu zostały wykonane (tor
+  /// pierwszorzędny i drugorzędny). Zasila kalendarz i „Dzisiejszy trening".
+  bool isScheduleDayDone(ScheduledDay day) {
+    if (day.isRest || day.area == null) return false;
+    if (logsForDay(day.date).isEmpty) return false;
+    for (final area in day.areas) {
+      // Obszary bez partii definiujących (mobilność) nie mają jak się „odhaczyć"
+      // — nie blokują uznania dnia za wykonany.
+      if (area.signatureMuscles.isEmpty) continue;
+      if (!_areaTrainedToday(area, day.date)) return false;
+    }
+    return true;
   }
 
   /// Dzień rozkładu przypadający na DZIŚ (obszar, deload, ewentualne
@@ -1668,6 +1780,13 @@ class AppStore extends ChangeNotifier {
   /// Program 30-dniowy odpowiadający danemu obszarowi — o ile użytkownik
   /// faktycznie taki program ma. `null` = zestaw trzeba złożyć dynamicznie.
   WorkoutPlan? planForArea(TrainingFocusArea? area) {
+    // W strategii Push / Pull / Legs dzień niesie CAŁY wzorzec ruchu, a program
+    // katalogowy obsługuje jedną partię (sam chest to nie jest dzień push).
+    // Taki dzień składa Planer z ćwiczeń całego bloku — zgodnie ze strategią.
+    if (trainingScheduleConfig.strategy.isPushPullLegs &&
+        (area == TrainingFocusArea.push || area == TrainingFocusArea.pull)) {
+      return null;
+    }
     final programId = programIdForArea(area);
     if (programId == null) return null;
     for (final plan in plans) {
@@ -1709,14 +1828,20 @@ class AppStore extends ChangeNotifier {
 
   // ── Dzisiejszy trening: dwa tory jako osobne, pełne zestawy ────────────────
 
-  /// Czy obszar był DZIŚ trenowany (log z partią główną tego obszaru).
+  /// Czy obszar był DZIŚ trenowany.
+  ///
+  /// Liczy się wyłącznie ćwiczenie, którego partia GŁÓWNA definiuje ten obszar
+  /// ([TrainingFocusArea.signatureMuscles]). Partie pomocnicze nie wystarczają:
+  /// wyciskanie angażuje przedni bark, ale nie oznacza, że barki są dziś
+  /// zrobione — a właśnie tak dzień barków znikał po zestawie klatki.
   bool _areaTrainedToday(TrainingFocusArea area, DateTime now) {
-    if (area.muscles.isEmpty) return false;
+    final signature = area.signatureMuscles;
+    if (signature.isEmpty) return false;
     for (final log in logsForDay(now)) {
       final def = ExerciseRepo.byId(log.exerciseId, customExercises);
       for (final impact in def.effectiveMuscleImpacts) {
         if (impact.role == MuscleRole.primary &&
-            area.muscles.contains(impact.muscleGroup)) {
+            signature.contains(impact.muscleGroup)) {
           return true;
         }
       }
@@ -1868,7 +1993,24 @@ class AppStore extends ChangeNotifier {
   /// Przywraca domyślny plan tygodnia dla bieżących dni treningowych.
   Future<void> resetWeekPlan() async {
     await updateTrainingSchedule(settings.trainingSchedule.copyWith(
-      weekdayPlans: defaultWeekPlan(settings.trainingWeekdays),
+      weekdayPlans: defaultWeekPlan(settings.trainingWeekdays,
+          strategy: settings.trainingSchedule.strategy),
+      rotationKeys: const <String>[],
+    ));
+  }
+
+  /// Przełącza STRATEGIĘ podziału tygodnia (dwutorowa ↔ Push / Pull / Legs).
+  ///
+  /// Zmiana strategii buduje tydzień od nowa według jej cyklu — inaczej stary
+  /// układ partii zostałby tylko przemianowany i „Push" wypadałby w dniu, który
+  /// zaplanowano jako brzuch. Historia treningów i postęp programów pozostają
+  /// nietknięte.
+  Future<void> setSplitStrategy(TrainingSplitStrategy strategy) async {
+    if (settings.trainingSchedule.strategy == strategy) return;
+    await updateTrainingSchedule(settings.trainingSchedule.copyWith(
+      strategy: strategy,
+      weekdayPlans:
+          defaultWeekPlan(settings.trainingWeekdays, strategy: strategy),
       rotationKeys: const <String>[],
     ));
   }
@@ -1956,6 +2098,16 @@ class AppStore extends ChangeNotifier {
   WorkoutDay presentedDay(WorkoutPlan plan, WorkoutDay day, [DateTime? date]) {
     return deloadAdjustedDay(
         applyIntensityStep(day, effectiveIntensitySteps(plan, day)), date);
+  }
+
+  /// Łączny mnożnik intensywności dnia: ręczna korekta (program + dzień)
+  /// razy faza cyklu/deload. Zasila szacunki czasu i kalorii — sama liczba
+  /// serii/powtórzeń to za mało, bo cięższa praca trwa dłużej i kosztuje więcej.
+  double dayIntensityFactor(WorkoutPlan plan, WorkoutDay day,
+      [DateTime? date]) {
+    final status = deloadStatusOn(date);
+    return (status.isActive ? status.intensityFactor : 1.0) *
+        intensityStepFactor(effectiveIntensitySteps(plan, day));
   }
 
   /// Ustawia ręczną korektę intensywności CAŁEGO programu (−3..+3).
@@ -3581,6 +3733,11 @@ class AppStore extends ChangeNotifier {
 
   DateTime? lastBackupAt;
 
+  /// Ile ćwiczeń i programów rozgrzano na splashu (diagnostyka startu).
+  /// Zero = start jeszcze nie doszedł do etapu rozgrzewki pamięci.
+  int warmedExerciseCount = 0;
+  int warmedProgramCount = 0;
+
   /// Najnowszy moment zmiany danych w aplikacji — przybliżenie „ostatniego
   /// zapisu" bez ingerencji w pojedyncze metody save.
   DateTime? get lastDataActivityAt {
@@ -4604,6 +4761,9 @@ class AppStore extends ChangeNotifier {
     int activeSeconds = 0,
     bool isTimeVerified = true,
     String rpeSource = '',
+    int? restBeforeSec,
+    int? plannedRestSec,
+    bool? isRestVerified,
   }) async {
     final session = activeWorkoutSession;
     final exercise = session?.currentExercise;
@@ -4611,6 +4771,19 @@ class AppStore extends ChangeNotifier {
     if (exercise.completedSets.length >= exercise.plannedSets) return false;
     final exercises = [...session.exercises];
     final index = session.currentExerciseIndex;
+    // Realne tempo: ile trwała przerwa przed tą serią i ile sama praca.
+    // Bez tego zestaw wierzył, że użytkownik trzymał się planu co do sekundy.
+    final timing = measureActiveSetTiming();
+    final resolvedRestBefore = restBeforeSec ?? timing.restSec;
+    final resolvedPlannedRest = plannedRestSec ?? timing.plannedRestSec;
+    final resolvedRestVerified = isRestVerified ?? timing.restVerified;
+    // Czas pracy serii powtórzeniowej mierzymy z luki między końcem przerwy
+    // a zapisem serii — dla serii czasowych źródłem pozostaje timer.
+    final resolvedActiveSeconds =
+        activeSeconds > 0 ? activeSeconds : timing.workSec;
+    final resolvedTimeVerified = activeSeconds > 0
+        ? isTimeVerified
+        : (timing.workSec > 0 && timing.workVerified);
     // Zgodność wsteczna: gdy nie podano ręcznego RPE, ale mamy szacowane
     // (tryb prowadzenia), zapisujemy zaokrąglone szacowane RPE w polu `rpe`,
     // żeby regeneracja/progresja/średnie RPE działały bez przeróbek.
@@ -4640,9 +4813,12 @@ class AppStore extends ChangeNotifier {
           outcome: outcome,
           estimatedRpe: estimatedRpe,
           exertionConfidence: exertionConfidence,
-          activeSeconds: math.max(0, activeSeconds),
-          isTimeVerified: isTimeVerified,
+          activeSeconds: math.max(0, resolvedActiveSeconds),
+          isTimeVerified: resolvedTimeVerified,
           rpeSource: resolvedRpeSource,
+          restBeforeSec: math.max(0, resolvedRestBefore),
+          plannedRestSec: math.max(0, resolvedPlannedRest),
+          isRestVerified: resolvedRestVerified,
         ),
       ],
       isSkipped: false,
@@ -4651,6 +4827,7 @@ class AppStore extends ChangeNotifier {
     // Gdy to była ostatnia seria ostatniego (i całego) treningu — bez timera
     // odpoczynku: nie ma następnego ćwiczenia, aplikacja przechodzi wprost
     // do podsumowania (Etap: koniec treningu bez „pustego" odpoczynku).
+    final savedAt = DateTime.now();
     if (_allActiveExercisesDone(exercises)) {
       activeWorkoutSession = session.copyWith(
         exercises: exercises,
@@ -4658,6 +4835,8 @@ class AppStore extends ChangeNotifier {
         restTimerTotalSeconds: 0,
         isRestTimerPaused: false,
         clearRestTimerEndsAt: true,
+        lastSetCompletedAt: savedAt,
+        clearRestEndedAt: true,
       );
       await saveActiveWorkoutSession();
       notifyListeners();
@@ -4673,15 +4852,71 @@ class AppStore extends ChangeNotifier {
     );
     activeWorkoutSession = session.copyWith(
       exercises: exercises,
-      restTimerEndsAt:
-          DateTime.now().add(Duration(seconds: recommendation.seconds)),
+      restTimerEndsAt: savedAt.add(Duration(seconds: recommendation.seconds)),
       restTimerRemainingSeconds: recommendation.seconds,
       restTimerTotalSeconds: recommendation.seconds,
       isRestTimerPaused: false,
+      // Nowa przerwa startuje TERAZ — kasujemy poprzedni znacznik jej końca,
+      // żeby pomiar kolejnej serii nie odziedziczył czasu z poprzedniej.
+      lastSetCompletedAt: savedAt,
+      clearRestEndedAt: true,
     );
     await saveActiveWorkoutSession();
     notifyListeners();
     return true;
+  }
+
+  // ===== Realne tempo: przerwa i czas pracy serii =====
+
+  /// Pomiar dla SERII, która właśnie ma zostać zapisana: ile realnie trwała
+  /// przerwa przed nią i ile sama praca.
+  ///
+  /// Czas pracy odrzucamy jako niewiarygodny, gdy jest wielokrotnie dłuższy niż
+  /// typowy dla ćwiczenia (telefon w kieszeni, rozmowa na siłowni) — lepiej nie
+  /// mieć pomiaru niż mieć zmyślony.
+  ({
+    int restSec,
+    int workSec,
+    int plannedRestSec,
+    bool restVerified,
+    bool workVerified,
+  }) measureActiveSetTiming() {
+    final session = activeWorkoutSession;
+    final exercise = session?.currentExercise;
+    if (session == null || exercise == null) {
+      return (
+        restSec: 0,
+        workSec: 0,
+        plannedRestSec: 0,
+        restVerified: false,
+        workVerified: false
+      );
+    }
+    final def = ExerciseRepo.byId(exercise.exerciseId, customExercises);
+    final plannedRest = workoutRestRecommendation(def, exercise).seconds;
+    final measured = session.measureRestAndWork(plannedRestSec: plannedRest);
+    final reps = exercise.plannedReps;
+    final work = measured.workSec;
+    final plausibleWork =
+        work > 0 && !isSetDurationSuspicious(def, reps, work) && work <= 900;
+    return (
+      restSec: measured.restSec.clamp(0, 3600),
+      workSec: plausibleWork ? work : 0,
+      plannedRestSec: plannedRest,
+      restVerified: measured.verified && !session.isPaused,
+      workVerified: plausibleWork && measured.verified && !session.isPaused,
+    );
+  }
+
+  /// Zaznacza moment, w którym odpoczynek NAPRAWDĘ się skończył (timer dobiegł
+  /// końca albo użytkownik go pominął/skrócił). To jedyne pewne źródło informacji
+  /// o realnej długości przerwy.
+  Future<void> markRestEnded({DateTime? at}) async {
+    final session = activeWorkoutSession;
+    if (session == null || session.restEndedAt != null) return;
+    if (session.lastSetCompletedAt == null) return;
+    activeWorkoutSession = session.copyWith(restEndedAt: at ?? DateTime.now());
+    await saveActiveWorkoutSession();
   }
 
   // ===== Inteligentny trener: kontekst, historia, rekomendacja, logowanie =====
@@ -4799,6 +5034,165 @@ class AppStore extends ChangeNotifier {
     );
   }
 
+  // Tempo liczymy z całej historii, a czytają je metody `build` (szacunki czasu
+  // i kalorii), więc trzymamy prosty cache unieważniany zmianą historii.
+  final Map<String, SessionPace> _paceCache = {};
+  String _paceCacheSignature = '';
+
+  String get _logsSignature =>
+      logs.isEmpty ? '0' : '${logs.length}:${logs.first.id}:${logs.last.id}';
+
+  void _refreshPaceCache() {
+    final signature = _logsSignature;
+    if (signature == _paceCacheSignature) return;
+    _paceCacheSignature = signature;
+    _paceCache.clear();
+  }
+
+  /// Realne tempo ostatniej sesji ćwiczenia: ile z planowanej przerwy zostało
+  /// wykorzystane i jak szybko szły serie.
+  SessionPace paceForExercise(String exerciseId) {
+    _refreshPaceCache();
+    final cached = _paceCache[exerciseId];
+    if (cached != null) return cached;
+    final result = _computePaceForExercise(exerciseId);
+    _paceCache[exerciseId] = result;
+    return result;
+  }
+
+  SessionPace _computePaceForExercise(String exerciseId) {
+    final history = logs.where((log) => log.exerciseId == exerciseId).toList()
+      ..sort((a, b) => a.date.compareTo(b.date));
+    if (history.isEmpty) return SessionPace.neutral;
+    final last = history.last;
+    final def = ExerciseRepo.byId(exerciseId, customExercises);
+    return measurePace([
+      for (final set in last.workoutSets)
+        if (set.countsForProgress)
+          SetTempoSample.fromSet(
+            set,
+            typicalWorkSec: typicalSetSeconds(
+              def,
+              set.repetitions > 0 ? set.repetitions : last.reps,
+            ),
+          ),
+    ]);
+  }
+
+  /// OSTROŻNA sugestia progresji dla ćwiczenia — to, co zestaw pokazuje jako
+  /// „co zmieniło się w sugestii".
+  ///
+  /// Decyzję „czy w ogóle progresować" podejmuje trener ([decideProgression]),
+  /// a tutaj dokładamy warstwę rozsądku: skrócony odpoczynek, szybsze serie
+  /// i zmiany, które JUŻ się wydarzyły od poprzedniej sesji, tłumią krok,
+  /// zamiast go podbijać. Zwraca `null`, gdy nie ma jeszcze historii.
+  CautiousProgressionStep? cautiousProgressionForExercise(String exerciseId) {
+    final history = logs.where((log) => log.exerciseId == exerciseId).toList()
+      ..sort((a, b) => a.date.compareTo(b.date));
+    if (history.isEmpty) return null;
+    final def = ExerciseRepo.byId(exerciseId, customExercises);
+    final entryType = def.entryType;
+    final ctx = coachContext();
+    final samples = coachHistoryForExercise(exerciseId);
+    if (samples.isEmpty) return null;
+    final last = samples.last;
+
+    final decision = decideProgression(
+      exercise: def,
+      ctx: ctx,
+      history: samples,
+      recoveryPercent: recoveryPercentForExercise(def),
+      lastConfidence: last.confidence,
+    );
+
+    // Ile udanych sesji z rzędu (ten sam warunek co w decyzji trenera).
+    var streak = 0;
+    for (var i = samples.length - 1; i >= 0; i--) {
+      final sample = samples[i];
+      final struggled = sample.rpeReliable && sample.estimatedRpe >= 8.5;
+      if (sample.allSetsCompleted && !struggled) {
+        streak++;
+      } else {
+        break;
+      }
+    }
+
+    // Co JUŻ się zmieniło od poprzedniej sesji — niezależnie od tego, czy
+    // zmianę wprowadził trener, czy ręcznie użytkownik. Dołożenie drugi raz
+    // tego samego to dokładnie ten „duży dodatek", którego chcemy uniknąć.
+    final previous = samples.length >= 2 ? samples[samples.length - 2] : null;
+    final manual = previous == null
+        ? ManualSetChanges.none
+        : ManualSetChanges(
+            weightDeltaKg: entryType.showsWeight && !entryType.usesBodyweight
+                ? last.weightKg - previous.weightKg
+                : 0,
+            repDelta: entryType.showsReps ? last.reps - previous.reps : 0,
+          );
+
+    final evidence = ExerciseSessionEvidence(
+      exerciseId: exerciseId,
+      exerciseName: def.name,
+      plannedSets: history.last.sets,
+      completedSets:
+          history.last.workoutSets.where((s) => s.countsForProgress).length,
+      allSetsCompleted: last.allSetsCompleted,
+      pace: paceForExercise(exerciseId),
+      manual: manual,
+      avgRpe: last.estimatedRpe,
+      rpeReliable: last.rpeReliable,
+      confidence: last.confidence,
+      successStreak: streak,
+    );
+
+    switch (decision.action) {
+      case CoachProgressionAction.increaseWeight:
+        // Krok ostrożny mierzymy w POŁOWIE normalnego skoku (małe talerze) —
+        // inaczej „pół kroku" zaokrągliłoby się z powrotem do pełnego.
+        final full = safeWeightStepKg(def, ctx.level);
+        return cautiousProgressionStep(
+          evidence: evidence,
+          fullStepKg:
+              decision.weightDeltaKg > 0 ? decision.weightDeltaKg : full,
+          roundToKg: full / 2 < 0.5 ? 0.5 : full / 2,
+        );
+      case CoachProgressionAction.increaseReps:
+        return cautiousProgressionStep(
+          evidence: evidence,
+          fullStepKg: 0,
+          fullRepStep: decision.repDelta > 0 ? decision.repDelta : 1,
+          preferWeight: false,
+        );
+      case CoachProgressionAction.increaseDuration:
+        return cautiousProgressionStep(
+          evidence: evidence,
+          fullStepKg: 0,
+          fullRepStep: 0,
+          fullDurationStepSec:
+              decision.durationDeltaSec > 0 ? decision.durationDeltaSec : 5,
+          preferWeight: false,
+        );
+      default:
+        // Trener nie chce progresować — pokazujemy jego powód razem z tym,
+        // co zauważyło tempo (np. „odpoczywasz krócej niż plan").
+        final pace = evidence.pace.summary;
+        return CautiousProgressionStep(
+          weightDeltaKg: 0,
+          repDelta: 0,
+          durationDeltaSec: 0,
+          headline: decision.action == CoachProgressionAction.harderVariant
+              ? 'Czas na trudniejszy wariant'
+              : 'Utrzymujemy parametry',
+          reasons: [
+            decision.reason,
+            if (pace.isNotEmpty) 'Twoje tempo: $pace.',
+          ],
+          appliedFraction: 0,
+          restAdviceSec: evidence.pace.shortensRest ? 1 : 0,
+        );
+    }
+  }
+
   /// Regeneracja (%) najsłabiej zregenerowanej głównej partii ćwiczenia.
   double recoveryPercentForExercise(Exercise exercise) {
     final map = muscleRecoveryMap();
@@ -4858,17 +5252,43 @@ class AppStore extends ChangeNotifier {
       durationSec: baseDuration,
       restSeconds: baseRest,
     );
+    // OSTROŻNY KROK: gdy trener chce podnieść ciężar, a dowody tego nie
+    // uzasadniają (skrócona przerwa, ciężar podniesiony dopiero co, pojedyncza
+    // udana sesja), schodzimy do mniejszego przyrostu. Ta sama wartość trafia
+    // do karty sugestii, więc plan i wyjaśnienie zawsze się zgadzają.
+    // Korekta może wynik tylko ZMNIEJSZYĆ — nigdy nie podbija rekomendacji.
+    var recommendedWeight = rec.weightKg;
+    var cautiousNote = '';
+    final cautious = cautiousProgressionForExercise(def.id);
+    if (cautious != null &&
+        cautious.isDampened &&
+        history.isNotEmpty &&
+        entryType.showsWeight &&
+        !entryType.usesBodyweight) {
+      final lastWeight = history.last.weightKg;
+      if (lastWeight > 0 && rec.weightKg > lastWeight + 0.01) {
+        final target = clampToPracticalLoad(
+            lastWeight + cautious.weightDeltaKg, def, coachContext());
+        if (target < recommendedWeight) {
+          recommendedWeight = target;
+          cautiousNote = cautious.headline;
+        }
+      }
+    }
     final recommended = Prescription(
       sets: rec.sets < 1 ? 1 : rec.sets,
       reps: rec.reps,
-      weightKg: rec.weightKg,
+      weightKg: recommendedWeight,
       durationSec: rec.durationSec,
       restSeconds: rec.restSeconds,
     );
     return SessionPrescription(
       base: base,
       recommended: recommended,
-      reason: rec.reasons.join(' '),
+      reason: cautiousNote.isEmpty
+          ? rec.reasons.join(' ')
+          : '${rec.reasons.join(' ')} $cautiousNote — '
+              '${cautious!.reasons.isEmpty ? 'dokładamy ostrożnie.' : cautious.reasons.first}',
       dataSource: rec.isCalibrating
           ? 'calibration'
           : (history.isNotEmpty ? 'history' : 'base'),
@@ -4876,6 +5296,26 @@ class AppStore extends ChangeNotifier {
       isCalibrating: rec.isCalibrating,
       generatedAtIso: DateTime.now().toIso8601String(),
     );
+  }
+
+  /// Ciężar, jaki ta pozycja zestawu dostanie na starcie treningu.
+  ///
+  /// Liczony DOKŁADNIE tą samą receptą co start sesji, więc lista zestawu
+  /// pokazuje przed startem to, co za chwilę zobaczysz na ekranie ćwiczenia —
+  /// można przygotować obciążenie, zanim naciśniesz „Start". Zwraca 0, gdy typ
+  /// wpisu nie korzysta z ciężaru albo nie ma z czego go wyliczyć.
+  double plannedWeightForPlanItem(PlanItem item, Exercise def) {
+    if (!def.entryType.showsWeight) return 0;
+    final rx = buildSessionPrescription(
+      def,
+      baseSets: item.sets,
+      baseReps: item.reps,
+      baseWeightKg: item.suggestedWeightKg,
+      baseRestSeconds: item.restSeconds,
+      baseDurationSec: item.durationSec,
+    );
+    final weight = rx.effective.weightKg;
+    return weight > 0 ? weight : item.suggestedWeightKg;
   }
 
   /// Rekomendacja parametrów dla bieżącego ćwiczenia aktywnego treningu.
@@ -4948,20 +5388,40 @@ class AppStore extends ChangeNotifier {
         break;
     }
 
+    // Realne sygnały tej serii: ile trwała przerwa, ile praca, jak ciężki jest
+    // ciężar względem historii i jak daleko jesteśmy w treningu. To one
+    // zastępują dawne sztywne „RPE 7 przy zgodnym z planem".
+    final timing = measureActiveSetTiming();
+    final measuredWork = activeSeconds > 0 ? activeSeconds : timing.workSec;
+    final measuredWorkVerified =
+        activeSeconds > 0 ? timeVerified : timing.workVerified;
+    final history = coachHistoryForExercise(active.exerciseId);
+    var referenceWeight = 0.0;
+    for (final sample in history) {
+      if (sample.weightKg > referenceWeight) referenceWeight = sample.weightKg;
+    }
+
     final exertion = estimateExertion(
       outcome: outcome,
       exercise: def,
       plannedReps: rec.reps,
       actualReps: entryType.showsReps ? reps : 0,
       weightKg: rec.weightKg,
-      activeSeconds: activeSeconds,
-      timeVerified: timeVerified,
-      plannedRestSeconds: active.restSeconds,
+      activeSeconds: outcome == SetOutcome.interrupted ? 0 : measuredWork,
+      timeVerified: measuredWorkVerified,
+      plannedRestSeconds: timing.plannedRestSec > 0
+          ? timing.plannedRestSec
+          : active.restSeconds,
+      actualRestSeconds: timing.restSec,
+      restVerified: timing.restVerified,
       recoveryPercent: recoveryPercentForExercise(def),
       heartRateBpm: heartRateBpm,
       age: settings.age,
       setIndex: active.completedSets.length,
       firstSetReps: firstSetReps,
+      plannedSets: active.plannedSets,
+      referenceWeightKg: entryType.showsWeight ? referenceWeight : 0,
+      sessionCompletedSets: activeWorkoutSession?.completedSetCount ?? 0,
     );
 
     return saveActiveWorkoutSet(
@@ -4991,6 +5451,7 @@ class AppStore extends ChangeNotifier {
     final def = ExerciseRepo.byId(active.exerciseId, customExercises);
     final entryType = def.entryType;
     final safeSeconds = math.max(0, performedSec);
+    final timing = measureActiveSetTiming();
     final exertion = estimateExertion(
       outcome: SetOutcome.asPlanned,
       exercise: def,
@@ -4999,11 +5460,17 @@ class AppStore extends ChangeNotifier {
       weightKg: 0,
       activeSeconds: safeSeconds,
       timeVerified: true,
-      plannedRestSeconds: active.restSeconds,
+      plannedRestSeconds: timing.plannedRestSec > 0
+          ? timing.plannedRestSec
+          : active.restSeconds,
+      actualRestSeconds: timing.restSec,
+      restVerified: timing.restVerified,
       recoveryPercent: recoveryPercentForExercise(def),
       heartRateBpm: heartRateBpm,
       age: settings.age,
       setIndex: active.completedSets.length,
+      plannedSets: active.plannedSets,
+      sessionCompletedSets: activeWorkoutSession?.completedSetCount ?? 0,
     );
     return saveActiveWorkoutSet(
       weightKg: entryType.showsWeight ? active.suggestedWeightKg : 0,
@@ -5194,11 +5661,16 @@ class AppStore extends ChangeNotifier {
   Future<void> skipActiveRestTimer() async {
     final session = activeWorkoutSession;
     if (session == null) return;
+    // Pominięcie przerwy to PEWNY moment jej końca — zapamiętujemy go, żeby
+    // kolejna seria wiedziała, że odpoczynek był krótszy niż plan.
+    final endedAt = session.restEndedAt ??
+        (session.lastSetCompletedAt == null ? null : DateTime.now());
     activeWorkoutSession = session.copyWith(
       restTimerRemainingSeconds: 0,
       restTimerTotalSeconds: 0,
       isRestTimerPaused: false,
       clearRestTimerEndsAt: true,
+      restEndedAt: endedAt,
     );
     await saveActiveWorkoutSession();
     notifyListeners();
@@ -5405,6 +5877,22 @@ class AppStore extends ChangeNotifier {
           .map((id, at) => MapEntry(id, at.toIso8601String()))),
     );
   }
+
+  /// Zapisuje limity objętości zestawu (min/max ćwiczeń, serii, powtórzeń).
+  ///
+  /// Limity nie ruszają już WYGENEROWANYCH planów — obowiązują przy budowie
+  /// nowych zestawów, walidacji i edycji. Dzięki temu zmiana ustawień nie
+  /// przepisuje w tle programu, w którym użytkownik jest w połowie.
+  Future<void> setVolumeLimits(VolumeLimitsConfig config) async {
+    volumeLimits = config;
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.setString(_volumeLimitsKey, jsonEncode(config.toJson()));
+    notifyListeners();
+  }
+
+  /// Limity dla partii z uwzględnieniem poziomu użytkownika.
+  MuscleVolumeLimits volumeLimitsForGroup(MuscleGroup group) =>
+      volumeLimitsFor(group, level: settings.level, config: volumeLimits);
 
   /// Czy rozgrzewka [warmupId] została ukończona na tyle niedawno, że bramka
   /// ciężkiego dnia może przepuścić trening (okno [kWarmupFreshness]).
@@ -5946,7 +6434,51 @@ class AppStore extends ChangeNotifier {
           ? settings.trainingMode
           : settings.goal,
       timeCapMinutes: timeCapMinutes,
+      // Prognoza czasu/kalorii ma opisywać TWÓJ trening: realne tempo z historii
+      // (skracane przerwy, szybsze serie) oraz aktualną korektę intensywności.
+      pace: recentTrainingPace(),
+      intensityFactor: (deloadStatusToday.isActive
+              ? deloadStatusToday.intensityFactor
+              : 1.0) *
+          intensityStepFactor(activeEffectiveIntensitySteps),
     );
+  }
+
+  /// Uśrednione tempo z ostatnich treningów — ile z planowanej przerwy realnie
+  /// wykorzystujesz i jak szybko idą serie. Zasila prognozy czasu i kalorii.
+  SessionPace recentTrainingPace({int sessionLimit = 3}) {
+    _refreshPaceCache();
+    final key = '__recent_$sessionLimit';
+    final cached = _paceCache[key];
+    if (cached != null) return cached;
+    final result = _computeRecentTrainingPace(sessionLimit);
+    _paceCache[key] = result;
+    return result;
+  }
+
+  SessionPace _computeRecentTrainingPace(int sessionLimit) {
+    final recent = logs.toList()..sort((a, b) => b.date.compareTo(a.date));
+    final sessionIds = <String>{};
+    final samples = <SetTempoSample>[];
+    for (final log in recent) {
+      final key = log.sessionId.isNotEmpty ? log.sessionId : log.id;
+      if (!sessionIds.contains(key)) {
+        if (sessionIds.length >= sessionLimit) break;
+        sessionIds.add(key);
+      }
+      final def = ExerciseRepo.byId(log.exerciseId, customExercises);
+      for (final set in log.workoutSets) {
+        if (!set.countsForProgress) continue;
+        samples.add(SetTempoSample.fromSet(
+          set,
+          typicalWorkSec: typicalSetSeconds(
+            def,
+            set.repetitions > 0 ? set.repetitions : log.reps,
+          ),
+        ));
+      }
+    }
+    return measurePace(samples);
   }
 
   /// Sygnały zmęczenia/obciążenia (przeciążenie + deload) liczone z historii.
@@ -6364,10 +6896,23 @@ class AppStore extends ChangeNotifier {
     notifyListeners();
   }
 
-  Future<void> chatWithAi(String userMessage) async {
-    if (userMessage.trim().isEmpty) return;
+  Future<void> chatWithAi(
+    String userMessage, {
+    List<AiChatAttachment> attachments = const <AiChatAttachment>[],
+  }) async {
+    final trimmedMessage = userMessage.trim();
+    // Sam załącznik też jest pytaniem (zdjęcie sylwetki, plan z pliku) —
+    // nie wymagamy treści, gdy coś dołączono.
+    if (trimmedMessage.isEmpty && attachments.isEmpty) return;
+    final question = trimmedMessage.isEmpty
+        ? 'Oceń załączone materiały pod kątem mojego treningu.'
+        : trimmedMessage;
     aiChatHistory.add(AiChatMessage(
-        role: 'user', content: userMessage.trim(), timestamp: DateTime.now()));
+      role: 'user',
+      content: question,
+      timestamp: DateTime.now(),
+      attachments: attachments,
+    ));
     aiChatBusy = true;
     notifyListeners();
     try {
@@ -6378,13 +6923,17 @@ class AppStore extends ChangeNotifier {
       // mapa regeneracji, planer tygodnia, status mostu do Kalorii.
       final context = buildAiContext();
       final result = await api.chat({
-        'message': userMessage.trim(),
+        'message': question,
         'user': settings.toAiProfile(),
         'context': context,
         'instructions': 'Odpowiadaj po polsku na podstawie danych z pola "context" '
             '(regeneracja mięśni, treningi, RPE, objętość, aktywność, Health Connect, '
             'korekta kcal/wody dla Licznika Kalorii, planer tygodnia). '
+            'Jeżeli użytkownik dołączył załączniki (pole "attachments": zdjęcia '
+            'i pliki tekstowe), odnieś się do nich wprost. '
             'Jeżeli danych brakuje, powiedz wprost, jakich danych brakuje, zamiast zgadywać.',
+        if (attachments.isNotEmpty)
+          'attachments': attachments.map((item) => item.toApiJson()).toList(),
         'active_plan': activePlan == null
             ? null
             : {
@@ -6420,17 +6969,23 @@ class AppStore extends ChangeNotifier {
       // realnych danych aplikacji (regeneracja, planer, kcal, kroki).
       final now = DateTime.now();
       final local = localTrainerAnswer(
-        question: userMessage,
+        question: question,
         recovery: muscleRecoveryMap(now),
         advice: weeklyTrainingAdvice(now),
         adjustmentToday: dailyAdjustmentForDay(now),
         healthToday: healthConnectSnapshotForDay(now),
       );
       if (local != null) {
+        // Powód podajemy wprost — inaczej brak sieci wygląda identycznie jak
+        // backend bez wdrożonego endpointu.
+        final attachmentNote = attachments.isEmpty
+            ? ''
+            : '\nZałączniki (${attachments.length}) nie zostały przeczytane — '
+                'odpowiedź lokalna ich nie widzi.';
         aiChatHistory.add(AiChatMessage(
           role: 'assistant',
-          content:
-              '$local\n\n(Odpowiedź lokalna na podstawie danych aplikacji — backend AI był niedostępny.)',
+          content: '$local\n\n(Odpowiedź lokalna na podstawie danych aplikacji '
+              '— ${friendlyAiErrorMessage(e)})$attachmentNote',
           timestamp: DateTime.now(),
         ));
       } else {
@@ -6930,17 +7485,28 @@ String friendlyAiErrorMessage(Object error) {
 }
 
 class AiChatMessage {
-  const AiChatMessage(
-      {required this.role, required this.content, required this.timestamp});
+  const AiChatMessage({
+    required this.role,
+    required this.content,
+    required this.timestamp,
+    this.attachments = const <AiChatAttachment>[],
+  });
 
   final String role; // 'user' | 'assistant' | 'error'
   final String content;
   final DateTime timestamp;
 
+  /// Załączniki wysłane z wiadomością. W historii zostają SAME metadane —
+  /// ładunek (base64/treść pliku) idzie tylko do backendu.
+  final List<AiChatAttachment> attachments;
+
   Map<String, dynamic> toJson() => {
         'role': role,
         'content': content,
-        'timestamp': timestamp.toIso8601String()
+        'timestamp': timestamp.toIso8601String(),
+        if (attachments.isNotEmpty)
+          'attachments':
+              attachments.map((item) => item.toHistoryJson()).toList(),
       };
 
   factory AiChatMessage.fromJson(Map<String, dynamic> json) => AiChatMessage(
@@ -6948,6 +7514,12 @@ class AiChatMessage {
         content: json['content']?.toString() ?? '',
         timestamp: DateTime.tryParse(json['timestamp']?.toString() ?? '') ??
             DateTime.now(),
+        attachments: (json['attachments'] as List?)
+                ?.whereType<Map>()
+                .map((item) => AiChatAttachment.fromHistoryJson(
+                    Map<String, dynamic>.from(item)))
+                .toList() ??
+            const <AiChatAttachment>[],
       );
 }
 
@@ -8954,6 +9526,15 @@ class AiBackendService {
   Future<Map<String, dynamic>> chat(Map<String, dynamic> body) =>
       _post(['/chat', '/ai/chat'], body);
 
+  /// Budzi uśpioną instancję backendu (darmowy Render usypia po bezczynności).
+  /// Best-effort: błąd nic nie psuje, właściwe żądanie ma własny limit czasu.
+  Future<void> wake() async {
+    final base = _cleanBase.isEmpty ? kDefaultBackendUrl : _cleanBase;
+    try {
+      await http.get(Uri.parse('$base/')).timeout(const Duration(seconds: 90));
+    } catch (_) {}
+  }
+
   Future<Map<String, dynamic>> _post(
       List<String> paths, Map<String, dynamic> body) async {
     final base = _cleanBase.isEmpty ? kDefaultBackendUrl : _cleanBase;
@@ -8967,7 +9548,10 @@ class AiBackendService {
               headers: {'Content-Type': 'application/json'},
               body: jsonEncode(body),
             )
-            .timeout(const Duration(seconds: 35));
+            // Zimny start uśpionej instancji Rendera trwa nawet ~minutę —
+            // przy 35 s KAŻDE pierwsze pytanie kończyło się błędem/odpowiedzią
+            // lokalną, choć backend zaraz potem wstawał.
+            .timeout(const Duration(seconds: 120));
         if (response.statusCode >= 200 && response.statusCode < 300) {
           final data = jsonDecode(utf8.decode(response.bodyBytes));
           if (data is Map<String, dynamic>) return data;
@@ -10472,7 +11056,20 @@ class _HomeShellState extends State<HomeShell> {
 
     return Scaffold(
       resizeToAvoidBottomInset: true,
+      // PRAWDZIWIE pływające menu: treść sięga do samego dołu ekranu i
+      // przewija się POD paskiem, więc w szczelinach wokół zaokrąglonego
+      // menu widać zawartość strony, a nie tło Scaffolda. Wcześniej pasek
+      // dostawał własny pas u dołu i „pływanie" było tylko malowane.
+      //
+      // `extendBody` sprawia, że Scaffold podaje w `MediaQuery.padding.bottom`
+      // wysokość menu — [PageFrame] dokłada z tego dolny odstęp, żeby ostatnia
+      // karta dała się przewinąć nad pasek.
+      extendBody: navStyle != 'classic',
       body: SafeArea(
+        // Dół BEZ SafeArea: to on ma być schowany pod pływającym menu.
+        // Klasyczny styl paska nadal zajmuje własny pas, więc tam zostawiamy
+        // domyślne zachowanie.
+        bottom: navStyle == 'classic',
         child: Stack(
           children: [
             AnimatedSwitcher(
@@ -10551,7 +11148,8 @@ class TrainerHomePage extends StatelessWidget {
             ? 'Ustaw rozkład tygodnia, aby zobaczyć plan na dziś'
             : (scheduledToday.isRest
                 ? 'Dziś dzień wolny w rozkładzie'
-                : 'Wg planu: ${scheduledToday.label}'),
+                // Nazwa niesie hierarchię: Deload ▸ Regeneracja ▸ Zestaw.
+                : 'Wg planu: ${scheduledToday.labelWithLoad}'),
         icon: Icons.today_rounded,
         onTap: onToday,
         accentColor: mint,
@@ -10646,7 +11244,7 @@ class TrainerHomePage extends StatelessWidget {
                         const SizedBox(height: 6),
                         Text(
                           scheduledToday != null && !scheduledToday.isRest
-                              ? 'Dziś: ${scheduledToday.label}'
+                              ? 'Dziś: ${scheduledToday.labelWithLoad}'
                               : todayLogs.isNotEmpty
                                   ? '${todayLogs.length} ${todayLogs.length == 1 ? 'ćwiczenie' : 'ćwiczenia'} zapisane'
                                   : 'Otwórz plan lub dodaj wpis',
@@ -10936,6 +11534,13 @@ class PageFrame extends StatelessWidget {
             sliver: SliverToBoxAdapter(child: child),
           ),
         ...slivers,
+        // Zapas na pływające dolne menu: treść przewija się POD paskiem, więc
+        // bez tego ostatnia karta zostawałaby na stałe pod nim. Wysokość
+        // podaje Scaffold z `extendBody` (na podstronach bez menu jest to
+        // zwykły margines systemowy, więc odstęp nie przeszkadza).
+        SliverToBoxAdapter(
+          child: SizedBox(height: MediaQuery.of(context).padding.bottom),
+        ),
       ],
     );
   }
@@ -12418,6 +13023,9 @@ class TrainingWeekCalendarCard extends StatelessWidget {
           index < schedule.length ? schedule[index] : null;
       final bool deload = planDay?.isDeload ?? store.isDeloadDate(day);
       final bool rest = planDay?.isRest ?? false;
+      // Dzień ODHACZONY: oba tory (pierwszo- i drugorzędny) wykonane.
+      // Karteczka przygasa i dostaje ptaszka — widać, co zostało zamknięte.
+      final bool dayDone = planDay != null && store.isScheduleDayDone(planDay);
       // Dzień deloadu przejmuje kolor bursztynowy (spójnie z kalendarzem).
       final Color chipAccent = deload ? kDeloadColor : accent;
       final Color chipText = isSelected
@@ -12429,80 +13037,127 @@ class TrainingWeekCalendarCard extends StatelessWidget {
           child: InkWell(
             borderRadius: BorderRadius.circular(12),
             onTap: () => store.setSelectedDate(day),
-            child: Container(
-              padding: const EdgeInsets.symmetric(vertical: 6),
-              decoration: BoxDecoration(
-                color: isSelected
-                    ? chipAccent
-                    : (deload
-                        ? kDeloadColor.withValues(alpha: 0.16)
-                        : Colors.transparent),
-                borderRadius: BorderRadius.circular(12),
-                border: Border.all(
-                  color: isSelected
-                      ? chipAccent
-                      : (deload
-                          ? kDeloadColor.withValues(alpha: 0.6)
-                          : (isToday
-                              ? accent.withValues(alpha: 0.55)
-                              : Colors.transparent)),
-                  width: (isToday || deload) && !isSelected ? 1.4 : 1,
-                ),
-              ),
-              child: Column(
-                mainAxisSize: MainAxisSize.min,
-                children: [
-                  Text(
-                    _dayLetters[index],
-                    style: TextStyle(
-                      fontSize: 10,
-                      fontWeight: FontWeight.w800,
-                      color: chipText.withValues(alpha: 0.75),
-                    ),
-                  ),
-                  const SizedBox(height: 2),
-                  Icon(
-                    deload
-                        ? Icons.self_improvement_rounded
-                        : (rest
-                            ? Icons.bedtime_outlined
-                            : _scheduleAreaIcon(planDay?.area)),
-                    size: 15,
-                    color: isSelected ? chipText : chipAccent,
-                  ),
-                  const SizedBox(height: 2),
-                  Text(
-                    rest ? 'wolne' : _shortAreaLabel(planDay?.area),
-                    maxLines: 1,
-                    overflow: TextOverflow.clip,
-                    softWrap: false,
-                    style: TextStyle(
-                      fontSize: 8,
-                      height: 1.1,
-                      // Zrobiony trening pogrubiamy — zastępuje dawną kropkę.
-                      fontWeight: trained ? FontWeight.w900 : FontWeight.w600,
+            // Karteczka dnia jest KWADRATOWA (AspectRatio 1:1) — pasek tygodnia
+            // czyta się jak rząd kafelków, a nie jak siedem wysokich słupków.
+            child: AspectRatio(
+              aspectRatio: 1,
+              child: Opacity(
+                // Zamknięty dzień gaśnie do połowy — zrobione dni przestają
+                // krzyczeć „do zrobienia". Ptaszek leży NA przygaszonej ikonie
+                // partii (nie w rogu karteczki), więc gaśnie razem z nią;
+                // czytelność ratuje mu pełne kółko w kolorze akcentu.
+                opacity: dayDone ? 0.5 : 1,
+                child: Container(
+                  padding:
+                      const EdgeInsets.symmetric(vertical: 3, horizontal: 2),
+                  decoration: BoxDecoration(
+                    color: isSelected
+                        ? chipAccent
+                        : (deload
+                            ? kDeloadColor.withValues(alpha: 0.16)
+                            : Colors.transparent),
+                    borderRadius: BorderRadius.circular(12),
+                    border: Border.all(
                       color: isSelected
-                          ? chipText
-                          : theme.colorScheme.onSurfaceVariant,
+                          ? chipAccent
+                          : (deload
+                              ? kDeloadColor.withValues(alpha: 0.6)
+                              : (isToday
+                                  ? accent.withValues(alpha: 0.55)
+                                  : Colors.transparent)),
+                      width: (isToday || deload) && !isSelected ? 1.4 : 1,
                     ),
                   ),
-                  // Drugi zestaw dnia (tor drugorzędny) — mniejszą czcionką,
-                  // żeby było widać, że dzień ma dwie partie.
-                  if (!rest && planDay?.secondaryArea != null)
-                    Text(
-                      _secondaryChipLabel(planDay?.secondaryArea),
-                      maxLines: 1,
-                      overflow: TextOverflow.clip,
-                      softWrap: false,
-                      style: TextStyle(
-                        fontSize: 7,
-                        height: 1.1,
-                        fontWeight: FontWeight.w600,
-                        color: (isSelected ? chipText : chipAccent)
-                            .withValues(alpha: 0.85),
-                      ),
+                  // FittedBox pilnuje, żeby treść zmieściła się w kwadracie na
+                  // każdej szerokości ekranu. Wiersz drugiej partii renderuje
+                  // się ZAWSZE (pusty, gdy dzień nie ma dodatku), więc wszystkie
+                  // karteczki skalują się tak samo i litery nie skaczą.
+                  child: FittedBox(
+                    fit: BoxFit.scaleDown,
+                    child: Column(
+                      mainAxisSize: MainAxisSize.min,
+                      children: [
+                        Text(
+                          _dayLetters[index],
+                          style: TextStyle(
+                            fontSize: 10,
+                            fontWeight: FontWeight.w800,
+                            color: chipText.withValues(alpha: 0.75),
+                          ),
+                        ),
+                        const SizedBox(height: 1),
+                        SizedBox(
+                          width: 18,
+                          height: 18,
+                          child: Stack(
+                            alignment: Alignment.center,
+                            children: [
+                              Icon(
+                                deload
+                                    ? Icons.self_improvement_rounded
+                                    : (rest
+                                        ? Icons.bedtime_outlined
+                                        : _scheduleAreaIcon(planDay?.area)),
+                                size: 15,
+                                color: isSelected ? chipText : chipAccent,
+                              ),
+                              if (dayDone)
+                                Container(
+                                  key: Key('calendar_day_done_$index'),
+                                  padding: const EdgeInsets.all(1),
+                                  decoration: BoxDecoration(
+                                    color: isSelected ? chipText : chipAccent,
+                                    shape: BoxShape.circle,
+                                  ),
+                                  child: Icon(
+                                    Icons.check_rounded,
+                                    size: 12,
+                                    color: isSelected
+                                        ? chipAccent
+                                        : theme.colorScheme.surface,
+                                  ),
+                                ),
+                            ],
+                          ),
+                        ),
+                        const SizedBox(height: 1),
+                        Text(
+                          rest ? 'wolne' : _shortAreaLabel(planDay?.area),
+                          maxLines: 1,
+                          overflow: TextOverflow.clip,
+                          softWrap: false,
+                          style: TextStyle(
+                            fontSize: 8,
+                            height: 1.1,
+                            // Zrobiony trening pogrubiamy — zastępuje dawną kropkę.
+                            fontWeight:
+                                trained ? FontWeight.w900 : FontWeight.w600,
+                            color: isSelected
+                                ? chipText
+                                : theme.colorScheme.onSurfaceVariant,
+                          ),
+                        ),
+                        // Drugi zestaw dnia (tor drugorzędny) — mniejszą czcionką,
+                        // żeby było widać, że dzień ma dwie partie.
+                        Text(
+                          rest
+                              ? ''
+                              : _secondaryChipLabel(planDay?.secondaryArea),
+                          maxLines: 1,
+                          overflow: TextOverflow.clip,
+                          softWrap: false,
+                          style: TextStyle(
+                            fontSize: 7,
+                            height: 1.1,
+                            fontWeight: FontWeight.w600,
+                            color: (isSelected ? chipText : chipAccent)
+                                .withValues(alpha: 0.85),
+                          ),
+                        ),
+                      ],
                     ),
-                ],
+                  ),
+                ),
               ),
             ),
           ),
@@ -13469,7 +14124,13 @@ class _PreviewLegend extends StatelessWidget {
               '≈X% ciężaru roboczego',
               '100% to pełny ciężar, jaki Trainer dobiera z Twojej historii w tym '
                   'ćwiczeniu. Mniej = świadome zejście (deload albo końcówka bloku), '
-                  'więcej = podkręcenie. Kilogramów nie podajemy, bo zależą od Twoich wyników.'),
+                  'więcej = podkręcenie.'),
+          entry(
+              Icons.fitness_center_rounded,
+              'Kilogramy przy serii',
+              'To ciężar z recepty na tę sesję — dokładnie ten, który zobaczysz po '
+                  'starcie. Przy braku historii pojawia się dopiero, gdy zapiszesz '
+                  'pierwsze serie.'),
         ],
       ),
     );
@@ -13528,7 +14189,14 @@ class _PreviewExerciseRowState extends State<_PreviewExerciseRow> {
                           style: theme.textTheme.bodyMedium
                               ?.copyWith(fontWeight: FontWeight.w800)),
                       const SizedBox(height: 2),
-                      Text(planItemMetaText(widget.item, widget.exercise),
+                      Text(
+                          planItemMetaText(
+                            widget.item,
+                            widget.exercise,
+                            coachWeightKg: AppScope.of(context)
+                                .plannedWeightForPlanItem(
+                                    widget.item, widget.exercise),
+                          ),
                           maxLines: 1,
                           overflow: TextOverflow.ellipsis,
                           style: theme.textTheme.bodySmall
@@ -13971,6 +14639,9 @@ class TrainingRotationPage extends StatelessWidget {
     final scheme = theme.colorScheme;
     final config = store.trainingScheduleConfig;
     final weekPlan = config.weekPlan;
+    final strategy = config.strategy;
+    final primaryAreas = primaryAreasFor(strategy);
+    final secondaryAreas = secondaryAreasFor(strategy);
 
     Future<void> savePrimary(int weekday, TrainingFocusArea? area) {
       final current = weekPlan[weekday] ?? TrainingDayPlan.rest;
@@ -14001,9 +14672,9 @@ class TrainingRotationPage extends StatelessWidget {
       // Dropdown wymaga, żeby bieżąca wartość występowała na jego liście.
       // Starsze plany mogły mieć obszary zapisane w przeciwnej kolumnie.
       final selectedPrimary =
-          kPrimaryFocusAreas.contains(plan.primary) ? plan.primary : null;
+          primaryAreas.contains(plan.primary) ? plan.primary : null;
       final selectedSecondary =
-          kSecondaryFocusAreas.contains(plan.secondary) ? plan.secondary : null;
+          secondaryAreas.contains(plan.secondary) ? plan.secondary : null;
       return Padding(
         padding: const EdgeInsets.only(bottom: 10),
         child: Column(
@@ -14034,7 +14705,7 @@ class TrainingRotationPage extends StatelessWidget {
                         child: Text('Dzień wolny',
                             overflow: TextOverflow.ellipsis),
                       ),
-                      for (final area in kPrimaryFocusAreas)
+                      for (final area in primaryAreas)
                         DropdownMenuItem<TrainingFocusArea?>(
                             value: area,
                             child: Text(area.label,
@@ -14062,7 +14733,7 @@ class TrainingRotationPage extends StatelessWidget {
                         child: Text('Bez dodatku',
                             overflow: TextOverflow.ellipsis),
                       ),
-                      for (final area in kSecondaryFocusAreas)
+                      for (final area in secondaryAreas)
                         DropdownMenuItem<TrainingFocusArea?>(
                             value: area,
                             child: Text(area.label,
@@ -14081,7 +14752,7 @@ class TrainingRotationPage extends StatelessWidget {
 
     // Ile razy w tygodniu wypada każda duża partia — cel to dwa razy.
     final coverage = <TrainingFocusArea, int>{
-      for (final area in kPrimaryFocusAreas) area: config.occurrencesOf(area),
+      for (final area in primaryAreas) area: config.occurrencesOf(area),
     };
     final trainingDays = config.activeWeekdays.length;
 
@@ -14099,6 +14770,66 @@ class TrainingRotationPage extends StatelessWidget {
                 'prawej dodatek dnia (barki, ramiona, przedramiona, bieg). '
                 'Rozkład jest ten sam co tydzień — także za miesiąc i po '
                 'deloadzie; regeneracja może go doraźnie przestawić.'),
+          ),
+        ),
+        const SizedBox(height: 12),
+        // Strategia podziału tygodnia. Zmiana przebudowuje tydzień według jej
+        // cyklu — historia treningów i postęp programów zostają nietknięte.
+        Card(
+          child: Padding(
+            padding: const EdgeInsets.fromLTRB(14, 12, 14, 12),
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.stretch,
+              children: [
+                Text('Strategia tygodnia',
+                    style: theme.textTheme.titleSmall
+                        ?.copyWith(fontWeight: FontWeight.w900)),
+                const SizedBox(height: 8),
+                SegmentedButton<TrainingSplitStrategy>(
+                  key: const Key('split_strategy_picker'),
+                  showSelectedIcon: false,
+                  style: SegmentedButton.styleFrom(
+                    visualDensity: VisualDensity.compact,
+                    padding:
+                        const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
+                  ),
+                  segments: const [
+                    ButtonSegment(
+                        value: TrainingSplitStrategy.twoTrack,
+                        label: Text('Dwutorowy')),
+                    ButtonSegment(
+                        value: TrainingSplitStrategy.pushPullLegs,
+                        label: Text('Push / Pull / Legs')),
+                  ],
+                  selected: {strategy},
+                  onSelectionChanged: (selection) =>
+                      store.setSplitStrategy(selection.first),
+                ),
+                const SizedBox(height: 8),
+                Text(
+                  strategy.isPushPullLegs
+                      ? 'Dzień to CAŁY wzorzec ruchu: pchanie (klatka, przedni '
+                          'bark, triceps), ciągnięcie (plecy, tylny bark, biceps, '
+                          'przedramiona) albo nogi — plus dodatek. O kolejności '
+                          'bloków w tygodniu decyduje regeneracja: blok, który '
+                          'jeszcze odpoczywa, zamienia się miejscami z gotowym, '
+                          'a gdy nie ma z czym zamienić — zestaw wykonuje się '
+                          'w lżejszej wersji.'
+                      : 'Dzień to duża partia (klatka, plecy, nogi, brzuch) plus '
+                          'dodatek. Każda partia mieści się w tygodniu dwa razy '
+                          'bez dokładania dni treningowych.',
+                  style: theme.textTheme.bodySmall
+                      ?.copyWith(color: scheme.onSurfaceVariant),
+                ),
+                const SizedBox(height: 6),
+                Text(
+                  'Hierarchia obciążenia jest stała: Deload ▸ Regeneracja ▸ '
+                  'Zestaw ćwiczeń. Nazwa dnia pokazuje, który poziom obowiązuje.',
+                  style: theme.textTheme.labelSmall
+                      ?.copyWith(color: scheme.onSurfaceVariant),
+                ),
+              ],
+            ),
           ),
         ),
         const SizedBox(height: 12),
@@ -14443,6 +15174,12 @@ String? programIdForArea(TrainingFocusArea? area) {
   switch (area) {
     case TrainingFocusArea.chestTriceps:
       return 'program_chest';
+    // Push / Pull to całe wzorce ruchu — prowadzimy je programem partii, która
+    // niesie dzień: pchanie klatką, ciągnięcie plecami.
+    case TrainingFocusArea.push:
+      return 'program_chest';
+    case TrainingFocusArea.pull:
+      return 'program_back';
     case TrainingFocusArea.backBiceps:
       return 'program_back';
     case TrainingFocusArea.legs:
@@ -14567,8 +15304,10 @@ class _ContinueProgramTile extends StatelessWidget {
 IconData _scheduleAreaIcon(TrainingFocusArea? area) {
   switch (area) {
     case TrainingFocusArea.chestTriceps:
+    case TrainingFocusArea.push:
       return Icons.fitness_center_rounded;
     case TrainingFocusArea.backBiceps:
+    case TrainingFocusArea.pull:
       return Icons.rowing_rounded;
     case TrainingFocusArea.legs:
       return Icons.directions_walk_rounded;
@@ -14593,6 +15332,10 @@ String _shortAreaLabel(TrainingFocusArea? area) {
   switch (area) {
     case TrainingFocusArea.chestTriceps:
       return 'klatka';
+    case TrainingFocusArea.push:
+      return 'push';
+    case TrainingFocusArea.pull:
+      return 'pull';
     case TrainingFocusArea.backBiceps:
       return 'plecy';
     case TrainingFocusArea.legs:
@@ -21058,12 +21801,12 @@ class _TrainingPlannerHeroCardState extends State<TrainingPlannerHeroCard> {
           children: [
             Row(
               children: [
-                Icon(Icons.lock_outline_rounded,
+                Icon(Icons.done_all_rounded,
                     size: 20, color: scheme.onSurfaceVariant),
                 const SizedBox(width: 8),
                 Expanded(
                   child: Text(
-                    'DZISIEJSZY TRENING — ZAMKNIĘTY',
+                    'DZISIEJSZY TRENING — WYKONANY',
                     maxLines: 1,
                     overflow: TextOverflow.ellipsis,
                     style: theme.textTheme.labelMedium?.copyWith(
@@ -21088,7 +21831,7 @@ class _TrainingPlannerHeroCardState extends State<TrainingPlannerHeroCard> {
             Text(
               'Razem $exercises ${TodayTrainingBlock._plural(exercises, 'ćwiczenie', 'ćwiczenia', 'ćwiczeń')}'
               ' · $sets ${TodayTrainingBlock._plural(sets, 'seria', 'serie', 'serii')}'
-              ' — kolejny trening wg rozkładu.',
+              ' — plan dnia zrobiony. Możesz dorzucić kolejny zestaw, jeśli masz siłę.',
               style: theme.textTheme.bodySmall?.copyWith(
                   color: scheme.onSurfaceVariant, fontWeight: FontWeight.w600),
             ),
@@ -21106,10 +21849,13 @@ class _TrainingPlannerHeroCardState extends State<TrainingPlannerHeroCard> {
                 ),
                 const SizedBox(width: 10),
                 Expanded(
-                  child: OutlinedButton.icon(
+                  // Wyjście awaryjne: plan dnia jest zrobiony, ale nic nie
+                  // zabrania dołożyć kolejnej partii.
+                  child: FilledButton.tonalIcon(
+                    key: const Key('today_add_extra_set'),
                     onPressed: () => openWorkoutProgramCatalog(context),
-                    icon: const Icon(Icons.grid_view_rounded, size: 18),
-                    label: const Text('Programy'),
+                    icon: const Icon(Icons.add_rounded, size: 18),
+                    label: const Text('Dorzuć zestaw'),
                   ),
                 ),
               ],
@@ -25004,6 +25750,8 @@ class _ActiveExercisePlayerPageState extends State<ActiveExercisePlayerPage> {
   /// dla ćwiczeń czasowych; przy ćwiczeniach na powtórzenia po odliczaniu
   /// użytkownik ląduje na gotowym panelu „Zapisz serię".
   void _handleRestEnded(AppStore store, ActiveWorkoutSession session) {
+    // Naturalny koniec przerwy — pewny punkt pomiaru realnego odpoczynku.
+    unawaited(store.markRestEnded());
     final active = session.currentExercise;
     if (active == null) return;
     final ex = ExerciseRepo.byId(active.exerciseId, store.customExercises);
@@ -28689,6 +29437,49 @@ class _ProgressionSummaryRow extends StatelessWidget {
         Text(suggestion.reason,
             style: theme.textTheme.bodySmall
                 ?.copyWith(color: scheme.onSurfaceVariant, height: 1.35)),
+        // OSTROŻNY krok na następny raz: ile z pełnego przyrostu naprawdę
+        // dokładamy i co go stłumiło (krótszy odpoczynek, szybsze serie,
+        // ręczne dołożenie ciężaru). To odpowiedź na „nie bombić od razu
+        // dużym dodatkiem, bo jedno ćwiczenie poszło lepiej".
+        Builder(builder: (context) {
+          final step = store.cautiousProgressionForExercise(exerciseId);
+          if (step == null || step.reasons.isEmpty) {
+            return const SizedBox.shrink();
+          }
+          return Padding(
+            padding: const EdgeInsets.only(top: 6),
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Row(
+                  children: [
+                    Icon(
+                      step.isDampened
+                          ? Icons.speed_rounded
+                          : Icons.check_circle_outline_rounded,
+                      size: 14,
+                      color: scheme.primary,
+                    ),
+                    const SizedBox(width: 6),
+                    Expanded(
+                      child: Text(step.headline,
+                          style: theme.textTheme.labelMedium?.copyWith(
+                              fontWeight: FontWeight.w800,
+                              color: scheme.primary)),
+                    ),
+                  ],
+                ),
+                for (final reason in step.reasons.take(3))
+                  Padding(
+                    padding: const EdgeInsets.only(left: 20, top: 1),
+                    child: Text('• $reason',
+                        style: theme.textTheme.labelSmall?.copyWith(
+                            color: scheme.onSurfaceVariant, height: 1.3)),
+                  ),
+              ],
+            ),
+          );
+        }),
       ],
     );
   }
@@ -29752,23 +30543,39 @@ class PlanDayEstimate {
 }
 
 /// Liczy szacunkowy czas i kalorie dnia na podstawie pozycji planu.
+/// Szacunek czasu i kalorii dnia planu.
+///
+/// [pace] to REALNE tempo użytkownika (krótsze przerwy, szybsze serie),
+/// a [intensityFactor] — korekta intensywności zestawu. Bez nich szacunek
+/// opisywał plan, a nie trening: podkręcenie intensywności nie zmieniało
+/// ani minut, ani kalorii.
 PlanDayEstimate estimatePlanDay(
   WorkoutDay day,
   List<Exercise> customExercises,
-  double bodyWeightKg,
-) {
+  double bodyWeightKg, {
+  SessionPace pace = SessionPace.neutral,
+  double intensityFactor = 1.0,
+}) {
   var totalMinutes = 0.0;
   var totalKcal = 0.0;
+  final intensity = intensityFactor.clamp(0.5, 1.8).toDouble();
+  final densityBoost = pace.hasRestData && pace.restRatio < 1
+      ? (1 + (1 - pace.restRatio).clamp(0.0, 0.5) * 0.3)
+      : 1.0;
   for (final item in day.items) {
     final exercise = item.exerciseFrom(customExercises);
-    final workSeconds = item.durationSec > 0
-        ? item.sets * item.durationSec
-        : item.sets * item.reps * 3;
-    final restSeconds = item.sets * item.restSeconds;
-    final minutes = math.max(1.0, (workSeconds + restSeconds) / 60);
+    final seconds = estimateExerciseSeconds(
+      sets: item.sets,
+      reps: item.reps,
+      durationSec: item.durationSec,
+      restSeconds: item.restSeconds,
+      pace: pace,
+      intensityFactor: intensity,
+    );
+    final minutes = math.max(1.0, seconds / 60);
     totalMinutes += minutes;
     totalKcal += estimateCalories(
-      met: exercise.met,
+      met: exercise.met * (1 + (intensity - 1) * 0.5) * densityBoost,
       weightKg: bodyWeightKg,
       minutes: minutes,
     );
@@ -30693,7 +31500,13 @@ class _ProgramTodayCard extends StatelessWidget {
     final day = plan.days[index];
     final isRest = plan.isRestDay(day);
     final estimate = estimatePlanDay(
-        day, store.customExercises, store.settings.bodyWeightKg);
+      day,
+      store.customExercises,
+      store.settings.bodyWeightKg,
+      // Czas i kalorie liczone TWOIM tempem i przy TWOJEJ intensywności.
+      pace: store.recentTrainingPace(),
+      intensityFactor: store.dayIntensityFactor(plan, day),
+    );
 
     return Card(
       color: theme.colorScheme.primaryContainer.withValues(alpha: 0.5),
@@ -30834,7 +31647,13 @@ class _ProgramDayCard extends StatelessWidget {
         status == WorkoutDayStatus.rest || (isCompleted && plan.isRestDay(day));
     final isActive = status == WorkoutDayStatus.active;
     final estimate = estimatePlanDay(
-        day, store.customExercises, store.settings.bodyWeightKg);
+      day,
+      store.customExercises,
+      store.settings.bodyWeightKg,
+      // Czas i kalorie liczone TWOIM tempem i przy TWOJEJ intensywności.
+      pace: store.recentTrainingPace(),
+      intensityFactor: store.dayIntensityFactor(plan, day),
+    );
 
     final Color borderColor = isActive
         ? scheme.primary
@@ -31183,14 +32002,39 @@ IconData planItemTypeIcon(PlanItem item, Exercise exercise) {
   return Icons.repeat_rounded;
 }
 
+/// Opis ciężaru zależny od typu wpisu: ciężar roboczy, dodatkowy albo
+/// wspomaganie. Bez tego „20 kg" przy podciąganiu znaczyłoby co innego niż
+/// przy wyciskaniu.
+String planWeightLabel(double weightKg, ExerciseEntryType entryType) {
+  final value = '${_formatPlanWeight(weightKg)} kg';
+  switch (entryType) {
+    case ExerciseEntryType.bodyweightReps:
+      return '+$value';
+    case ExerciseEntryType.assistedBodyweight:
+      return 'wspomaganie $value';
+    default:
+      return value;
+  }
+}
+
 /// Krótki opis parametrów pozycji planu (czas albo serie × powtórzenia [+ ciężar]).
-String planItemMetaText(PlanItem item, Exercise exercise) {
+///
+/// [coachWeightKg] to ciężar z recepty sesji ([AppStore.plannedWeightForPlanItem]) —
+/// podany, wygrywa z ciężarem zapisanym w planie, bo to on pojawi się na
+/// ekranie ćwiczenia po starcie.
+String planItemMetaText(
+  PlanItem item,
+  Exercise exercise, {
+  double coachWeightKg = 0,
+}) {
   if (item.durationSec > 0) return '${item.sets} × ${item.durationSec}s';
   if (item.reps == 0 && exercise.defaultDurationSec > 0) {
     return '${item.sets} × ${exercise.defaultDurationSec}s';
   }
-  final weight = item.suggestedWeightKg > 0
-      ? ' · ${_formatPlanWeight(item.suggestedWeightKg)} kg'
+  final weightKg =
+      coachWeightKg > 0 ? coachWeightKg : item.suggestedWeightKg;
+  final weight = weightKg > 0
+      ? ' · ${planWeightLabel(weightKg, exercise.entryType)}'
       : '';
   return '${item.sets} × ${item.reps} powt.$weight';
 }
@@ -31405,7 +32249,13 @@ class _WorkoutDayDetailsPageState extends State<WorkoutDayDetailsPage> {
         (plan.isRestDay(day) && status != WorkoutDayStatus.completed);
     final isLocked = status == WorkoutDayStatus.locked;
     final estimate = estimatePlanDay(
-        day, store.customExercises, store.settings.bodyWeightKg);
+      day,
+      store.customExercises,
+      store.settings.bodyWeightKg,
+      // Czas i kalorie liczone TWOIM tempem i przy TWOJEJ intensywności.
+      pace: store.recentTrainingPace(),
+      intensityFactor: store.dayIntensityFactor(plan, day),
+    );
 
     final equipment = <EquipmentType>{};
     final muscles = <MuscleGroup>{};
@@ -31594,6 +32444,12 @@ class _WorkoutDayDetailsPageState extends State<WorkoutDayDetailsPage> {
                     _IntensityStepControl(
                         plan: plan, dayIndex: widget.dayIndex),
                     const SizedBox(height: 10),
+                    // Kafelek z odnośnikiem: co Trainer zmienił w sugestii
+                    // progresji dla ćwiczeń TEGO zestawu i co zmianę stłumiło.
+                    SetProgressionSuggestionTile(items: rawDay.items),
+                    // Limity objętości partii — czy zestaw mieści się w granicach.
+                    VolumeLimitsTile(items: rawDay.items),
+                    const SizedBox(height: 6),
                     Align(
                       alignment: Alignment.centerLeft,
                       child: SegmentedButton<bool>(
@@ -32101,7 +32957,15 @@ class _DayExerciseTile extends StatelessWidget {
   Widget build(BuildContext context) {
     final theme = Theme.of(context);
     final scheme = theme.colorScheme;
-    final meta = planItemMetaText(item, exercise);
+    // Ciężar z recepty sesji — ten sam, który zobaczysz po starcie zestawu.
+    final meta = planItemMetaText(
+      item,
+      exercise,
+      coachWeightKg: AppScope.of(context).plannedWeightForPlanItem(
+        item,
+        exercise,
+      ),
+    );
     final typeIcon = planItemTypeIcon(item, exercise);
     // Rozciąganie / mobilność — wyróżnienie kolorem akcentu motywu (punkt 9).
     final mobility = isMobilityOrStretchExercise(exercise);
@@ -33628,69 +34492,44 @@ class ProgressPage extends StatelessWidget {
         )
         .toList();
     final workoutCountLabels = ['T-3', 'T-2', 'T-1', 'Teraz'];
+    final topics = trainerProgressTopics(
+      store: store,
+      weekLogs: weekLogs,
+      monthLogs: monthLogs,
+      weekTotals: weekTotals,
+      weekWorkoutCount: weekWorkoutCount,
+      monthWorkoutCount: monthWorkoutCount,
+      weekVolumeValues: weekVolumeValues,
+      weekVolumeLabels: weekVolumeLabels,
+      workoutCountValues: workoutCountValues,
+      workoutCountLabels: workoutCountLabels,
+    );
     // Czat AI Trainer jako pływający dymek w prawym dolnym rogu zakładki.
     return Stack(
       children: [
         PageFrame(
           title: 'Progres',
           subtitle: 'Wykresy, statystyki, historia i dane treningowe',
-          // Wykresy i analizy jako leniwa lista sliverów — budowane przy przewijaniu.
+          // Każda wartość ma własny kafelek i własną stronę — zamiast jednej
+          // długiej listy wykresów, przez którą trzeba było przewijać do
+          // szukanej danej. Karty budują się dopiero po wejściu w temat.
           slivers: [
             SliverPadding(
               padding: const EdgeInsets.fromLTRB(16, 0, 16, 24),
-              sliver: SliverList(
-                delegate: SliverChildListDelegate.fixed([
-                  const MesocycleHistoryCard(),
-                  const SizedBox(height: 12),
-                  SimpleProgressBarChartCard(
-                    title: 'Objętość tygodniowa',
-                    subtitle:
-                        'Suma ciężar × powtórzenia z każdego dnia bieżącego tygodnia',
-                    values: weekVolumeValues,
-                    labels: weekVolumeLabels,
-                    suffix: 'kg',
-                    icon: Icons.monitor_weight_outlined,
-                  ),
-                  const SizedBox(height: 12),
-                  SimpleProgressBarChartCard(
-                    title: 'Liczba treningów',
-                    subtitle:
-                        'Unikalne sesje treningowe w ostatnich czterech tygodniach',
-                    values: workoutCountValues,
-                    labels: workoutCountLabels,
-                    suffix: 'tr.',
-                    icon: Icons.event_available_outlined,
-                  ),
-                  const SizedBox(height: 12),
-                  BasicMuscleFrequencyCard(
-                      logs: monthLogs, customExercises: store.customExercises),
-                  const SizedBox(height: 12),
-                  PersonalRecordsCard(
-                      logs: store.logs, customExercises: store.customExercises),
-                  const SizedBox(height: 12),
-                  ProgressByExerciseCard(
-                      logs: store.logs, customExercises: store.customExercises),
-                  const SizedBox(height: 12),
-                  WeeklyBalanceCard(
-                      logs: weekLogs, customExercises: store.customExercises),
-                  const SizedBox(height: 12),
-                  MuscleMapCard(
-                      logs: weekLogs, customExercises: store.customExercises),
-                  const SizedBox(height: 12),
-                  SetsByMuscleChartCard(
-                      logs: weekLogs, customExercises: store.customExercises),
-                  const SizedBox(height: 12),
-                  RpeChartCard(logs: weekLogs),
-                  const SizedBox(height: 12),
-                  StreakChartCard(logs: store.logs),
-                  const SizedBox(height: 12),
-                  VolumeWarningsCard(logs: weekLogs),
-                  const SizedBox(height: 12),
-                  StagnationDetectorCard(logs: store.logs),
-                  const SizedBox(height: 12),
-                  MonthlySummaryCard(
-                      logs: monthLogs, customExercises: store.customExercises),
-                ]),
+              sliver: SliverGrid(
+                gridDelegate:
+                    const SliverGridDelegateWithFixedCrossAxisCount(
+                  crossAxisCount: 2,
+                  mainAxisSpacing: 10,
+                  crossAxisSpacing: 10,
+                  // Nieco wyższe niż szerokie — mieszczą tytuł w dwóch
+                  // wierszach, liczbę i podpis nawet na wąskich ekranach.
+                  childAspectRatio: 0.92,
+                ),
+                delegate: SliverChildBuilderDelegate(
+                  (context, i) => ProgressTopicGridTile(topic: topics[i]),
+                  childCount: topics.length,
+                ),
               ),
             ),
           ],
@@ -33736,12 +34575,33 @@ class ProgressPage extends StatelessWidget {
                 weekSets: completedWorkoutSetCount(weekLogs),
                 monthSets: completedWorkoutSetCount(monthLogs),
               ),
+              const SizedBox(height: 18),
+              Padding(
+                padding: const EdgeInsets.only(left: 4, bottom: 2),
+                child: Text(
+                  'Twoje dane',
+                  style: Theme.of(context)
+                      .textTheme
+                      .titleMedium
+                      ?.copyWith(fontWeight: FontWeight.w900),
+                ),
+              ),
+              Padding(
+                padding: const EdgeInsets.only(left: 4),
+                child: Text(
+                  'Dotknij kafelka, żeby zobaczyć wykres, statystyki i wskazówki',
+                  style: Theme.of(context).textTheme.bodySmall?.copyWith(
+                      color: Theme.of(context).colorScheme.onSurfaceVariant),
+                ),
+              ),
             ],
           ),
         ),
         Positioned(
           right: 16,
-          bottom: 16,
+          // Dymek czatu musi zostać NAD pływającym menu — bez tego wpadłby
+          // pod pasek, bo treść zakładki sięga teraz do dołu ekranu.
+          bottom: 16 + MediaQuery.of(context).padding.bottom,
           child: FloatingActionButton(
             heroTag: 'ai_trainer_bubble',
             tooltip: 'AI Trainer — czat',
@@ -33750,6 +34610,498 @@ class ProgressPage extends StatelessWidget {
             child: const Icon(Icons.smart_toy_rounded),
           ),
         ),
+      ],
+    );
+  }
+}
+
+// =============================================================================
+// POSTĘP — JEDNA WARTOŚĆ = JEDEN KAFELEK = JEDNA STRONA
+// -----------------------------------------------------------------------------
+// Układ przeniesiony z Licznika Kalorii (zakładka „Postęp"): zamiast jednej
+// długiej listy kilkunastu wykresów, przez którą trzeba było przewijać do
+// szukanej danej, zakładka jest siatką kafelków. Kafelek pokazuje skrót
+// (liczba + podpis), a dotknięcie otwiera pełną stronę tematu z kartą,
+// wyjaśnieniem „co to jest" i wskazówkami.
+//
+// Zysk poza wyglądem: ciężkie karty (mapa mięśni, rekordy, stagnacja) budują
+// się dopiero po wejściu w temat, a nie przy każdym otwarciu zakładki.
+// =============================================================================
+
+/// Temat danych na zakładce „Postęp".
+class TrainerProgressTopic {
+  final String id;
+  final String title;
+  final IconData icon;
+
+  /// Skrót na kafelku (np. „12.7k kg"). Pusty = kafelek bez liczby.
+  final String headline;
+
+  /// Podpis pod liczbą — co ta wartość znaczy.
+  final String hint;
+
+  /// Karta z pełnym wykresem/tabelą. Budowana dopiero po wejściu w temat.
+  final WidgetBuilder card;
+
+  /// Wyjaśnienie, czym jest ta dana.
+  final String whatItIs;
+
+  /// Co z nią zrobić.
+  final List<String> tips;
+
+  const TrainerProgressTopic({
+    required this.id,
+    required this.title,
+    required this.icon,
+    required this.hint,
+    required this.card,
+    required this.whatItIs,
+    this.headline = '',
+    this.tips = const <String>[],
+  });
+}
+
+/// Średnie RPE z serii tygodnia. 0 = brak ocenionych serii.
+double _averageRpe(List<WorkoutLog> logs) {
+  var sum = 0;
+  var count = 0;
+  for (final log in logs) {
+    for (final set in log.workoutSets) {
+      if (set.rpe > 0) {
+        sum += set.rpe;
+        count++;
+      }
+    }
+    // Wpisy bez rozpisanych serii niosą RPE na poziomie całego wpisu.
+    if (log.workoutSets.isEmpty && log.rpe > 0) {
+      sum += log.rpe;
+      count++;
+    }
+  }
+  return count == 0 ? 0 : sum / count;
+}
+
+/// Buduje listę tematów zakładki „Postęp" w kolejności kafelków.
+List<TrainerProgressTopic> trainerProgressTopics({
+  required AppStore store,
+  required List<WorkoutLog> weekLogs,
+  required List<WorkoutLog> monthLogs,
+  required DayTotals weekTotals,
+  required int weekWorkoutCount,
+  required int monthWorkoutCount,
+  required List<double> weekVolumeValues,
+  required List<String> weekVolumeLabels,
+  required List<double> workoutCountValues,
+  required List<String> workoutCountLabels,
+}) {
+  final weekSets = completedWorkoutSetCount(weekLogs);
+  final weekRpe = _averageRpe(weekLogs);
+  final trackedExercises =
+      store.logs.map((log) => log.exerciseId).toSet().length;
+  final monthMuscles = muscleCounts(monthLogs, store.customExercises).length;
+
+  return <TrainerProgressTopic>[
+    TrainerProgressTopic(
+      id: 'volume',
+      title: 'Objętość tygodniowa',
+      icon: Icons.monitor_weight_outlined,
+      headline: formatProgressVolume(weekTotals.volume),
+      hint: 'ciężar × powtórzenia w tym tygodniu',
+      card: (_) => SimpleProgressBarChartCard(
+        title: 'Objętość tygodniowa',
+        subtitle:
+            'Suma ciężar × powtórzenia z każdego dnia bieżącego tygodnia',
+        values: weekVolumeValues,
+        labels: weekVolumeLabels,
+        suffix: 'kg',
+        icon: Icons.monitor_weight_outlined,
+      ),
+      whatItIs:
+          'Objętość to suma ciężar × powtórzenia ze wszystkich serii dnia. '
+          'To najuczciwsza miara tego, ile realnie pracy wykonały mięśnie — '
+          'więcej mówi niż sam ciężar na sztandze czy liczba serii.',
+      tips: const [
+        'Rosnąca objętość tydzień do tygodnia to główny motor przyrostów.',
+        'Skok o więcej niż 20% w tydzień częściej kończy się przetrenowaniem niż postępem.',
+        'W tygodniu deloadu objętość MA spaść — to nie jest regres.',
+      ],
+    ),
+    TrainerProgressTopic(
+      id: 'workouts',
+      title: 'Liczba treningów',
+      icon: Icons.event_available_outlined,
+      headline: '$weekWorkoutCount',
+      hint: 'sesji w tym tygodniu',
+      card: (_) => SimpleProgressBarChartCard(
+        title: 'Liczba treningów',
+        subtitle:
+            'Unikalne sesje treningowe w ostatnich czterech tygodniach',
+        values: workoutCountValues,
+        labels: workoutCountLabels,
+        suffix: 'tr.',
+        icon: Icons.event_available_outlined,
+      ),
+      whatItIs:
+          'Liczba osobnych sesji treningowych. Wpisy z jednego treningu liczą '
+          'się jako jeden trening, więc liczba nie rośnie od samego dzielenia '
+          'ćwiczeń na kilka wpisów.',
+      tips: const [
+        'Regularność bije intensywność — 3 stałe treningi w tygodniu dają więcej niż 5 co drugi tydzień.',
+        'Spadek przez dwa tygodnie z rzędu to sygnał, żeby uprościć plan, a nie zaciskać zęby.',
+      ],
+    ),
+    TrainerProgressTopic(
+      id: 'sets_by_muscle',
+      title: 'Serie wg partii',
+      icon: Icons.stacked_bar_chart_rounded,
+      headline: '$weekSets',
+      hint: 'ukończonych serii w tygodniu',
+      card: (_) => SetsByMuscleChartCard(
+          logs: weekLogs, customExercises: store.customExercises),
+      whatItIs:
+          'Rozkład ukończonych serii na partie mięśniowe w bieżącym tygodniu. '
+          'Pokazuje, na co naprawdę idzie Twój czas — a nie na co planowałeś, '
+          'żeby szedł.',
+      tips: const [
+        'Dla większości partii 10–20 serii tygodniowo to sensowny zakres.',
+        'Partia z jedną–dwiema seriami w tygodniu praktycznie nie dostaje bodźca.',
+      ],
+    ),
+    TrainerProgressTopic(
+      id: 'rpe',
+      title: 'Ciężkość treningu (RPE)',
+      icon: Icons.speed_rounded,
+      headline: weekRpe == 0 ? '—' : weekRpe.toStringAsFixed(1),
+      hint: weekRpe == 0 ? 'brak ocenionych serii' : 'średnie RPE w tygodniu',
+      card: (_) => RpeChartCard(logs: weekLogs),
+      whatItIs:
+          'RPE to ocena, jak ciężka była seria w skali 1–10 (10 = ani jednego '
+          'powtórzenia w zapasie). Trainer wylicza je z sygnałów serii, więc '
+          'nie musisz ich wpisywać ręcznie.',
+      tips: const [
+        'Większość serii budujących siłę i masę powinna lądować w okolicy RPE 7–9.',
+        'Cały tydzień na RPE 10 to prosta droga do zastoju — zostaw sobie zapas.',
+        'RPE stale poniżej 6 znaczy, że ciężary są za lekkie na postęp.',
+      ],
+    ),
+    TrainerProgressTopic(
+      id: 'muscle_frequency',
+      title: 'Częstotliwość partii',
+      icon: Icons.pie_chart_outline_rounded,
+      headline: '$monthMuscles',
+      hint: 'partii trenowanych w tym miesiącu',
+      card: (_) => BasicMuscleFrequencyCard(
+          logs: monthLogs, customExercises: store.customExercises),
+      whatItIs:
+          'Które partie w tym miesiącu dostały najwięcej pracy, a które '
+          'najmniej. Najrzadsze partie to zwykle te, które najbardziej '
+          'ograniczają postęp w ćwiczeniach złożonych.',
+      tips: const [
+        'Partia trenowana rzadziej niż raz w tygodniu zostaje w tyle.',
+        'Zanim dołożysz nowe ćwiczenie, sprawdź, czy nie brakuje któregoś z dołu listy.',
+      ],
+    ),
+    TrainerProgressTopic(
+      id: 'muscle_map',
+      title: 'Mapa mięśni',
+      icon: Icons.accessibility_new_rounded,
+      hint: 'Co przepracowałeś w tym tygodniu',
+      card: (_) => MuscleMapCard(
+          logs: weekLogs, customExercises: store.customExercises),
+      whatItIs:
+          'Sylwetka z zaznaczonym obciążeniem partii w bieżącym tygodniu. '
+          'Jasne miejsca to partie pominięte.',
+      tips: const [
+        'Szukaj symetrii przód–tył: sam przód klatki bez pleców psuje postawę.',
+        'Białe plamy tydzień po tygodniu to gotowa lista do poprawienia w planerze.',
+      ],
+    ),
+    TrainerProgressTopic(
+      id: 'balance',
+      title: 'Balans tygodnia',
+      icon: Icons.balance_rounded,
+      hint: 'Czy plan nie przechyla się w jedną stronę',
+      card: (_) => WeeklyBalanceCard(
+          logs: weekLogs, customExercises: store.customExercises),
+      whatItIs:
+          'Porównanie pracy góra–dół i przód–tył w bieżącym tygodniu. '
+          'Nierównowaga jest najczęstszą cichą przyczyną kontuzji i zastoju.',
+      tips: const [
+        'Objętość pleców powinna być co najmniej równa objętości klatki.',
+        'Nogi wypadające z planu to najczęstszy przechył — i najdroższy.',
+      ],
+    ),
+    TrainerProgressTopic(
+      id: 'records',
+      title: 'Rekordy osobiste',
+      icon: Icons.emoji_events_outlined,
+      headline: '$trackedExercises',
+      hint: 'ćwiczeń z zapisanym rekordem',
+      card: (_) => PersonalRecordsCard(
+          logs: store.logs, customExercises: store.customExercises),
+      whatItIs:
+          'Najlepszy ciężar i najlepsza objętość w każdym ćwiczeniu z całej '
+          'historii. To twarde dowody postępu, odporne na gorszy tydzień.',
+      tips: const [
+        'Rekord bity co kilka tygodni to zdrowe tempo — co trening to zwykle błąd techniki.',
+        'Rekord objętości liczy się tak samo jak rekord ciężaru.',
+      ],
+    ),
+    TrainerProgressTopic(
+      id: 'by_exercise',
+      title: 'Progres w ćwiczeniach',
+      icon: Icons.show_chart_rounded,
+      headline: '$trackedExercises',
+      hint: 'śledzonych ćwiczeń',
+      card: (_) => ProgressByExerciseCard(
+          logs: store.logs, customExercises: store.customExercises),
+      whatItIs:
+          'Krzywa ciężaru i objętości dla pojedynczego ćwiczenia w czasie. '
+          'Tu widać, czy konkretny bój faktycznie idzie do przodu.',
+      tips: const [
+        'Płaska linia przez 4–6 tygodni to sygnał do zmiany zakresu powtórzeń albo wariantu ćwiczenia.',
+        'Porównuj ćwiczenia w tym samym zakresie powtórzeń — inaczej wykres kłamie.',
+      ],
+    ),
+    TrainerProgressTopic(
+      id: 'streak',
+      title: 'Seria dni',
+      icon: Icons.local_fire_department_outlined,
+      hint: 'Ciągłość treningów w czasie',
+      card: (_) => StreakChartCard(logs: store.logs),
+      whatItIs:
+          'Jak długo utrzymujesz ciągłość treningów. Seria nagradza to, co '
+          'faktycznie robi wynik — pojawianie się na treningu.',
+      tips: const [
+        'Zerwana seria nie kasuje postępu; kasuje go dopiero miesiąc przerwy.',
+        'Lepiej skrócić trening niż go opuścić — seria zostaje, forma też.',
+      ],
+    ),
+    TrainerProgressTopic(
+      id: 'volume_warnings',
+      title: 'Ostrzeżenia objętości',
+      icon: Icons.warning_amber_rounded,
+      hint: 'Gdzie przesadzasz z pracą',
+      card: (_) => VolumeWarningsCard(logs: weekLogs),
+      whatItIs:
+          'Partie, które w tym tygodniu dostały więcej pracy, niż zdążą '
+          'zregenerować — z limitów objętości ustawionych w aplikacji.',
+      tips: const [
+        'Ostrzeżenie to podpowiedź, żeby przenieść serie na inną partię, a nie żeby przestać trenować.',
+        'Limity zmienisz w „Więcej → Limity objętości".',
+      ],
+    ),
+    TrainerProgressTopic(
+      id: 'stagnation',
+      title: 'Wykrywanie stagnacji',
+      icon: Icons.trending_flat_rounded,
+      hint: 'Ćwiczenia, które stanęły w miejscu',
+      card: (_) => StagnationDetectorCard(logs: store.logs),
+      whatItIs:
+          'Ćwiczenia bez postępu ciężaru i objętości od kilku tygodni. '
+          'Wcześnie wyłapana stagnacja kosztuje jedną zmianę w planie — '
+          'późno wyłapana kosztuje miesiąc.',
+      tips: const [
+        'Najpierw sprawdź sen i jedzenie, dopiero potem zmieniaj plan.',
+        'Zmiana zakresu powtórzeń zwykle rusza sprawę szybciej niż zmiana ćwiczenia.',
+      ],
+    ),
+    TrainerProgressTopic(
+      id: 'month',
+      title: 'Podsumowanie miesiąca',
+      icon: Icons.calendar_month_rounded,
+      headline: '$monthWorkoutCount',
+      hint: 'treningów w tym miesiącu',
+      card: (_) => MonthlySummaryCard(
+          logs: monthLogs, customExercises: store.customExercises),
+      whatItIs:
+          'Zbiorczy obraz miesiąca: treningi, objętość, serie i partie. '
+          'Okno na tyle długie, że nie widać w nim szumu pojedynczych dni.',
+      tips: const [
+        'Porównuj miesiąc do miesiąca, nie tydzień do tygodnia — mniej nerwów, więcej sygnału.',
+      ],
+    ),
+    TrainerProgressTopic(
+      id: 'mesocycle',
+      title: 'Mezocykl',
+      icon: Icons.repeat_rounded,
+      hint: 'Historia cykli i deloadów',
+      card: (_) => const MesocycleHistoryCard(),
+      whatItIs:
+          'Mezocykl to blok kilku tygodni narastającej pracy zakończony '
+          'deloadem. Karta pokazuje, w którym tygodniu bloku jesteś i jak '
+          'wyglądały poprzednie.',
+      tips: const [
+        'Deload nie jest karą za słabość — to część planu, która pozwala rosnąć dalej.',
+        'Cykl bez deloadu prędzej czy później kończy się wymuszoną przerwą.',
+      ],
+    ),
+  ];
+}
+
+/// Kafelek tematu w siatce zakładki „Postęp".
+class ProgressTopicGridTile extends StatelessWidget {
+  final TrainerProgressTopic topic;
+
+  const ProgressTopicGridTile({super.key, required this.topic});
+
+  @override
+  Widget build(BuildContext context) {
+    final theme = Theme.of(context);
+    final scheme = theme.colorScheme;
+    return Card(
+      margin: EdgeInsets.zero,
+      clipBehavior: Clip.antiAlias,
+      child: InkWell(
+        key: Key('progress_topic_${topic.id}'),
+        onTap: () => openTrainerSubPage(
+          context,
+          TrainerProgressTopicPage(topic: topic),
+          title: topic.title,
+        ),
+        child: Padding(
+          padding: const EdgeInsets.all(12),
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Row(
+                children: [
+                  CircleAvatar(
+                    radius: 15,
+                    backgroundColor: scheme.primaryContainer,
+                    foregroundColor: scheme.onPrimaryContainer,
+                    child: Icon(topic.icon, size: 17),
+                  ),
+                  const Spacer(),
+                  Icon(Icons.chevron_right_rounded,
+                      size: 18, color: scheme.onSurfaceVariant),
+                ],
+              ),
+              const Spacer(),
+              Text(
+                topic.title,
+                maxLines: 2,
+                overflow: TextOverflow.ellipsis,
+                style: const TextStyle(
+                    fontWeight: FontWeight.w900, fontSize: 13, height: 1.15),
+              ),
+              if (topic.headline.isNotEmpty) ...[
+                const SizedBox(height: 2),
+                Text(
+                  topic.headline,
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
+                  style: TextStyle(
+                    fontWeight: FontWeight.w900,
+                    fontSize: 18,
+                    color: scheme.primary,
+                  ),
+                ),
+              ],
+              const SizedBox(height: 2),
+              // Flexible, żeby podpis skracał się do jednego wiersza na
+              // ciasnych ekranach zamiast rozpychać kafelek.
+              Flexible(
+                child: Text(
+                  topic.hint,
+                  maxLines: 2,
+                  overflow: TextOverflow.ellipsis,
+                  style: TextStyle(
+                    fontSize: 10.5,
+                    height: 1.2,
+                    fontWeight: FontWeight.w600,
+                    color: scheme.onSurfaceVariant,
+                  ),
+                ),
+              ),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+/// Pełna strona tematu: karta z danymi, wyjaśnienie i wskazówki.
+class TrainerProgressTopicPage extends StatelessWidget {
+  final TrainerProgressTopic topic;
+
+  const TrainerProgressTopicPage({super.key, required this.topic});
+
+  @override
+  Widget build(BuildContext context) {
+    final theme = Theme.of(context);
+    return ListView(
+      padding: const EdgeInsets.fromLTRB(16, 12, 16, 28),
+      children: [
+        topic.card(context),
+        const SizedBox(height: 12),
+        Card(
+          child: Padding(
+            padding: const EdgeInsets.all(16),
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Row(
+                  children: [
+                    Icon(Icons.info_outline_rounded,
+                        color: theme.colorScheme.primary, size: 20),
+                    const SizedBox(width: 8),
+                    Text('Co to jest',
+                        style: theme.textTheme.titleMedium
+                            ?.copyWith(fontWeight: FontWeight.w900)),
+                  ],
+                ),
+                const SizedBox(height: 8),
+                Text(topic.whatItIs,
+                    style: theme.textTheme.bodyMedium?.copyWith(height: 1.35)),
+              ],
+            ),
+          ),
+        ),
+        if (topic.tips.isNotEmpty) ...[
+          const SizedBox(height: 12),
+          Card(
+            child: Padding(
+              padding: const EdgeInsets.all(16),
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Row(
+                    children: [
+                      Icon(Icons.lightbulb_outline_rounded,
+                          color: theme.colorScheme.primary, size: 20),
+                      const SizedBox(width: 8),
+                      Text('Wskazówki',
+                          style: theme.textTheme.titleMedium
+                              ?.copyWith(fontWeight: FontWeight.w900)),
+                    ],
+                  ),
+                  const SizedBox(height: 8),
+                  for (final tip in topic.tips)
+                    Padding(
+                      padding: const EdgeInsets.only(bottom: 7),
+                      child: Row(
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        children: [
+                          Padding(
+                            padding: const EdgeInsets.only(top: 6, right: 8),
+                            child: Icon(Icons.circle,
+                                size: 5, color: theme.colorScheme.primary),
+                          ),
+                          Expanded(
+                            child: Text(tip,
+                                style: theme.textTheme.bodyMedium
+                                    ?.copyWith(height: 1.35)),
+                          ),
+                        ],
+                      ),
+                    ),
+                ],
+              ),
+            ),
+          ),
+        ],
       ],
     );
   }
@@ -40342,6 +41694,15 @@ class MorePage extends StatelessWidget {
                     title: 'Rozkład tygodnia'),
               ),
               FeatureActionTile(
+                icon: Icons.rule_rounded,
+                title: 'Limity objętości zestawu',
+                subtitle:
+                    'Ile najmniej i najwięcej ćwiczeń, serii i powtórzeń na partię',
+                onTap: () => openTrainerSubPage(
+                    context, const VolumeLimitsSettingsPage(),
+                    title: 'Limity objętości'),
+              ),
+              FeatureActionTile(
                 icon: Icons.event_repeat_rounded,
                 title: 'Cykliczny deload',
                 subtitle: 'Tygodnie odciążenia: rytm, długość i data startu',
@@ -40808,8 +42169,8 @@ class _ProfileSummaryCard extends StatelessWidget {
     final level = normalizeTrainingLevel(settings.level);
     final workLabel =
         kWorkIntensityLabels[settings.workIntensity] ?? 'Brak / dzień wolny';
-    final hasWork = settings.workIntensity != 'none' &&
-        settings.workHoursPerDay > 0;
+    final hasWork =
+        settings.workIntensity != 'none' && settings.workHoursPerDay > 0;
     final days = settings.trainingWeekdays.length;
 
     final modePriority = mode == 'Redukcja'
@@ -41856,8 +43217,8 @@ class _SettingsCardState extends State<SettingsCard> {
       child: Container(
         margin: const EdgeInsets.only(bottom: 10),
         decoration: BoxDecoration(
-          color: theme.colorScheme.surfaceContainerHighest
-              .withValues(alpha: 0.35),
+          color:
+              theme.colorScheme.surfaceContainerHighest.withValues(alpha: 0.35),
           borderRadius: BorderRadius.circular(16),
           border: Border.all(
             color: theme.colorScheme.outlineVariant.withValues(alpha: 0.4),
@@ -41900,49 +43261,51 @@ class _SettingsCardState extends State<SettingsCard> {
               'Waga, wzrost, wiek, płeć — zasilają regenerację i kcal',
               initiallyExpanded: true,
               children: [
-              Row(children: [
-                Expanded(
-                    child: TextField(
-                        controller: weight,
-                        keyboardType: TextInputType.number,
-                        decoration: const InputDecoration(
-                            labelText: 'Waga (kg)',
-                            prefixIcon: Icon(Icons.monitor_weight_outlined)))),
-                const SizedBox(width: 10),
-                Expanded(
-                    child: TextField(
-                        controller: height,
-                        keyboardType: TextInputType.number,
-                        decoration: const InputDecoration(
-                            labelText: 'Wzrost (cm)',
-                            prefixIcon: Icon(Icons.height_rounded)))),
-              ]),
-              const SizedBox(height: 10),
-              Row(children: [
-                Expanded(
-                    child: TextField(
-                        controller: age,
-                        keyboardType: TextInputType.number,
-                        decoration: const InputDecoration(
-                            labelText: 'Wiek',
-                            prefixIcon: Icon(Icons.cake_outlined)))),
-                const SizedBox(width: 10),
-                Expanded(
-                  child: DropdownButtonFormField<String>(
-                    key: ValueKey('sex_$sex'),
-                    isExpanded: true,
-                    initialValue: sex,
-                    decoration: const InputDecoration(labelText: 'Płeć'),
-                    items: _sexOptions
-                        .map((v) => DropdownMenuItem(
-                            value: v,
-                            child: Text(v,
-                                maxLines: 1, overflow: TextOverflow.ellipsis)))
-                        .toList(),
-                    onChanged: (v) => setState(() => sex = v ?? sex),
+                Row(children: [
+                  Expanded(
+                      child: TextField(
+                          controller: weight,
+                          keyboardType: TextInputType.number,
+                          decoration: const InputDecoration(
+                              labelText: 'Waga (kg)',
+                              prefixIcon:
+                                  Icon(Icons.monitor_weight_outlined)))),
+                  const SizedBox(width: 10),
+                  Expanded(
+                      child: TextField(
+                          controller: height,
+                          keyboardType: TextInputType.number,
+                          decoration: const InputDecoration(
+                              labelText: 'Wzrost (cm)',
+                              prefixIcon: Icon(Icons.height_rounded)))),
+                ]),
+                const SizedBox(height: 10),
+                Row(children: [
+                  Expanded(
+                      child: TextField(
+                          controller: age,
+                          keyboardType: TextInputType.number,
+                          decoration: const InputDecoration(
+                              labelText: 'Wiek',
+                              prefixIcon: Icon(Icons.cake_outlined)))),
+                  const SizedBox(width: 10),
+                  Expanded(
+                    child: DropdownButtonFormField<String>(
+                      key: ValueKey('sex_$sex'),
+                      isExpanded: true,
+                      initialValue: sex,
+                      decoration: const InputDecoration(labelText: 'Płeć'),
+                      items: _sexOptions
+                          .map((v) => DropdownMenuItem(
+                              value: v,
+                              child: Text(v,
+                                  maxLines: 1,
+                                  overflow: TextOverflow.ellipsis)))
+                          .toList(),
+                      onChanged: (v) => setState(() => sex = v ?? sex),
+                    ),
                   ),
-                ),
-              ]),
+                ]),
               ],
             ),
             _profileSection(
@@ -41952,83 +43315,83 @@ class _SettingsCardState extends State<SettingsCard> {
               'Część Twojego bazowego zapotrzebowania — nie korekta dnia',
               initiallyExpanded: false,
               children: [
-              Row(
-                children: [
-                  Expanded(
-                    flex: 3,
-                    child: DropdownButtonFormField<String>(
-                      key: ValueKey('work_intensity_$workIntensity'),
-                      isExpanded: true,
-                      initialValue: workIntensity,
-                      decoration: const InputDecoration(
-                        labelText: 'Charakter pracy',
-                        prefixIcon: Icon(Icons.badge_outlined),
-                      ),
-                      items: _workIntensityLabels.entries
-                          .map((entry) => DropdownMenuItem<String>(
-                                value: entry.key,
-                                child: Text(
-                                  entry.value,
-                                  maxLines: 1,
-                                  overflow: TextOverflow.ellipsis,
-                                ),
-                              ))
-                          .toList(),
-                      onChanged: (value) => setState(
-                        () => workIntensity = value ?? workIntensity,
-                      ),
-                    ),
-                  ),
-                  const SizedBox(width: 10),
-                  Expanded(
-                    flex: 2,
-                    child: TextField(
-                      controller: workHours,
-                      keyboardType: const TextInputType.numberWithOptions(
-                        decimal: true,
-                      ),
-                      decoration: const InputDecoration(
-                        labelText: 'Godzin/dzień',
-                        prefixIcon: Icon(Icons.schedule_outlined),
+                Row(
+                  children: [
+                    Expanded(
+                      flex: 3,
+                      child: DropdownButtonFormField<String>(
+                        key: ValueKey('work_intensity_$workIntensity'),
+                        isExpanded: true,
+                        initialValue: workIntensity,
+                        decoration: const InputDecoration(
+                          labelText: 'Charakter pracy',
+                          prefixIcon: Icon(Icons.badge_outlined),
+                        ),
+                        items: _workIntensityLabels.entries
+                            .map((entry) => DropdownMenuItem<String>(
+                                  value: entry.key,
+                                  child: Text(
+                                    entry.value,
+                                    maxLines: 1,
+                                    overflow: TextOverflow.ellipsis,
+                                  ),
+                                ))
+                            .toList(),
+                        onChanged: (value) => setState(
+                          () => workIntensity = value ?? workIntensity,
+                        ),
                       ),
                     ),
-                  ),
-                ],
-              ),
-              const SizedBox(height: 8),
-              Wrap(
-                spacing: 6,
-                runSpacing: 4,
-                children: [
-                  for (final entry in const <int, String>{
-                    1: 'Pn',
-                    2: 'Wt',
-                    3: 'Śr',
-                    4: 'Cz',
-                    5: 'Pt',
-                    6: 'So',
-                    7: 'Nd',
-                  }.entries)
-                    FilterChip(
-                      label: Text(entry.value),
-                      selected: workWeekdays.contains(entry.key),
-                      onSelected: (selected) => setState(() {
-                        if (selected) {
-                          workWeekdays.add(entry.key);
-                        } else {
-                          workWeekdays.remove(entry.key);
-                        }
-                      }),
+                    const SizedBox(width: 10),
+                    Expanded(
+                      flex: 2,
+                      child: TextField(
+                        controller: workHours,
+                        keyboardType: const TextInputType.numberWithOptions(
+                          decimal: true,
+                        ),
+                        decoration: const InputDecoration(
+                          labelText: 'Godzin/dzień',
+                          prefixIcon: Icon(Icons.schedule_outlined),
+                        ),
+                      ),
                     ),
-                ],
-              ),
-              const SizedBox(height: 4),
-              Text(
-                'Praca nie jest dodawana do kroków ani danych zegarka. Trainer '
-                'wybiera wyższy, wiarygodniejszy szacunek, aby nie liczyć jej dwa razy.',
-                style: theme.textTheme.labelSmall
-                    ?.copyWith(color: theme.colorScheme.onSurfaceVariant),
-              ),
+                  ],
+                ),
+                const SizedBox(height: 8),
+                Wrap(
+                  spacing: 6,
+                  runSpacing: 4,
+                  children: [
+                    for (final entry in const <int, String>{
+                      1: 'Pn',
+                      2: 'Wt',
+                      3: 'Śr',
+                      4: 'Cz',
+                      5: 'Pt',
+                      6: 'So',
+                      7: 'Nd',
+                    }.entries)
+                      FilterChip(
+                        label: Text(entry.value),
+                        selected: workWeekdays.contains(entry.key),
+                        onSelected: (selected) => setState(() {
+                          if (selected) {
+                            workWeekdays.add(entry.key);
+                          } else {
+                            workWeekdays.remove(entry.key);
+                          }
+                        }),
+                      ),
+                  ],
+                ),
+                const SizedBox(height: 4),
+                Text(
+                  'Praca nie jest dodawana do kroków ani danych zegarka. Trainer '
+                  'wybiera wyższy, wiarygodniejszy szacunek, aby nie liczyć jej dwa razy.',
+                  style: theme.textTheme.labelSmall
+                      ?.copyWith(color: theme.colorScheme.onSurfaceVariant),
+                ),
               ],
             ),
             _profileSection(
@@ -42038,69 +43401,70 @@ class _SettingsCardState extends State<SettingsCard> {
               'Dopasowują programy 30-dniowe i progresję',
               initiallyExpanded: false,
               children: [
-              DropdownButtonFormField<String>(
-                isExpanded: true,
-                value: level,
-                decoration: const InputDecoration(
-                    labelText: 'Poziom zaawansowania',
-                    prefixIcon: Icon(Icons.workspace_premium_outlined)),
-                selectedItemBuilder: (context) => kTrainingLevels
-                    .map((v) => Align(
-                        alignment: Alignment.centerLeft,
-                        child: Text(v,
-                            maxLines: 1, overflow: TextOverflow.ellipsis)))
-                    .toList(),
-                items: kTrainingLevels
-                    .map((v) => DropdownMenuItem(
-                        value: v,
-                        child: Text(v,
-                            maxLines: 1, overflow: TextOverflow.ellipsis)))
-                    .toList(),
-                onChanged: (v) => setState(() => level = v ?? level),
-              ),
-              const SizedBox(height: 10),
-              DropdownButtonFormField<String>(
-                isExpanded: true,
-                value: trainingMode,
-                decoration: const InputDecoration(
-                  labelText: 'Strategia składu ciała',
-                  helperText:
-                      'Redukcja/masa/rekompozycja to strategia, nie typ treningu',
-                  prefixIcon: Icon(Icons.tune_rounded),
-                ),
-                selectedItemBuilder: (context) => kTrainingModes
-                    .map((v) => Align(
-                        alignment: Alignment.centerLeft,
-                        child: Text(v,
-                            maxLines: 1, overflow: TextOverflow.ellipsis)))
-                    .toList(),
-                items: kTrainingModes
-                    .map((v) => DropdownMenuItem(
-                        value: v,
-                        child: Text(v,
-                            maxLines: 1, overflow: TextOverflow.ellipsis)))
-                    .toList(),
-                onChanged: (v) =>
-                    setState(() => trainingMode = v ?? trainingMode),
-              ),
-              const SizedBox(height: 6),
-              OutlinedButton.icon(
-                key: const Key('open_goal_profile_from_settings'),
-                onPressed: () => Navigator.of(context).push(
-                  MaterialPageRoute<void>(
-                      builder: (_) => const BodyGoalProfilePage()),
-                ),
-                icon: const Icon(Icons.flag_rounded, size: 18),
-                label:
-                    const Text('Profil celu: sylwetka, strategia, typ treningu'),
-              ),
-              const SizedBox(height: 10),
-              TextField(
-                  controller: goal,
-                  maxLines: 2,
+                DropdownButtonFormField<String>(
+                  isExpanded: true,
+                  value: level,
                   decoration: const InputDecoration(
-                      labelText: 'Cel treningowy (np. sylwetka, siła, kondycja)',
-                      prefixIcon: Icon(Icons.emoji_events_outlined))),
+                      labelText: 'Poziom zaawansowania',
+                      prefixIcon: Icon(Icons.workspace_premium_outlined)),
+                  selectedItemBuilder: (context) => kTrainingLevels
+                      .map((v) => Align(
+                          alignment: Alignment.centerLeft,
+                          child: Text(v,
+                              maxLines: 1, overflow: TextOverflow.ellipsis)))
+                      .toList(),
+                  items: kTrainingLevels
+                      .map((v) => DropdownMenuItem(
+                          value: v,
+                          child: Text(v,
+                              maxLines: 1, overflow: TextOverflow.ellipsis)))
+                      .toList(),
+                  onChanged: (v) => setState(() => level = v ?? level),
+                ),
+                const SizedBox(height: 10),
+                DropdownButtonFormField<String>(
+                  isExpanded: true,
+                  value: trainingMode,
+                  decoration: const InputDecoration(
+                    labelText: 'Strategia składu ciała',
+                    helperText:
+                        'Redukcja/masa/rekompozycja to strategia, nie typ treningu',
+                    prefixIcon: Icon(Icons.tune_rounded),
+                  ),
+                  selectedItemBuilder: (context) => kTrainingModes
+                      .map((v) => Align(
+                          alignment: Alignment.centerLeft,
+                          child: Text(v,
+                              maxLines: 1, overflow: TextOverflow.ellipsis)))
+                      .toList(),
+                  items: kTrainingModes
+                      .map((v) => DropdownMenuItem(
+                          value: v,
+                          child: Text(v,
+                              maxLines: 1, overflow: TextOverflow.ellipsis)))
+                      .toList(),
+                  onChanged: (v) =>
+                      setState(() => trainingMode = v ?? trainingMode),
+                ),
+                const SizedBox(height: 6),
+                OutlinedButton.icon(
+                  key: const Key('open_goal_profile_from_settings'),
+                  onPressed: () => Navigator.of(context).push(
+                    MaterialPageRoute<void>(
+                        builder: (_) => const BodyGoalProfilePage()),
+                  ),
+                  icon: const Icon(Icons.flag_rounded, size: 18),
+                  label: const Text(
+                      'Profil celu: sylwetka, strategia, typ treningu'),
+                ),
+                const SizedBox(height: 10),
+                TextField(
+                    controller: goal,
+                    maxLines: 2,
+                    decoration: const InputDecoration(
+                        labelText:
+                            'Cel treningowy (np. sylwetka, siła, kondycja)',
+                        prefixIcon: Icon(Icons.emoji_events_outlined))),
               ],
             ),
             _profileSection(
@@ -42110,32 +43474,32 @@ class _SettingsCardState extends State<SettingsCard> {
               'Ile Trainer ustala za Ciebie podczas serii',
               initiallyExpanded: false,
               children: [
-              DropdownButtonFormField<GuidanceMode>(
-                key: const Key('guidance_mode_dropdown'),
-                isExpanded: true,
-                initialValue: guidanceMode,
-                decoration: const InputDecoration(
-                    labelText: 'Tryb prowadzenia',
-                    prefixIcon: Icon(Icons.assistant_direction_outlined)),
-                selectedItemBuilder: (context) => GuidanceMode.values
-                    .map((m) => Align(
-                        alignment: Alignment.centerLeft,
-                        child: Text(m.label,
-                            maxLines: 1, overflow: TextOverflow.ellipsis)))
-                    .toList(),
-                items: GuidanceMode.values
-                    .map((m) => DropdownMenuItem(
-                        value: m,
-                        child: Text(m.label,
-                            maxLines: 1, overflow: TextOverflow.ellipsis)))
-                    .toList(),
-                onChanged: (v) =>
-                    setState(() => guidanceMode = v ?? guidanceMode),
-              ),
-              const SizedBox(height: 4),
-              Text(guidanceMode.description,
-                  style: theme.textTheme.labelSmall
-                      ?.copyWith(color: theme.colorScheme.onSurfaceVariant)),
+                DropdownButtonFormField<GuidanceMode>(
+                  key: const Key('guidance_mode_dropdown'),
+                  isExpanded: true,
+                  initialValue: guidanceMode,
+                  decoration: const InputDecoration(
+                      labelText: 'Tryb prowadzenia',
+                      prefixIcon: Icon(Icons.assistant_direction_outlined)),
+                  selectedItemBuilder: (context) => GuidanceMode.values
+                      .map((m) => Align(
+                          alignment: Alignment.centerLeft,
+                          child: Text(m.label,
+                              maxLines: 1, overflow: TextOverflow.ellipsis)))
+                      .toList(),
+                  items: GuidanceMode.values
+                      .map((m) => DropdownMenuItem(
+                          value: m,
+                          child: Text(m.label,
+                              maxLines: 1, overflow: TextOverflow.ellipsis)))
+                      .toList(),
+                  onChanged: (v) =>
+                      setState(() => guidanceMode = v ?? guidanceMode),
+                ),
+                const SizedBox(height: 4),
+                Text(guidanceMode.description,
+                    style: theme.textTheme.labelSmall
+                        ?.copyWith(color: theme.colorScheme.onSurfaceVariant)),
               ],
             ),
             _profileSection(
@@ -42145,95 +43509,95 @@ class _SettingsCardState extends State<SettingsCard> {
               'Programy używają tylko ćwiczeń pod Twój sprzęt',
               initiallyExpanded: false,
               children: [
-              DropdownButtonFormField<EquipmentMode>(
-                key: const Key('equipment_mode_dropdown'),
-                isExpanded: true,
-                initialValue: equipmentMode,
-                decoration: const InputDecoration(
-                    labelText: 'Tryb sprzętowy',
-                    prefixIcon: Icon(Icons.fitness_center_rounded)),
-                selectedItemBuilder: (context) => EquipmentMode.values
-                    .map((m) => Align(
-                        alignment: Alignment.centerLeft,
-                        child: Text(m.label,
-                            maxLines: 1, overflow: TextOverflow.ellipsis)))
-                    .toList(),
-                items: EquipmentMode.values
-                    .map((m) => DropdownMenuItem(
-                        value: m,
-                        child: Text(m.label,
-                            maxLines: 1, overflow: TextOverflow.ellipsis)))
-                    .toList(),
-                onChanged: (v) => setState(() {
-                  if (v == null) return;
-                  equipmentMode = v;
-                  // Przy przejściu na tryb wybieralny zasil sensownym startem.
-                  if (v == EquipmentMode.homeMixed && ownedEquipment.isEmpty) {
-                    ownedEquipment = {...kDefaultHomeMixedEquipment};
-                  } else if (v == EquipmentMode.custom &&
-                      ownedEquipment.isEmpty) {
-                    ownedEquipment = {
-                      ...widget.settings.equipmentProfile.resolveOwned()
-                    }..removeAll(kAlwaysAvailableEquipment);
-                  }
-                }),
-              ),
-              const SizedBox(height: 4),
-              Text(equipmentMode.description,
-                  style: theme.textTheme.labelSmall
-                      ?.copyWith(color: theme.colorScheme.onSurfaceVariant)),
-              if (equipmentMode.isUserSelectable) ...[
-                const SizedBox(height: 10),
+                DropdownButtonFormField<EquipmentMode>(
+                  key: const Key('equipment_mode_dropdown'),
+                  isExpanded: true,
+                  initialValue: equipmentMode,
+                  decoration: const InputDecoration(
+                      labelText: 'Tryb sprzętowy',
+                      prefixIcon: Icon(Icons.fitness_center_rounded)),
+                  selectedItemBuilder: (context) => EquipmentMode.values
+                      .map((m) => Align(
+                          alignment: Alignment.centerLeft,
+                          child: Text(m.label,
+                              maxLines: 1, overflow: TextOverflow.ellipsis)))
+                      .toList(),
+                  items: EquipmentMode.values
+                      .map((m) => DropdownMenuItem(
+                          value: m,
+                          child: Text(m.label,
+                              maxLines: 1, overflow: TextOverflow.ellipsis)))
+                      .toList(),
+                  onChanged: (v) => setState(() {
+                    if (v == null) return;
+                    equipmentMode = v;
+                    // Przy przejściu na tryb wybieralny zasil sensownym startem.
+                    if (v == EquipmentMode.homeMixed &&
+                        ownedEquipment.isEmpty) {
+                      ownedEquipment = {...kDefaultHomeMixedEquipment};
+                    } else if (v == EquipmentMode.custom &&
+                        ownedEquipment.isEmpty) {
+                      ownedEquipment = {
+                        ...widget.settings.equipmentProfile.resolveOwned()
+                      }..removeAll(kAlwaysAvailableEquipment);
+                    }
+                  }),
+                ),
+                const SizedBox(height: 4),
+                Text(equipmentMode.description,
+                    style: theme.textTheme.labelSmall
+                        ?.copyWith(color: theme.colorScheme.onSurfaceVariant)),
+                if (equipmentMode.isUserSelectable) ...[
+                  const SizedBox(height: 10),
+                  Wrap(
+                    spacing: 8,
+                    runSpacing: 4,
+                    children: [
+                      for (final type in _selectableEquipment)
+                        FilterChip(
+                          label: Text(type.label),
+                          selected: ownedEquipment.contains(type),
+                          onSelected: (sel) => setState(() {
+                            if (sel) {
+                              ownedEquipment.add(type);
+                            } else {
+                              ownedEquipment.remove(type);
+                            }
+                          }),
+                        ),
+                    ],
+                  ),
+                ],
+                const SizedBox(height: 14),
+                Text('Ograniczenia i kontuzje',
+                    style: theme.textTheme.titleSmall
+                        ?.copyWith(fontWeight: FontWeight.w900)),
+                const SizedBox(height: 6),
                 Wrap(
                   spacing: 8,
                   runSpacing: 4,
                   children: [
-                    for (final type in _selectableEquipment)
+                    for (final limit in TrainingLimitation.values)
                       FilterChip(
-                        label: Text(type.label),
-                        selected: ownedEquipment.contains(type),
+                        label: Text(limit.label),
+                        selected: limitationFlags.contains(limit),
                         onSelected: (sel) => setState(() {
                           if (sel) {
-                            ownedEquipment.add(type);
+                            limitationFlags.add(limit);
                           } else {
-                            ownedEquipment.remove(type);
+                            limitationFlags.remove(limit);
                           }
                         }),
                       ),
                   ],
                 ),
-              ],
-              const SizedBox(height: 14),
-              Text('Ograniczenia i kontuzje',
-                  style: theme.textTheme.titleSmall
-                      ?.copyWith(fontWeight: FontWeight.w900)),
-              const SizedBox(height: 6),
-              Wrap(
-                spacing: 8,
-                runSpacing: 4,
-                children: [
-                  for (final limit in TrainingLimitation.values)
-                    FilterChip(
-                      label: Text(limit.label),
-                      selected: limitationFlags.contains(limit),
-                      onSelected: (sel) => setState(() {
-                        if (sel) {
-                          limitationFlags.add(limit);
-                        } else {
-                          limitationFlags.remove(limit);
-                        }
-                      }),
-                    ),
-                ],
-              ),
-              const SizedBox(height: 10),
-              TextField(
-                  controller: limitations,
-                  maxLines: 2,
-                  decoration: const InputDecoration(
-                      labelText: 'Własne ograniczenie (opcjonalnie)',
-                      prefixIcon: Icon(Icons.healing_outlined))),
-
+                const SizedBox(height: 10),
+                TextField(
+                    controller: limitations,
+                    maxLines: 2,
+                    decoration: const InputDecoration(
+                        labelText: 'Własne ograniczenie (opcjonalnie)',
+                        prefixIcon: Icon(Icons.healing_outlined))),
               ],
             ),
             const SizedBox(height: 16),
@@ -47460,4 +48824,474 @@ class ProgressionSuggestionCard extends StatelessWidget {
       ),
     );
   }
+}
+
+// ============================================================================
+// Kafelek OSTROŻNEJ SUGESTII PROGRESJI dla całego zestawu ćwiczeń
+// ============================================================================
+
+/// Kafelek z odnośnikiem: „co Trainer zmienił w sugestii" dla tego zestawu.
+///
+/// Zbiera ostrożne kroki progresji ([AppStore.cautiousProgressionForExercise])
+/// dla wszystkich ćwiczeń dnia i pokazuje je jako jedną pozycję z podglądem.
+/// Po dotknięciu otwiera listę z uzasadnieniem KAŻDEJ zmiany — łącznie z tym,
+/// co ją stłumiło (krótszy odpoczynek, ręczne dołożenie ciężaru, jedna sesja).
+class SetProgressionSuggestionTile extends StatelessWidget {
+  const SetProgressionSuggestionTile({
+    super.key,
+    required this.items,
+    this.title = 'Sugestia progresji',
+  });
+
+  final List<PlanItem> items;
+  final String title;
+
+  @override
+  Widget build(BuildContext context) {
+    final store = AppScope.of(context);
+    final theme = Theme.of(context);
+    final scheme = theme.colorScheme;
+
+    final entries = <({String name, CautiousProgressionStep step})>[];
+    final seen = <String>{};
+    for (final item in items) {
+      if (!seen.add(item.exerciseId)) continue;
+      final step = store.cautiousProgressionForExercise(item.exerciseId);
+      if (step == null) continue;
+      final exercise = item.exerciseFrom(store.customExercises);
+      entries.add((name: exercise.name, step: step));
+    }
+    if (entries.isEmpty) return const SizedBox.shrink();
+
+    final changing = [
+      for (final entry in entries)
+        if (entry.step.changesAnything) entry,
+    ];
+    final dampened = changing.where((e) => e.step.isDampened).length;
+    final subtitle = changing.isEmpty
+        ? 'Trainer utrzymuje parametry — zobacz, co na to wpłynęło.'
+        : '${changing.length} ${changing.length == 1 ? 'zmiana' : 'zmiany'} na następny raz'
+            '${dampened > 0 ? ' · $dampened ostrożnie stłumione' : ''}';
+
+    return Card(
+      key: const Key('set_progression_tile'),
+      clipBehavior: Clip.antiAlias,
+      child: ListTile(
+        leading: CircleAvatar(
+          backgroundColor: scheme.primary.withValues(alpha: 0.14),
+          child: Icon(Icons.auto_graph_rounded, color: scheme.primary),
+        ),
+        title: Text(title,
+            style: theme.textTheme.titleSmall
+                ?.copyWith(fontWeight: FontWeight.w900)),
+        subtitle: Text(subtitle, style: theme.textTheme.bodySmall),
+        trailing: const Icon(Icons.chevron_right_rounded),
+        onTap: () => showSetProgressionSheet(context, entries),
+      ),
+    );
+  }
+}
+
+/// Arkusz ze szczegółami sugestii progresji dla zestawu.
+Future<void> showSetProgressionSheet(
+  BuildContext context,
+  List<({String name, CautiousProgressionStep step})> entries,
+) {
+  return showModalBottomSheet<void>(
+    context: context,
+    showDragHandle: true,
+    isScrollControlled: true,
+    useSafeArea: true,
+    builder: (sheetContext) {
+      final theme = Theme.of(sheetContext);
+      final scheme = theme.colorScheme;
+      return SafeArea(
+        child: ListView(
+          shrinkWrap: true,
+          padding: const EdgeInsets.fromLTRB(16, 4, 16, 20),
+          children: [
+            Text('Co zmieniło się w sugestii',
+                style: theme.textTheme.titleMedium
+                    ?.copyWith(fontWeight: FontWeight.w900)),
+            const SizedBox(height: 4),
+            Text(
+              'Trainer dokłada ostrożnie: krótszy odpoczynek, szybsze serie i to, '
+              'co już zmieniło się od poprzedniego treningu, ZMNIEJSZAJĄ krok '
+              'zamiast go podbijać.',
+              style: theme.textTheme.bodySmall
+                  ?.copyWith(color: scheme.onSurfaceVariant),
+            ),
+            const SizedBox(height: 14),
+            for (final entry in entries) ...[
+              Text(entry.name,
+                  style: theme.textTheme.titleSmall
+                      ?.copyWith(fontWeight: FontWeight.w800)),
+              const SizedBox(height: 2),
+              Row(
+                children: [
+                  Icon(
+                    entry.step.changesAnything
+                        ? Icons.trending_up_rounded
+                        : Icons.remove_rounded,
+                    size: 16,
+                    color: entry.step.changesAnything
+                        ? Colors.green
+                        : scheme.onSurfaceVariant,
+                  ),
+                  const SizedBox(width: 6),
+                  Expanded(
+                    child: Text(entry.step.headline,
+                        style: theme.textTheme.bodyMedium
+                            ?.copyWith(fontWeight: FontWeight.w700)),
+                  ),
+                ],
+              ),
+              for (final reason in entry.step.reasons)
+                Padding(
+                  padding: const EdgeInsets.only(left: 22, top: 2),
+                  child: Text('• $reason',
+                      style: theme.textTheme.bodySmall
+                          ?.copyWith(color: scheme.onSurfaceVariant)),
+                ),
+              if (entry.step.restAdviceSec > 0)
+                Padding(
+                  padding: const EdgeInsets.only(left: 22, top: 2),
+                  child: Text(
+                    '• Najpierw wróć do pełnej przerwy z planu — dopiero potem '
+                    'dokładaj ciężar.',
+                    style: theme.textTheme.bodySmall
+                        ?.copyWith(color: scheme.onSurfaceVariant),
+                  ),
+                ),
+              const Divider(height: 22),
+            ],
+          ],
+        ),
+      );
+    },
+  );
+}
+
+// ============================================================================
+// Karta LIMITÓW OBJĘTOŚCI zestawu (min/max ćwiczeń, serii, powtórzeń)
+// ============================================================================
+
+/// Ustawienia LIMITÓW OBJĘTOŚCI: dolna i górna granica liczby ćwiczeń, serii
+/// i powtórzeń dla każdej partii mięśniowej.
+///
+/// Limity opisują BUDOWĘ zestawu. Ręczne podkręcanie i zbijanie intensywności
+/// (gałka programu oraz dnia) działa niezależnie od nich i celowo może wyjść
+/// poza te granice — dlatego strona mówi o tym wprost.
+class VolumeLimitsSettingsPage extends StatelessWidget {
+  const VolumeLimitsSettingsPage({super.key});
+
+  @override
+  Widget build(BuildContext context) {
+    final store = AppScope.of(context);
+    final theme = Theme.of(context);
+    final scheme = theme.colorScheme;
+    final config = store.volumeLimits;
+
+    Future<void> update(
+      MuscleGroup group,
+      MuscleVolumeLimits limits,
+    ) =>
+        store.setVolumeLimits(config.withGroup(group, limits));
+
+    Widget boundsRow(
+      String label,
+      VolumeBounds bounds,
+      void Function(VolumeBounds) onChanged, {
+      required int floor,
+      required int ceiling,
+      required Key key,
+    }) {
+      Widget miniButton(IconData icon, VoidCallback? onPressed) => IconButton(
+            visualDensity: VisualDensity.compact,
+            padding: EdgeInsets.zero,
+            constraints: const BoxConstraints.tightFor(width: 30, height: 30),
+            iconSize: 18,
+            onPressed: onPressed,
+            icon: Icon(icon),
+          );
+
+      Widget stepper(int value, void Function(int) onSet) => Expanded(
+            child: Row(
+              mainAxisAlignment: MainAxisAlignment.center,
+              children: [
+                miniButton(Icons.remove_rounded,
+                    value <= floor ? null : () => onSet(value - 1)),
+                SizedBox(
+                  width: 24,
+                  child: Text('$value',
+                      textAlign: TextAlign.center,
+                      style: theme.textTheme.bodyMedium
+                          ?.copyWith(fontWeight: FontWeight.w900)),
+                ),
+                miniButton(Icons.add_rounded,
+                    value >= ceiling ? null : () => onSet(value + 1)),
+              ],
+            ),
+          );
+
+      return Padding(
+        key: key,
+        padding: const EdgeInsets.only(bottom: 2),
+        child: Row(
+          children: [
+            SizedBox(
+              width: 84,
+              child: Text(label,
+                  style: theme.textTheme.bodySmall,
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis),
+            ),
+            stepper(
+                bounds.min,
+                (value) => onChanged(VolumeBounds(
+                    value, bounds.max < value ? value : bounds.max))),
+            stepper(
+                bounds.max,
+                (value) => onChanged(VolumeBounds(
+                    bounds.min > value ? value : bounds.min, value))),
+          ],
+        ),
+      );
+    }
+
+    return ListView(
+      padding: const EdgeInsets.fromLTRB(16, 12, 16, 24),
+      children: [
+        Card(
+          color: scheme.primaryContainer.withValues(alpha: 0.4),
+          child: const ListTile(
+            leading: Icon(Icons.rule_rounded),
+            title: Text('Warunki zestawu ćwiczeń'),
+            subtitle: Text(
+                'Dla każdej partii ustal, ile NAJMNIEJ i NAJWIĘCEJ różnych '
+                'ćwiczeń ma mieć zestaw, ile serii przypada na ćwiczenie i '
+                'w jakim zakresie powtórzeń pracujesz. Limity obowiązują przy '
+                'układaniu i sprawdzaniu zestawów — nie przepisują programu, '
+                'w którym jesteś w połowie.'),
+          ),
+        ),
+        const SizedBox(height: 8),
+        SwitchListTile(
+          key: const Key('volume_limits_enabled'),
+          value: config.enabled,
+          title: const Text('Pilnuj limitów'),
+          subtitle: const Text(
+              'Wyłączone: limity są tylko informacją, nic nie jest przycinane.'),
+          onChanged: (value) =>
+              store.setVolumeLimits(config.copyWith(enabled: value)),
+        ),
+        const SizedBox(height: 4),
+        Text(
+          'Podkręcanie i zbijanie intensywności działa NIEZALEŻNIE od limitów — '
+          'to gałka ciężaru i objętości, a nie budowa zestawu. Prognozy czasu '
+          'i kalorii uwzględniają ją osobno.',
+          style: theme.textTheme.labelSmall
+              ?.copyWith(color: scheme.onSurfaceVariant),
+        ),
+        const SizedBox(height: 12),
+        for (final group in kLimitedMuscleGroups) ...[
+          Builder(builder: (context) {
+            final limits = config.rawFor(group);
+            final effective = store.volumeLimitsForGroup(group);
+            return Card(
+              child: Padding(
+                padding: const EdgeInsets.fromLTRB(12, 10, 4, 8),
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Row(
+                      children: [
+                        Expanded(
+                          child: Text(group.label,
+                              style: theme.textTheme.titleSmall
+                                  ?.copyWith(fontWeight: FontWeight.w900)),
+                        ),
+                        Text('min',
+                            style: theme.textTheme.labelSmall
+                                ?.copyWith(color: scheme.onSurfaceVariant)),
+                        const SizedBox(width: 46),
+                        Text('max',
+                            style: theme.textTheme.labelSmall
+                                ?.copyWith(color: scheme.onSurfaceVariant)),
+                        const SizedBox(width: 30),
+                        if (config.overrides.containsKey(group))
+                          TextButton(
+                            onPressed: () => store.setVolumeLimits(
+                              config.withGroup(
+                                  group, kDefaultMuscleVolumeLimits[group]!),
+                            ),
+                            child: const Text('Domyślne'),
+                          ),
+                      ],
+                    ),
+                    boundsRow(
+                      'Ćwiczenia',
+                      limits.exercises,
+                      (bounds) =>
+                          update(group, limits.copyWith(exercises: bounds)),
+                      floor: 1,
+                      ceiling: 12,
+                      key: Key('limit_exercises_${group.name}'),
+                    ),
+                    boundsRow(
+                      'Serie',
+                      limits.sets,
+                      (bounds) => update(group, limits.copyWith(sets: bounds)),
+                      floor: 1,
+                      ceiling: 10,
+                      key: Key('limit_sets_${group.name}'),
+                    ),
+                    boundsRow(
+                      'Powtórzenia',
+                      limits.reps,
+                      (bounds) => update(group, limits.copyWith(reps: bounds)),
+                      floor: 1,
+                      ceiling: 40,
+                      key: Key('limit_reps_${group.name}'),
+                    ),
+                    const SizedBox(height: 4),
+                    Text(
+                      'Po korekcie poziomu (${store.settings.level}): '
+                      'ćwiczenia ${effective.exercises.label} · '
+                      'serie ${effective.sets.label} · '
+                      'powtórzenia ${effective.reps.label} '
+                      '(${effective.minWorkingSets}–${effective.maxWorkingSets} serii roboczych)',
+                      style: theme.textTheme.labelSmall
+                          ?.copyWith(color: scheme.onSurfaceVariant),
+                    ),
+                  ],
+                ),
+              ),
+            );
+          }),
+        ],
+      ],
+    );
+  }
+}
+
+/// Kafelek z odnośnikiem: czy zestaw mieści się w limitach objętości partii.
+class VolumeLimitsTile extends StatelessWidget {
+  const VolumeLimitsTile({super.key, required this.items});
+
+  final List<PlanItem> items;
+
+  @override
+  Widget build(BuildContext context) {
+    final store = AppScope.of(context);
+    final theme = Theme.of(context);
+    final scheme = theme.colorScheme;
+    final report = analyzeWorkoutVolume(
+      items: items,
+      resolve: (id) => ExerciseRepo.byId(id, store.customExercises),
+      level: store.settings.level,
+      config: store.volumeLimits,
+    );
+    if (report.counts.isEmpty) return const SizedBox.shrink();
+
+    final ok = report.isValid;
+    final color = ok ? scheme.primary : Colors.orange;
+    return Card(
+      key: const Key('volume_limits_tile'),
+      clipBehavior: Clip.antiAlias,
+      child: ListTile(
+        dense: true,
+        leading: Icon(ok ? Icons.verified_rounded : Icons.rule_rounded,
+            color: color),
+        title: Text(
+          ok ? 'Objętość zestawu w limitach' : 'Objętość zestawu poza limitami',
+          style: theme.textTheme.titleSmall
+              ?.copyWith(fontWeight: FontWeight.w900, color: color),
+        ),
+        subtitle: Text(
+          ok
+              ? '${report.counts.length} ${report.counts.length == 1 ? 'partia' : 'partie'} · ćwiczenia, serie i powtórzenia w granicach'
+              : report.issues.first.message,
+          maxLines: 2,
+          overflow: TextOverflow.ellipsis,
+          style: theme.textTheme.bodySmall,
+        ),
+        trailing: const Icon(Icons.chevron_right_rounded),
+        onTap: () => showVolumeLimitsSheet(context, report),
+      ),
+    );
+  }
+}
+
+/// Szczegóły limitów objętości: ile zestaw daje partii i jakie są granice.
+Future<void> showVolumeLimitsSheet(
+  BuildContext context,
+  WorkoutVolumeReport report,
+) {
+  return showModalBottomSheet<void>(
+    context: context,
+    showDragHandle: true,
+    isScrollControlled: true,
+    useSafeArea: true,
+    builder: (sheetContext) {
+      final theme = Theme.of(sheetContext);
+      final scheme = theme.colorScheme;
+      return SafeArea(
+        child: ListView(
+          shrinkWrap: true,
+          padding: const EdgeInsets.fromLTRB(16, 4, 16, 20),
+          children: [
+            Text('Limity objętości zestawu',
+                style: theme.textTheme.titleMedium
+                    ?.copyWith(fontWeight: FontWeight.w900)),
+            const SizedBox(height: 4),
+            Text(
+              'Dla każdej partii pilnujemy trzech granic: ile RÓŻNYCH ćwiczeń ma '
+              'zestaw, ile serii przypada na ćwiczenie i w jakim zakresie '
+              'powtórzeń pracujesz.',
+              style: theme.textTheme.bodySmall
+                  ?.copyWith(color: scheme.onSurfaceVariant),
+            ),
+            const SizedBox(height: 14),
+            for (final count in report.counts.values) ...[
+              Text(count.group.label,
+                  style: theme.textTheme.titleSmall
+                      ?.copyWith(fontWeight: FontWeight.w800)),
+              Text(
+                'Ćwiczenia: ${count.exerciseCount} (limit ${count.limits.exercises.label}) · '
+                'serie na ćwiczenie: ${count.limits.sets.label} · '
+                'powtórzenia: ${count.limits.reps.label}',
+                style: theme.textTheme.bodySmall
+                    ?.copyWith(color: scheme.onSurfaceVariant),
+              ),
+              Text('Serie robocze w zestawie: ${count.workingSets}',
+                  style: theme.textTheme.bodySmall
+                      ?.copyWith(color: scheme.onSurfaceVariant)),
+              const SizedBox(height: 10),
+            ],
+            if (report.issues.isNotEmpty) ...[
+              const Divider(height: 20),
+              Text('Poza limitami',
+                  style: theme.textTheme.titleSmall
+                      ?.copyWith(fontWeight: FontWeight.w800)),
+              const SizedBox(height: 4),
+              for (final issue in report.issues)
+                Text('• ${issue.message}',
+                    style: theme.textTheme.bodySmall
+                        ?.copyWith(color: Colors.orange)),
+            ],
+            const SizedBox(height: 12),
+            Text(
+              'Podkręcanie i zbijanie intensywności (gałka programu oraz dnia) '
+              'celowo działa PONAD tymi limitami — one opisują budowę zestawu, '
+              'a nie jego ciężar. Prognozy czasu i kalorii uwzględniają korektę '
+              'intensywności osobno.',
+              style: theme.textTheme.labelSmall
+                  ?.copyWith(color: scheme.onSurfaceVariant),
+            ),
+          ],
+        ),
+      );
+    },
+  );
 }

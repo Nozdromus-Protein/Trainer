@@ -1,12 +1,38 @@
+import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
+
+/// Stan ładowania pokazywany na splashu: ile już zrobione i co się właśnie
+/// dzieje. Jedna klasa dla wszystkich etapów startu aplikacji.
+@immutable
+class AppLoadProgress {
+  /// Postęp 0..1. Wartość ujemna = postęp nieznany (pasek nieokreślony).
+  final double value;
+
+  /// Krok opisany po ludzku — ląduje małym druczkiem pod paskiem.
+  final String label;
+
+  const AppLoadProgress(this.value, this.label);
+
+  /// Etap bez policzalnego postępu (np. inicjalizacja konta).
+  const AppLoadProgress.indeterminate(this.label) : value = -1;
+
+  bool get isDeterminate => value >= 0;
+
+  int get percent => (value.clamp(0.0, 1.0) * 100).round();
+}
 
 /// Ekran ładowania aplikacji Trainer.
 ///
 /// Pokazuje się wyłącznie podczas realnego wczytywania danych (AppStore.load)
 /// i znika automatycznie — bez sztucznego opóźnienia i bez przycisku pomijania.
-/// Styl: sportowy, miętowy akcent, delikatny pasek ładowania z gradientem.
+///
+/// Gdy dostanie [progress], pasek jest OKREŚLONY: pokazuje procent i nazwę
+/// bieżącego kroku małym druczkiem. Bez [progress] wraca do paska
+/// przesuwającego się w kółko (tam, gdzie postępu nie da się policzyć).
 class TrainerSplashScreen extends StatefulWidget {
-  const TrainerSplashScreen({super.key});
+  const TrainerSplashScreen({super.key, this.progress});
+
+  final ValueListenable<AppLoadProgress>? progress;
 
   static const Color _mint = Color(0xFF24D6A3);
 
@@ -14,13 +40,16 @@ class TrainerSplashScreen extends StatefulWidget {
   State<TrainerSplashScreen> createState() => _TrainerSplashScreenState();
 }
 
-class _TrainerSplashScreenState extends State<TrainerSplashScreen> with SingleTickerProviderStateMixin {
+class _TrainerSplashScreenState extends State<TrainerSplashScreen>
+    with SingleTickerProviderStateMixin {
   late final AnimationController _controller;
 
   @override
   void initState() {
     super.initState();
-    _controller = AnimationController(vsync: this, duration: const Duration(milliseconds: 1400))..repeat();
+    _controller = AnimationController(
+        vsync: this, duration: const Duration(milliseconds: 1400))
+      ..repeat();
   }
 
   @override
@@ -45,7 +74,8 @@ class _TrainerSplashScreenState extends State<TrainerSplashScreen> with SingleTi
           curve: Curves.easeOutCubic,
           builder: (context, value, child) => Opacity(
             opacity: value,
-            child: Transform.translate(offset: Offset(0, 14 * (1 - value)), child: child),
+            child: Transform.translate(
+                offset: Offset(0, 14 * (1 - value)), child: child),
           ),
           child: Column(
             mainAxisSize: MainAxisSize.min,
@@ -54,7 +84,8 @@ class _TrainerSplashScreenState extends State<TrainerSplashScreen> with SingleTi
               AnimatedBuilder(
                 animation: _controller,
                 builder: (context, child) {
-                  final pulse = 1 + 0.04 * (0.5 - (_controller.value - 0.5).abs()) * 2;
+                  final pulse =
+                      1 + 0.04 * (0.5 - (_controller.value - 0.5).abs()) * 2;
                   return Transform.scale(scale: pulse, child: child);
                 },
                 child: Container(
@@ -72,13 +103,15 @@ class _TrainerSplashScreenState extends State<TrainerSplashScreen> with SingleTi
                     ),
                     boxShadow: [
                       BoxShadow(
-                        color: TrainerSplashScreen._mint.withValues(alpha: dark ? 0.35 : 0.25),
+                        color: TrainerSplashScreen._mint
+                            .withValues(alpha: dark ? 0.35 : 0.25),
                         blurRadius: 36,
                         spreadRadius: 4,
                       ),
                     ],
                   ),
-                  child: const Icon(Icons.directions_run_rounded, size: 52, color: Colors.white),
+                  child: const Icon(Icons.directions_run_rounded,
+                      size: 52, color: Colors.white),
                 ),
               ),
               const SizedBox(height: 26),
@@ -94,28 +127,15 @@ class _TrainerSplashScreenState extends State<TrainerSplashScreen> with SingleTi
               const SizedBox(height: 6),
               Text(
                 'Przygotowuję trening…',
-                style: TextStyle(fontSize: 14, fontWeight: FontWeight.w600, color: muted),
+                style: TextStyle(
+                    fontSize: 14, fontWeight: FontWeight.w600, color: muted),
               ),
               const SizedBox(height: 30),
-              // Pasek ładowania z przesuwającym się miętowym gradientem.
-              SizedBox(
-                width: 190,
-                height: 6,
-                child: ClipRRect(
-                  borderRadius: BorderRadius.circular(999),
-                  child: AnimatedBuilder(
-                    animation: _controller,
-                    builder: (context, _) {
-                      return CustomPaint(
-                        painter: _SplashBarPainter(
-                          progress: _controller.value,
-                          trackColor: dark ? Colors.white12 : Colors.black12,
-                          accent: TrainerSplashScreen._mint,
-                        ),
-                      );
-                    },
-                  ),
-                ),
+              _SplashProgress(
+                progress: widget.progress,
+                controller: _controller,
+                dark: dark,
+                muted: muted,
               ),
             ],
           ),
@@ -125,9 +145,114 @@ class _TrainerSplashScreenState extends State<TrainerSplashScreen> with SingleTi
   }
 }
 
-/// Rysuje pasek ładowania: tło + przesuwający się gradientowy segment.
+/// Pasek postępu splasha wraz z procentem i podpisem kroku.
+class _SplashProgress extends StatelessWidget {
+  const _SplashProgress({
+    required this.progress,
+    required this.controller,
+    required this.dark,
+    required this.muted,
+  });
+
+  final ValueListenable<AppLoadProgress>? progress;
+  final AnimationController controller;
+  final bool dark;
+  final Color muted;
+
+  static const double _barWidth = 220;
+
+  @override
+  Widget build(BuildContext context) {
+    final listenable = progress;
+    if (listenable == null) {
+      return _bar(const AppLoadProgress.indeterminate(''));
+    }
+    return ValueListenableBuilder<AppLoadProgress>(
+      valueListenable: listenable,
+      builder: (context, value, _) => _bar(value),
+    );
+  }
+
+  Widget _bar(AppLoadProgress state) {
+    final track = dark ? Colors.white12 : Colors.black12;
+    return Column(
+      mainAxisSize: MainAxisSize.min,
+      children: [
+        SizedBox(
+          width: _barWidth,
+          height: 6,
+          child: ClipRRect(
+            borderRadius: BorderRadius.circular(999),
+            child: Container(
+              color: track,
+              child: state.isDeterminate
+                  // Określony postęp: pasek dopełza do nowej wartości, żeby
+                  // skoki między etapami nie migały.
+                  ? TweenAnimationBuilder<double>(
+                      tween: Tween<double>(
+                          begin: 0, end: state.value.clamp(0.0, 1.0)),
+                      duration: const Duration(milliseconds: 280),
+                      curve: Curves.easeOut,
+                      builder: (context, value, _) => Align(
+                        alignment: Alignment.centerLeft,
+                        child: FractionallySizedBox(
+                          widthFactor: value <= 0 ? 0.001 : value,
+                          child: DecoratedBox(
+                            decoration: BoxDecoration(
+                              gradient: LinearGradient(
+                                colors: [
+                                  TrainerSplashScreen._mint
+                                      .withValues(alpha: 0.75),
+                                  TrainerSplashScreen._mint,
+                                ],
+                              ),
+                            ),
+                          ),
+                        ),
+                      ),
+                    )
+                  : AnimatedBuilder(
+                      animation: controller,
+                      builder: (context, _) => CustomPaint(
+                        painter: _SplashBarPainter(
+                          progress: controller.value,
+                          trackColor: track,
+                          accent: TrainerSplashScreen._mint,
+                        ),
+                      ),
+                    ),
+            ),
+          ),
+        ),
+        if (state.label.isNotEmpty) ...[
+          const SizedBox(height: 10),
+          SizedBox(
+            width: _barWidth + 60,
+            child: Text(
+              state.isDeterminate
+                  ? '${state.percent}% · ${state.label}'
+                  : state.label,
+              textAlign: TextAlign.center,
+              maxLines: 2,
+              overflow: TextOverflow.ellipsis,
+              style: TextStyle(
+                fontSize: 11,
+                height: 1.3,
+                fontWeight: FontWeight.w600,
+                color: muted,
+              ),
+            ),
+          ),
+        ],
+      ],
+    );
+  }
+}
+
+/// Rysuje nieokreślony pasek ładowania: tło + przesuwający się segment.
 class _SplashBarPainter extends CustomPainter {
-  const _SplashBarPainter({required this.progress, required this.trackColor, required this.accent});
+  const _SplashBarPainter(
+      {required this.progress, required this.trackColor, required this.accent});
 
   final double progress;
   final Color trackColor;
@@ -146,12 +271,18 @@ class _SplashBarPainter extends CustomPainter {
     final rect = Rect.fromLTWH(left, 0, segmentWidth, size.height);
     final gradient = Paint()
       ..shader = LinearGradient(
-        colors: [accent.withValues(alpha: 0), accent, accent.withValues(alpha: 0)],
+        colors: [
+          accent.withValues(alpha: 0),
+          accent,
+          accent.withValues(alpha: 0)
+        ],
       ).createShader(rect);
     canvas.drawRect(rect, gradient);
   }
 
   @override
   bool shouldRepaint(_SplashBarPainter oldDelegate) =>
-      oldDelegate.progress != progress || oldDelegate.trackColor != trackColor || oldDelegate.accent != accent;
+      oldDelegate.progress != progress ||
+      oldDelegate.trackColor != trackColor ||
+      oldDelegate.accent != accent;
 }

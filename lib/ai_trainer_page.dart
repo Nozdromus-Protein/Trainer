@@ -28,6 +28,20 @@ class AiTrainerPage extends StatefulWidget {
 class _AiTrainerPageState extends State<AiTrainerPage> {
   final TextEditingController _controller = TextEditingController();
   final ScrollController _scrollController = ScrollController();
+  final List<AiChatAttachment> _pendingAttachments = <AiChatAttachment>[];
+  bool _wakeRequested = false;
+
+  @override
+  void didChangeDependencies() {
+    super.didChangeDependencies();
+    // Budzimy uśpiony backend już przy wejściu na czat — zanim padnie
+    // pierwsze pytanie, instancja zwykle zdąży wstać.
+    if (!_wakeRequested) {
+      _wakeRequested = true;
+      final store = AppScope.of(context);
+      unawaited(AiBackendService(store.settings.backendUrl).wake());
+    }
+  }
 
   @override
   void dispose() {
@@ -39,10 +53,20 @@ class _AiTrainerPageState extends State<AiTrainerPage> {
   void _send(String text) {
     final store = AppScope.of(context);
     final trimmed = text.trim();
-    if (trimmed.isEmpty || store.aiChatBusy) return;
+    if ((trimmed.isEmpty && _pendingAttachments.isEmpty) || store.aiChatBusy) {
+      return;
+    }
+    final attachments = List<AiChatAttachment>.from(_pendingAttachments);
     _controller.clear();
-    store.chatWithAi(trimmed);
+    setState(_pendingAttachments.clear);
+    store.chatWithAi(trimmed, attachments: attachments);
     Future.delayed(const Duration(milliseconds: 200), _scrollToBottom);
+  }
+
+  Future<void> _addAttachments() async {
+    final picked = await pickAiChatAttachments(context);
+    if (picked.isEmpty || !mounted) return;
+    setState(() => _pendingAttachments.addAll(picked));
   }
 
   void _scrollToBottom() {
@@ -206,6 +230,13 @@ class _AiTrainerPageState extends State<AiTrainerPage> {
             ),
           ),
 
+        // Załączniki czekające na wysyłkę
+        AiAttachmentTray(
+          attachments: _pendingAttachments,
+          onRemove: (index) =>
+              setState(() => _pendingAttachments.removeAt(index)),
+        ),
+
         // Input
         SafeArea(
           top: false,
@@ -213,6 +244,12 @@ class _AiTrainerPageState extends State<AiTrainerPage> {
             padding: const EdgeInsets.fromLTRB(16, 8, 16, 12),
             child: Row(
               children: [
+                IconButton(
+                  key: const Key('ai_trainer_attach'),
+                  tooltip: 'Dodaj zdjęcie albo plik tekstowy',
+                  onPressed: store.aiChatBusy ? null : _addAttachments,
+                  icon: const Icon(Icons.attach_file),
+                ),
                 Expanded(
                   child: TextField(
                     controller: _controller,
@@ -304,7 +341,17 @@ class _ChatBubble extends StatelessWidget {
                   bottomRight: Radius.circular(isUser ? 4 : 18),
                 ),
               ),
-              child: Text(message.content, style: TextStyle(color: textColor, fontSize: 14, height: 1.45)),
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  Text(message.content,
+                      style: TextStyle(
+                          color: textColor, fontSize: 14, height: 1.45)),
+                  AiAttachmentBadges(
+                      attachments: message.attachments, textColor: textColor),
+                ],
+              ),
             ),
           ),
           if (isUser) const SizedBox(width: 6),

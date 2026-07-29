@@ -5,9 +5,13 @@ import 'package:licznik_treningu/features/trainer/application/weekly_training_pl
 void main() {
   // 2026-01-05 to poniedziałek.
   final monday = DateTime(2026, 1, 5);
+  // Ten plik opisuje ROZKŁAD DWUTOROWY (partia główna + dodatek). Domyślną
+  // strategią aplikacji jest Push / Pull / Legs, więc podajemy ją tu wprost.
+  const twoTrack = TrainingSplitStrategy.twoTrack;
   const config = TrainingScheduleConfig(
     enabled: true,
     trainingWeekdays: [1, 2, 3, 4, 5, 6],
+    strategy: twoTrack,
   );
 
   TrainingFocusArea? areaOn(DateTime date) =>
@@ -54,7 +58,7 @@ void main() {
       final withSunday = TrainingScheduleConfig(
         enabled: true,
         weekdayPlans: {
-          ...defaultWeekPlan(const [1, 2, 3, 4, 5, 6]),
+          ...defaultWeekPlan(const [1, 2, 3, 4, 5, 6], strategy: twoTrack),
           7: const TrainingDayPlan(
               primary: TrainingFocusArea.legs,
               secondary: TrainingFocusArea.cardio),
@@ -165,7 +169,7 @@ void main() {
 
   group('Domyślny plan tygodnia', () {
     test('każda duża partia wypada co najmniej raz', () {
-      final plan = defaultWeekPlan(const [1, 2, 3, 4, 5, 6]);
+      final plan = defaultWeekPlan(const [1, 2, 3, 4, 5, 6], strategy: twoTrack);
       final primaries = plan.values.map((p) => p.primary).toSet();
       for (final area in kPrimaryFocusAreas) {
         expect(primaries, contains(area));
@@ -176,6 +180,7 @@ void main() {
       const week = TrainingScheduleConfig(
         enabled: true,
         trainingWeekdays: [1, 2, 3, 4, 5, 6, 7],
+        strategy: twoTrack,
       );
       final twice = [
         for (final area in kPrimaryFocusAreas)
@@ -185,8 +190,8 @@ void main() {
     });
 
     test('skrajne wartości nie wysypują funkcji', () {
-      expect(defaultWeekPlan(const []).values.every((p) => p.isRest), isTrue);
-      expect(defaultWeekPlan(const [1, 2, 3, 4, 5, 6, 7, 9]), hasLength(7));
+      expect(defaultWeekPlan(const [], strategy: twoTrack).values.every((p) => p.isRest), isTrue);
+      expect(defaultWeekPlan(const [1, 2, 3, 4, 5, 6, 7, 9], strategy: twoTrack), hasLength(7));
     });
   });
 
@@ -227,6 +232,7 @@ void main() {
     test('round-trip zachowuje plan tygodnia i dni', () {
       final cfg = TrainingScheduleConfig(
         enabled: true,
+        strategy: twoTrack,
         anchor: DateTime(2026, 7, 21),
         weekdayPlans: const {
           1: TrainingDayPlan(
@@ -248,6 +254,7 @@ void main() {
     test('stary zapis rotacji nie przepada (migracja)', () {
       const legacy = TrainingScheduleConfig(
         enabled: true,
+        strategy: twoTrack,
         rotationKeys: ['legs', 'chestTriceps'],
         trainingWeekdays: [1, 3],
       );
@@ -261,6 +268,7 @@ void main() {
     test('stary obszar z niewłaściwego toru jest przenoszony bez utraty', () {
       const legacy = TrainingScheduleConfig(
         enabled: true,
+        strategy: twoTrack,
         rotationKeys: ['shoulders', 'legs'],
         trainingWeekdays: [1, 3],
       );
@@ -273,6 +281,7 @@ void main() {
 
     test('zamienione tory w planie dnia są automatycznie naprawiane', () {
       const config = TrainingScheduleConfig(
+        strategy: twoTrack,
         weekdayPlans: {
           1: TrainingDayPlan(
             primary: TrainingFocusArea.shoulders,

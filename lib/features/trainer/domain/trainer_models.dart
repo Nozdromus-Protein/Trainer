@@ -21,3 +21,4 @@ export 'training_impact.dart';
 export 'workout_plan.dart';
 export 'workout_session.dart';
 export 'workout_set.dart';
+export 'workout_volume_limits.dart';
