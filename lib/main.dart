@@ -459,6 +459,85 @@ const List<TrainerThemeStyle> kTrainerThemeStyles = [
     cardLight: 0xFFFFFFFF,
     backgroundStyle: 'aurora',
   ),
+  // — Nowa fala motywów (2026-07): mocniejsze charaktery + nowe tła —
+  TrainerThemeStyle(
+    id: 'ember_forge',
+    name: 'Ember / Forge',
+    description: 'Rozżarzone węgle — pomarańcz i czerwień od dołu',
+    accent: 0xFFFF6B35,
+    secondaryAccent: 0xFFFFB627,
+    preferDark: true,
+    scaffoldDark: 0xFF120806,
+    cardDark: 0xFF1E100B,
+    scaffoldLight: 0xFFFFF3ED,
+    cardLight: 0xFFFFFFFF,
+    backgroundStyle: 'ember',
+  ),
+  TrainerThemeStyle(
+    id: 'circuit_tech',
+    name: 'Circuit / Tech',
+    description: 'Cyjan na płytce PCB — technologiczny sznyt',
+    accent: 0xFF00E5FF,
+    secondaryAccent: 0xFF7C4DFF,
+    preferDark: true,
+    scaffoldDark: 0xFF06101A,
+    cardDark: 0xFF0C1A28,
+    scaffoldLight: 0xFFEDF9FC,
+    cardLight: 0xFFFFFFFF,
+    backgroundStyle: 'circuit',
+  ),
+  TrainerThemeStyle(
+    id: 'trail_topo',
+    name: 'Trail / Topo',
+    description: 'Warstwice mapy i leśna zieleń — dla biegaczy',
+    accent: 0xFF4CAF50,
+    secondaryAccent: 0xFFCDDC39,
+    preferDark: false,
+    scaffoldLight: 0xFFF2F7EE,
+    cardLight: 0xFFFFFFFF,
+    scaffoldDark: 0xFF0E140E,
+    cardDark: 0xFF17201A,
+    backgroundStyle: 'topo',
+  ),
+  TrainerThemeStyle(
+    id: 'crimson_beast',
+    name: 'Crimson Beast',
+    description: 'Agresywna czerwień na czerni — dzień PR-ów',
+    accent: 0xFFFF1744,
+    secondaryAccent: 0xFFFF8A65,
+    preferDark: true,
+    scaffoldDark: 0xFF0A0507,
+    cardDark: 0xFF160A0E,
+    scaffoldLight: 0xFFFFF2F4,
+    cardLight: 0xFFFFFFFF,
+    backgroundStyle: 'plates',
+  ),
+  TrainerThemeStyle(
+    id: 'teal_titan',
+    name: 'Teal Titan',
+    description: 'Głęboki turkus z bursztynem — chłodno i pewnie',
+    accent: 0xFF1DE9B6,
+    secondaryAccent: 0xFFFFC400,
+    preferDark: true,
+    scaffoldDark: 0xFF06120F,
+    cardDark: 0xFF0D1F1A,
+    scaffoldLight: 0xFFECFAF5,
+    cardLight: 0xFFFFFFFF,
+    backgroundStyle: 'depth',
+  ),
+  TrainerThemeStyle(
+    id: 'porcelain_calm',
+    name: 'Porcelana',
+    description: 'Bardzo jasny, spokojny — indygo na porcelanie',
+    accent: 0xFF3F51B5,
+    secondaryAccent: 0xFF80DEEA,
+    preferDark: false,
+    scaffoldLight: 0xFFF7F8FC,
+    cardLight: 0xFFFFFFFF,
+    scaffoldDark: 0xFF101218,
+    cardDark: 0xFF191C25,
+    backgroundStyle: 'dots',
+  ),
 ];
 
 TrainerThemeStyle themeStyleById(String id) {
@@ -1004,6 +1083,62 @@ class TrainerThemedBackgroundPainter extends CustomPainter {
         }
         _glow(canvas, Offset(w * 0.1, h * 0.08), w * 0.55, primary, 0.14);
         _glow(canvas, Offset(w * 0.95, h * 0.95), w * 0.5, secondary, 0.12);
+        break;
+      case 'ember':
+        // Rozżarzone węgle: ciepłe poświaty od dołu + iskry.
+        _glow(canvas, Offset(w * 0.5, h * 1.05), w * 1.05, primary, 0.28);
+        _glow(canvas, Offset(w * 0.2, h * 0.95), w * 0.5, secondary, 0.18);
+        _glow(canvas, Offset(w * 0.85, h * 0.9), w * 0.45, primary, 0.16);
+        final spark = Paint()..color = primary.withValues(alpha: _alpha(0.5));
+        for (var i = 0; i < 26; i++) {
+          final sx = ((i * 61) % 89) / 89 * w;
+          final sy = h - ((i * 97) % 83) / 83 * h * 0.7;
+          canvas.drawCircle(Offset(sx, sy), (i % 4 == 0) ? 1.8 : 1.0, spark);
+        }
+        break;
+      case 'circuit':
+        // Ścieżki jak na płytce PCB: kąty proste + węzły-punkty lutownicze.
+        final trace = Paint()
+          ..style = PaintingStyle.stroke
+          ..strokeWidth = 1.4
+          ..strokeCap = StrokeCap.round
+          ..color = primary.withValues(alpha: _alpha(0.16));
+        final node = Paint()..color = secondary.withValues(alpha: _alpha(0.22));
+        for (var i = 0; i < 7; i++) {
+          final y = h * (0.08 + i * 0.13);
+          final midX = w * (0.2 + (i % 3) * 0.28);
+          final path = Path()
+            ..moveTo(-10, y)
+            ..lineTo(midX, y)
+            ..lineTo(midX, y + h * 0.07)
+            ..lineTo(w + 10, y + h * 0.07);
+          canvas.drawPath(path, trace);
+          canvas.drawCircle(Offset(midX, y), 2.6, node);
+        }
+        _glow(canvas, Offset(w * 0.9, h * 0.1), w * 0.5, secondary, 0.12);
+        break;
+      case 'topo':
+        // Warstwice mapy topograficznej — koncentryczne, nieregularne pierścienie.
+        for (var i = 1; i <= 7; i++) {
+          canvas.drawCircle(
+            Offset(w * 0.32, h * 0.42),
+            w * 0.10 * i,
+            Paint()
+              ..style = PaintingStyle.stroke
+              ..strokeWidth = 1.3
+              ..color = primary.withValues(alpha: _alpha(0.10)),
+          );
+        }
+        for (var i = 1; i <= 6; i++) {
+          canvas.drawCircle(
+            Offset(w * 0.88, h * 0.82),
+            w * 0.11 * i,
+            Paint()
+              ..style = PaintingStyle.stroke
+              ..strokeWidth = 1.3
+              ..color = secondary.withValues(alpha: _alpha(0.09)),
+          );
+        }
         break;
       default:
         _glow(canvas, Offset(w * 0.15, h * 0.10), w * 0.6, primary, 0.18);
@@ -6962,8 +7097,14 @@ class AppStore extends ChangeNotifier {
               prettyJson(result))
           .toString()
           .trim();
+      // Backend przełącza się na GPT, gdy Gemini wyczerpie limit. Cicha zmiana
+      // silnika (i stylu odpowiedzi) byłaby myląca, więc mówimy o niej wprost.
+      final fallbackFrom = result['fallbackFrom']?.toString() ?? '';
+      final content = fallbackFrom == 'gemini'
+          ? '$reply\n\n(Odpowiedział GPT — Gemini nie miał już wolnego limitu.)'
+          : reply;
       aiChatHistory.add(AiChatMessage(
-          role: 'assistant', content: reply, timestamp: DateTime.now()));
+          role: 'assistant', content: content, timestamp: DateTime.now()));
     } catch (e) {
       // Backend niedostępny → spróbuj odpowiedzieć lokalnie na podstawie
       // realnych danych aplikacji (regeneracja, planer, kcal, kroki).
@@ -7355,6 +7496,11 @@ ProgressionSuggestion? progressionSuggestionForExercise({
 
 // --- Etap 17: AI analiza treningu ---
 
+/// Drobny helper czytelności: „weź to, a jak puste — policz zamiennik".
+extension _StringFallback on String {
+  String ifEmpty(String Function() fallback) => trim().isEmpty ? fallback() : this;
+}
+
 class WorkoutAiAnalysis {
   const WorkoutAiAnalysis({
     required this.sessionId,
@@ -7389,6 +7535,17 @@ class WorkoutAiAnalysis {
       return '';
     }
 
+    // Pierwsza sugestia z listy — degradacja, gdy backend nie zwrócił pola
+    // „co poprawić" wprost (starsze wdrożenie oddaje tylko `suggestions`).
+    String firstSuggestion() {
+      final v = result['suggestions'];
+      if (v is List && v.isNotEmpty) {
+        final first = v.first?.toString().trim() ?? '';
+        return first;
+      }
+      return '';
+    }
+
     final raw = (result['summary'] ??
             result['analysis'] ??
             result['message'] ??
@@ -7407,18 +7564,32 @@ class WorkoutAiAnalysis {
         'co_poprawic',
         'improvements',
         'weaknesses',
-        'poprawic'
-      ]),
+        'poprawic',
+      ]).ifEmpty(firstSuggestion),
       increaseWeight: pick([
         'increase_weight',
         'zwiekszac_ciezar',
         'weight_recommendation',
         'ciezar'
       ]),
-      fatigueWarning:
-          pick(['fatigue_warning', 'zmeczenie', 'recovery', 'regeneracja']),
-      nextStep: pick(
-          ['next_step', 'nastepny_krok', 'recommendation', 'next', 'sugestia']),
+      // Backend oddaje `recovery_advice`; stara lista łapała tylko `recovery`.
+      fatigueWarning: pick([
+        'fatigue_warning',
+        'zmeczenie',
+        'recovery_advice',
+        'recovery',
+        'regeneracja'
+      ]),
+      // `next_training_hint` to pole starszego backendu — bez niego „Następny
+      // krok" był pusty, choć dane były.
+      nextStep: pick([
+        'next_step',
+        'nastepny_krok',
+        'next_training_hint',
+        'recommendation',
+        'next',
+        'sugestia'
+      ]),
       rawSummary: raw,
     );
   }
