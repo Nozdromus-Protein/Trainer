@@ -25,6 +25,11 @@ app.add_middleware(
 
 AI_PROVIDER = os.environ.get("AI_PROVIDER", "gemini").strip().lower()
 
+# Łańcuch providerów dla CZATU (asystent AI). Osobny od AI_PROVIDER, bo
+# analizy i czat mają inny profil kosztów: rozmowa ma najpierw wyczerpać
+# darmową pulę Gemini, a po GPT sięgać dopiero, gdy Gemini odmówi.
+CHAT_AI_PROVIDER = os.environ.get("CHAT_AI_PROVIDER", "gemini_then_openai").strip().lower()
+
 OPENAI_API_KEY = os.environ.get("OPENAI_API_KEY", "").strip()
 OPENAI_MODEL = os.environ.get("OPENAI_MODEL", "gpt-5.4-mini").strip()
 
@@ -750,6 +755,12 @@ Zwróć WYŁĄCZNIE poprawny JSON, bez markdown i bez komentarzy.
 Format:
 {{
   "summary": "krótkie podsumowanie treningu po polsku",
+  "ocena": "jednozdaniowa ocena treningu (np. 'Solidny trening pchania, 8/10')",
+  "co_poszlo_dobrze": "co w tym treningu było dobre — konkretnie",
+  "co_poprawic": "co poprawić następnym razem — konkretnie",
+  "zwiekszac_ciezar": "czy i gdzie zwiększyć ciężar/trudność, albo dlaczego zostać",
+  "zmeczenie": "ocena zmęczenia/regeneracji i ewentualne ostrzeżenie (pomiń, gdy brak sygnałów)",
+  "nastepny_krok": "jeden konkretny następny krok",
   "estimated_calories": liczba_kcal,
   "training_type": "siłowy/kardio/mieszany/mobilność",
   "intensity": "niska/średnia/wysoka",
@@ -776,6 +787,7 @@ Format:
 }}
 
 Zasady:
+- Pola "ocena", "co_poszlo_dobrze", "co_poprawic", "zwiekszac_ciezar", "nastepny_krok" MUSISZ wypełnić — to główna karta w aplikacji. Każde jednym zwięzłym zdaniem.
 - Jeśli opis jest niepełny, oszacuj rozsądnie, ale zaznacz to w summary albo suggestions.
 - Nie diagnozuj medycznie.
 - Jeżeli użytkownik wspomina ból, daj ostrożną uwagę i zasugeruj przerwanie ćwiczenia, zmniejszenie obciążenia albo konsultację ze specjalistą.
@@ -908,8 +920,34 @@ def normalize_workout_analysis_result(raw: dict) -> dict:
             "estimated_calories": clamp_int(item.get("estimated_calories") or item.get("calories"), 0, 0, 5000),
         })
 
+    # Pola karty coachingowej — aplikacja pokazuje je jako punkty (Ocena,
+    # Co poszło dobrze, ...). Gdy model ich nie zwróci, degradujemy się do
+    # danych analitycznych: pierwsza sugestia jako "co poprawić", rada
+    # regeneracyjna jako zmęczenie, podpowiedź jako następny krok.
+    suggestions = to_str_list(raw.get("suggestions"), [])
+    next_hint = str(raw.get("next_training_hint") or "").strip()
+    recovery = str(raw.get("recovery_advice") or "").strip()
+    ocena = str(raw.get("ocena") or raw.get("rating") or "").strip()
+    co_dobrze = str(raw.get("co_poszlo_dobrze") or raw.get("went_well") or "").strip()
+    co_poprawic = str(
+        raw.get("co_poprawic")
+        or raw.get("improvable")
+        or (suggestions[0] if suggestions else "")
+    ).strip()
+    zwiekszac = str(raw.get("zwiekszac_ciezar") or raw.get("increase_weight") or "").strip()
+    zmeczenie = str(raw.get("zmeczenie") or raw.get("fatigue_warning") or recovery).strip()
+    nastepny = str(
+        raw.get("nastepny_krok") or raw.get("next_step") or next_hint
+    ).strip()
+
     return {
         "summary": str(raw.get("summary") or raw.get("note") or "Analiza treningu gotowa."),
+        "ocena": ocena,
+        "co_poszlo_dobrze": co_dobrze,
+        "co_poprawic": co_poprawic,
+        "zwiekszac_ciezar": zwiekszac,
+        "zmeczenie": zmeczenie,
+        "nastepny_krok": nastepny,
         "estimated_calories": clamp_int(raw.get("estimated_calories") or raw.get("calories"), 0, 0, 5000),
         "training_type": str(raw.get("training_type") or raw.get("type") or "mieszany"),
         "intensity": str(raw.get("intensity") or "średnia"),
@@ -1151,7 +1189,14 @@ async def generate_text_json(
             return await generate_text_json_with_gemini(prompt, images=images)
         except Exception as gemini_error:
             print("GEMINI TRAINER PADLO, PROBUJE OPENAI:", gemini_error)
-            return await generate_text_json_with_openai(prompt, images=images)
+            if not OPENAI_API_KEY:
+                raise
+            result = await generate_text_json_with_openai(prompt, images=images)
+            # Ślad przełączenia — aplikacja może o tym powiedzieć zamiast po
+            # cichu zmieniać silnik (i jakość) odpowiedzi.
+            if isinstance(result, dict):
+                result["fallbackFrom"] = "gemini"
+            return result
 
     raise RuntimeError(f"Nieznany provider AI: {provider}. Ustaw openai, gpt, gemini, openai_then_gemini albo gemini_then_openai.")
 
@@ -1383,7 +1428,10 @@ async def trainer_chat(req: TrainerChatRequest):
         prompt = build_trainer_chat_prompt(req, attachments_section)
         raw = await generate_text_json(
             prompt,
-            req.ai_provider or req.provider,
+            # Czat ma WŁASNY łańcuch: najpierw Gemini (darmowa pula, rotacja
+            # 4 kluczy i modeli), a gdy cała ta rotacja padnie — OpenAI.
+            # Analizy dalej chodzą po AI_PROVIDER.
+            req.ai_provider or req.provider or CHAT_AI_PROVIDER,
             images=images,
         )
         reply = str(
@@ -1397,6 +1445,7 @@ async def trainer_chat(req: TrainerChatRequest):
             "reply": reply,
             "aiProvider": raw.get("aiProvider"),
             "aiModel": raw.get("aiModel"),
+            "fallbackFrom": raw.get("fallbackFrom", ""),
         }
     except Exception as error:
         error_text = str(error)
