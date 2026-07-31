@@ -36,6 +36,16 @@ enum MuscleGroup {
     if (normalized.contains('biceps')) return MuscleGroup.biceps;
     if (normalized.contains('triceps')) return MuscleGroup.triceps;
     if (normalized.contains('przedram')) return MuscleGroup.forearms;
+    // Łydki PRZED brzuchem: „mięsień brzuchaty łydki" (gastrocnemius) zawiera
+    // podciąg „brzuch", więc bez tej kolejności łydka lądowała w core.
+    if (normalized.contains('lydk') ||
+        normalized.contains('łydk') ||
+        normalized.contains('calf') ||
+        normalized.contains('brzuchaty') ||
+        normalized.contains('plaszczkowat') ||
+        normalized.contains('płaszczkowat')) {
+      return MuscleGroup.calves;
+    }
     if (normalized.contains('brzuch') ||
         normalized.contains('core') ||
         normalized.contains('stabil')) {

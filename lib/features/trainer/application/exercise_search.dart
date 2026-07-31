@@ -112,6 +112,27 @@ List<String> translateQueryTerms(String query) {
   ];
 }
 
+/// Czy ćwiczenie pasuje do frazy z wyszukiwarki — sprawdza NAZWĘ, KATEGORIĘ,
+/// PARTIE MIĘŚNIOWE i SPRZĘT, z normalizacją diakrytyków i synonimami PL↔EN.
+///
+/// Do filtrowania w arkuszach wyboru ćwiczenia (dodaj/zamień): przy pustym
+/// zapytaniu przepuszcza wszystko, więc chip partii może działać samodzielnie.
+/// Dzięki wpięciu partii do haystacka wpisanie „plecy" albo „biceps" znajduje
+/// ćwiczenia po partii, nie tylko po nazwie.
+bool exerciseMatchesQuery(Exercise exercise, String query) {
+  final normalized = normalizeSearchText(query);
+  if (normalized.isEmpty) return true;
+  final phrases = <String>{normalized};
+  for (final term in translateQueryTerms(query)) {
+    phrases.add(normalizeSearchText(term));
+  }
+  final haystack = normalizeSearchText(
+    '${exercise.name} ${exercise.category} '
+    '${exercise.muscles.join(' ')} ${exercise.equipment}',
+  );
+  return phrases.any((phrase) => phrase.isNotEmpty && haystack.contains(phrase));
+}
+
 /// Wyszukiwanie w lokalnej bazie ćwiczeń: nazwa, kategoria, partie, sprzęt,
 /// z obsługą polskich i angielskich fraz (synonimy w obie strony).
 List<Exercise> searchLocalExercises(String query, List<Exercise> exercises) {

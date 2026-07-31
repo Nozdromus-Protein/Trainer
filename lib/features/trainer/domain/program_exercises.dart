@@ -873,6 +873,606 @@ final List<Exercise> _cardio = [
       ]),
 ];
 
+// ═══════════════════════════════════════════════════════════════════════════
+// NOWA PULA ĆWICZEŃ (rozbudowa bazy) — min. 5 zamienników na partię, mix:
+// masa ciała / hantle / sztanga / kettlebell / guma / maszyna. Sprzęt jest
+// otagowany zgodnie z filtrem (kExerciseEquipmentOptions dla wieloczłonowego),
+// żeby ćwiczenia na maszynie/wyciągu NIE pojawiały się bez zaznaczenia sprzętu.
+// ═══════════════════════════════════════════════════════════════════════════
+
+final List<Exercise> _chestExtra = [
+  _reps('floor_db_press', 'Wyciskanie hantli leżąc na podłodze',
+      'Klatka piersiowa',
+      equipment: 'hantle', level: 'Początkujący', sets: 4, reps: 10, met: 4.8,
+      illustration: 'benchPress',
+      description:
+          'Wyciskanie hantli w leżeniu na podłodze — łokcie zatrzymują się na ziemi, co chroni barki. Świetne bez ławki.',
+      impacts: [
+        _pri(BodyMuscle.chest),
+        _sec(BodyMuscle.triceps),
+        _sec(BodyMuscle.frontShoulders)
+      ]),
+  _reps('wide_pushup', 'Pompki szerokie', 'Klatka piersiowa',
+      level: 'Początkujący', sets: 3, reps: 15, met: 4.0, illustration: 'pushup',
+      description:
+          'Pompki z dłońmi szerzej niż barki — mocniej angażują klatkę. Utrzymuj napięty korpus w jednej linii.',
+      impacts: [
+        _pri(BodyMuscle.chest),
+        _sec(BodyMuscle.frontShoulders),
+        _sec(BodyMuscle.triceps)
+      ]),
+  _reps('archer_pushup', 'Pompki łucznika', 'Klatka piersiowa',
+      level: 'Zaawansowany', sets: 3, reps: 8, met: 5.0, illustration: 'pushup',
+      description:
+          'Pompka z przenoszeniem ciężaru na jedną rękę, druga wyprostowana. Mocny, jednostronny bodziec bez sprzętu.',
+      impacts: [
+        _pri(BodyMuscle.chest),
+        _sec(BodyMuscle.triceps),
+        _sec(BodyMuscle.frontShoulders),
+        _stab(BodyMuscle.abs)
+      ]),
+  _reps('band_chest_press', 'Wyciskanie klatki z gumą', 'Klatka piersiowa',
+      equipment: 'guma oporowa', level: 'Początkujący', sets: 3, reps: 15,
+      met: 4.0, illustration: 'chestPress',
+      description:
+          'Guma zaczepiona za plecami, wypychanie ramion przed siebie. Płynny opór i pełen zakres — dobre na rozgrzewkę i objętość.',
+      impacts: [
+        _pri(BodyMuscle.chest),
+        _sec(BodyMuscle.triceps),
+        _sec(BodyMuscle.frontShoulders)
+      ]),
+  _reps('svend_press', 'Svend press (ściskanie talerza)', 'Klatka piersiowa',
+      equipment: 'hantel', level: 'Początkujący', sets: 3, reps: 15, met: 3.8,
+      illustration: 'chestPress',
+      description:
+          'Ściskaj obciążenie płasko między dłońmi i wypychaj przed siebie. Mocno napina wewnętrzną część klatki.',
+      impacts: [_pri(BodyMuscle.chest), _sec(BodyMuscle.frontShoulders)]),
+  _reps('machine_chest_press', 'Wyciskanie na maszynie', 'Klatka piersiowa',
+      equipment: 'maszyna', level: 'Początkujący', sets: 4, reps: 12, met: 4.5,
+      illustration: 'chestPress',
+      description:
+          'Prowadzony tor wyciskania na maszynie — stabilnie i bezpiecznie, dobre do dokładania objętości.',
+      impacts: [
+        _pri(BodyMuscle.chest),
+        _sec(BodyMuscle.triceps),
+        _sec(BodyMuscle.frontShoulders)
+      ]),
+  _reps('cable_crossover', 'Krzyżowanie linek wyciągu', 'Klatka piersiowa',
+      equipment: 'wyciąg', level: 'Średniozaawansowany', sets: 3, reps: 14,
+      met: 4.2, illustration: 'chestPress',
+      description:
+          'Ściąganie uchwytów wyciągu przed sobą po łuku. Stały naciąg klatki w całym zakresie ruchu.',
+      impacts: [_pri(BodyMuscle.chest), _sec(BodyMuscle.frontShoulders)]),
+];
+
+final List<Exercise> _backExtra = [
+  _reps('db_single_row', 'Wiosłowanie hantlą jednorącz', 'Plecy',
+      equipment: 'hantel', level: 'Początkujący', sets: 4, reps: 10, met: 5.0,
+      illustration: 'row',
+      description:
+          'Kolano i dłoń na podparciu, drugą ręką przyciągaj hantel do biodra. Klasyczny budulec grubości pleców.',
+      impacts: [
+        _pri(BodyMuscle.lats),
+        _sec(BodyMuscle.upperBack),
+        _sec(BodyMuscle.biceps),
+        _sec(BodyMuscle.rearShoulders)
+      ]),
+  _reps('band_row', 'Wiosłowanie z gumą', 'Plecy',
+      equipment: 'guma oporowa', level: 'Początkujący', sets: 3, reps: 15,
+      met: 4.2, illustration: 'row',
+      description:
+          'Guma zaczepiona nisko, przyciągaj łokcie do tułowia ściągając łopatki. Dobre na start i objętość.',
+      impacts: [
+        _pri(BodyMuscle.lats),
+        _sec(BodyMuscle.upperBack),
+        _sec(BodyMuscle.biceps)
+      ]),
+  _reps('band_seated_row', 'Wiosłowanie siedząc z gumą', 'Plecy',
+      equipment: 'guma oporowa', level: 'Początkujący', sets: 3, reps: 15,
+      met: 4.0, illustration: 'row',
+      description:
+          'Siad z gumą na stopach, przyciągaj uchwyty do brzucha. Ściągaj łopatki i trzymaj wyprostowane plecy.',
+      impacts: [
+        _pri(BodyMuscle.upperBack),
+        _sec(BodyMuscle.lats),
+        _sec(BodyMuscle.biceps)
+      ]),
+  _reps('chest_supported_row', 'Wiosłowanie z podparciem klatki', 'Plecy',
+      equipment: 'hantle', level: 'Średniozaawansowany', sets: 4, reps: 12,
+      met: 4.8, illustration: 'row',
+      description:
+          'Klatka oparta o ławkę pod skosem, przyciągaj hantle do bioder. Eliminuje oszukiwanie plecami.',
+      impacts: [
+        _pri(BodyMuscle.upperBack),
+        _sec(BodyMuscle.lats),
+        _sec(BodyMuscle.rearShoulders),
+        _sec(BodyMuscle.biceps)
+      ]),
+  _reps('lat_pulldown_band', 'Ściąganie gumy nad głową', 'Plecy',
+      equipment: 'guma oporowa', level: 'Początkujący', sets: 3, reps: 15,
+      met: 4.0, illustration: 'pull',
+      description:
+          'Guma zaczepiona wysoko, ściągaj ją do klatki szerokim chwytem. Zastępuje ściąganie drążka, gdy nie masz wyciągu.',
+      impacts: [
+        _pri(BodyMuscle.lats),
+        _sec(BodyMuscle.biceps),
+        _sec(BodyMuscle.rearShoulders)
+      ]),
+  _reps('machine_lat_pulldown', 'Ściąganie drążka wyciągu', 'Plecy',
+      equipment: 'wyciąg', level: 'Początkujący', sets: 4, reps: 12, met: 4.6,
+      illustration: 'pull',
+      description:
+          'Ściąganie drążka wyciągu górnego do klatki. Buduje szerokość pleców w prowadzonym torze.',
+      impacts: [
+        _pri(BodyMuscle.lats),
+        _sec(BodyMuscle.biceps),
+        _sec(BodyMuscle.upperBack)
+      ]),
+  _timed('reverse_snow_angel', 'Odwrotny anioł (na brzuchu)', 'Plecy',
+      durationSec: 40, equipment: 'masa ciała', met: 3.4,
+      illustration: 'superman',
+      description:
+          'Leżąc na brzuchu prowadź proste ramiona po łuku od bioder nad głowę. Budzi tylny bark i górę pleców.',
+      impacts: [
+        _pri(BodyMuscle.rearShoulders),
+        _sec(BodyMuscle.upperBack),
+        _sec(BodyMuscle.traps)
+      ]),
+];
+
+final List<Exercise> _shouldersExtra = [
+  _reps('landmine_press', 'Wyciskanie sztangi landmine', 'Barki',
+      equipment: 'sztanga', level: 'Średniozaawansowany', sets: 4, reps: 10,
+      met: 4.8, illustration: 'shoulderPress',
+      description:
+          'Koniec sztangi w kącie, wypychaj drugi koniec po skosie nad głowę. Przyjazny dla barków wzorzec pchania.',
+      impacts: [
+        _pri(BodyMuscle.frontShoulders),
+        _sec(BodyMuscle.triceps),
+        _stab(BodyMuscle.abs)
+      ]),
+  _reps('band_lateral_raise', 'Wznosy bokiem z gumą', 'Barki',
+      equipment: 'guma oporowa', level: 'Początkujący', sets: 3, reps: 18,
+      met: 3.6, illustration: 'lateralRaise',
+      description:
+          'Stopa na gumie, unoś ramiona bokiem do linii barków. Stały naciąg boków barków bez zamachu.',
+      impacts: [_pri(BodyMuscle.frontShoulders), _stab(BodyMuscle.traps)]),
+  _reps('db_rear_delt_fly', 'Odwrotne rozpiętki (tylny bark)', 'Barki',
+      equipment: 'hantle', level: 'Początkujący', sets: 3, reps: 15, met: 3.8,
+      illustration: 'lateralRaise',
+      description:
+          'W opadzie tułowia rozwódź hantle bokiem, ściągając łopatki. Domyka barki i poprawia postawę.',
+      impacts: [
+        _pri(BodyMuscle.rearShoulders),
+        _sec(BodyMuscle.upperBack),
+        _sec(BodyMuscle.traps)
+      ]),
+  _reps('plate_front_raise', 'Wznos obciążenia przodem', 'Barki',
+      equipment: 'hantel', level: 'Początkujący', sets: 3, reps: 14, met: 3.8,
+      illustration: 'lateralRaise',
+      description:
+          'Unoś ciężar wyprostowanymi ramionami przed siebie do linii oczu. Izoluje przedni akton barku.',
+      impacts: [_pri(BodyMuscle.frontShoulders), _stab(BodyMuscle.abs)]),
+  _reps('band_face_pull', 'Face pull z gumą', 'Barki',
+      equipment: 'guma oporowa', level: 'Początkujący', sets: 3, reps: 18,
+      met: 3.6, illustration: 'row',
+      description:
+          'Guma na wysokości twarzy, przyciągaj ją do czoła rozwodząc łokcie. Zdrowie barków i mocny tylny akton.',
+      impacts: [
+        _pri(BodyMuscle.rearShoulders),
+        _sec(BodyMuscle.traps),
+        _sec(BodyMuscle.upperBack)
+      ]),
+  _timed('handstand_hold', 'Stanie na rękach przy ścianie', 'Barki',
+      durationSec: 30, equipment: 'masa ciała', level: 'Zaawansowany', met: 5.0,
+      illustration: 'generic',
+      description:
+          'Stań na rękach opierając pięty o ścianę i utrzymuj napięty korpus. Silny bodziec izometryczny na barki.',
+      impacts: [
+        _pri(BodyMuscle.frontShoulders),
+        _sec(BodyMuscle.triceps),
+        _stab(BodyMuscle.abs)
+      ]),
+];
+
+final List<Exercise> _bicepsExtra = [
+  _reps('hammer_curl_band', 'Uginanie młotkowe z gumą', 'Ramiona',
+      equipment: 'guma oporowa', level: 'Początkujący', sets: 3, reps: 15,
+      met: 3.6, illustration: 'bicepCurl',
+      description:
+          'Chwyt neutralny (kciuki w górę), uginaj przedramiona z gumą. Buduje biceps i ramienno-promieniowy.',
+      impacts: [
+        _pri(BodyMuscle.biceps),
+        _sec(BodyMuscle.forearmsFront)
+      ]),
+  _reps('spider_curl', 'Uginanie spider (na skosie klatką)', 'Ramiona',
+      equipment: 'hantle', level: 'Średniozaawansowany', sets: 3, reps: 12,
+      met: 3.8, illustration: 'bicepCurl',
+      description:
+          'Klatka oparta o skos ławki, ramiona zwisają pionowo i uginasz hantle. Maksymalne skrócenie bicepsa.',
+      impacts: [_pri(BodyMuscle.biceps)]),
+  _reps('zottman_curl', 'Uginanie Zottmana', 'Ramiona',
+      equipment: 'hantle', level: 'Średniozaawansowany', sets: 3, reps: 12,
+      met: 3.8, illustration: 'bicepCurl',
+      description:
+          'Uginaj podchwytem, na górze obróć dłonie i opuszczaj nachwytem. Biceps w górę, przedramiona w dół.',
+      impacts: [
+        _pri(BodyMuscle.biceps),
+        _sec(BodyMuscle.forearmsBack),
+        _sec(BodyMuscle.forearmsFront)
+      ]),
+  _reps('band_curl', 'Uginanie ramion z gumą', 'Ramiona',
+      equipment: 'guma oporowa', level: 'Początkujący', sets: 3, reps: 18,
+      met: 3.4, illustration: 'bicepCurl',
+      description:
+          'Stopa na gumie, uginaj ramiona z rosnącym oporem na górze. Delikatne dla łokci, dobre na objętość.',
+      impacts: [_pri(BodyMuscle.biceps)]),
+  _reps('cable_curl', 'Uginanie na wyciągu', 'Ramiona',
+      equipment: 'wyciąg', level: 'Początkujący', sets: 3, reps: 14, met: 3.6,
+      illustration: 'bicepCurl',
+      description:
+          'Stały naciąg wyciągu dolnego przez cały zakres uginania. Świetny na końcową pompę bicepsa.',
+      impacts: [_pri(BodyMuscle.biceps)]),
+  _timed('chin_up_hold', 'Zawis w zgięciu (chin-up hold)', 'Ramiona',
+      durationSec: 20, equipment: 'drążek', level: 'Średniozaawansowany',
+      met: 4.5, illustration: 'pullUp',
+      description:
+          'Podciągnij się podchwytem i utrzymaj brodę nad drążkiem. Silne izometryczne napięcie bicepsa i pleców.',
+      impacts: [
+        _pri(BodyMuscle.biceps),
+        _sec(BodyMuscle.lats),
+        _stab(BodyMuscle.forearmsFront)
+      ]),
+];
+
+final List<Exercise> _tricepsExtra = [
+  _reps('close_grip_pushup', 'Pompki wąskie', 'Ramiona',
+      level: 'Początkujący', sets: 3, reps: 12, met: 4.2, illustration: 'pushup',
+      description:
+          'Pompki z dłońmi blisko siebie pod klatką. Przenoszą akcent na triceps i wewnętrzną klatkę.',
+      impacts: [
+        _pri(BodyMuscle.triceps),
+        _sec(BodyMuscle.chest),
+        _sec(BodyMuscle.frontShoulders)
+      ]),
+  _reps('band_pushdown', 'Prostowanie ramion z gumą', 'Ramiona',
+      equipment: 'guma oporowa', level: 'Początkujący', sets: 3, reps: 18,
+      met: 3.4, illustration: 'tricepsExtension',
+      description:
+          'Guma zaczepiona wysoko, prostuj ramiona w dół trzymając łokcie przy tułowiu. Bezpieczne dla stawów.',
+      impacts: [_pri(BodyMuscle.triceps)]),
+  _reps('db_overhead_extension', 'Wyciskanie francuskie hantlem', 'Ramiona',
+      equipment: 'hantel', level: 'Początkujący', sets: 3, reps: 12, met: 3.8,
+      illustration: 'tricepsExtension',
+      description:
+          'Hantel nad głową w obu dłoniach, opuszczaj za kark i prostuj ramiona. Rozciąga i buduje długą głowę tricepsa.',
+      impacts: [_pri(BodyMuscle.triceps)]),
+  _reps('db_kickback', 'Wyprost ramienia w opadzie', 'Ramiona',
+      equipment: 'hantle', level: 'Początkujący', sets: 3, reps: 14, met: 3.6,
+      illustration: 'tricepsExtension',
+      description:
+          'W opadzie tułowia prostuj ramię w tył, ściskając triceps na końcu. Dobre na kształt i pompę.',
+      impacts: [_pri(BodyMuscle.triceps)]),
+  _reps('jm_press', 'JM press (hybryda wyciskania francuskiego)', 'Ramiona',
+      equipment: 'sztanga', level: 'Zaawansowany', sets: 4, reps: 8, met: 4.6,
+      illustration: 'benchPress',
+      description:
+          'Coś pomiędzy wyciskaniem wąsko a francuskim — sztanga schodzi do szyi po skosie. Mocny bój na masę tricepsa.',
+      impacts: [
+        _pri(BodyMuscle.triceps),
+        _sec(BodyMuscle.chest),
+        _sec(BodyMuscle.frontShoulders)
+      ]),
+  _reps('cable_pushdown', 'Prostowanie ramion na wyciągu', 'Ramiona',
+      equipment: 'wyciąg', level: 'Początkujący', sets: 3, reps: 14, met: 3.6,
+      illustration: 'tricepsExtension',
+      description:
+          'Prostuj ramiona w dół na wyciągu górnym, łokcie przy tułowiu. Klasyk na izolację tricepsa.',
+      impacts: [_pri(BodyMuscle.triceps)]),
+];
+
+final List<Exercise> _forearmsExtra = [
+  _timed('towel_hang', 'Zwis na ręczniku', 'Przedramiona',
+      durationSec: 25, equipment: 'drążek', level: 'Średniozaawansowany',
+      met: 4.0, illustration: 'deadHang',
+      description:
+          'Przełóż ręcznik przez drążek i zwisaj, trzymając jego końce. Brutalnie mocny chwyt i przedramiona.',
+      impacts: [
+        _pri(BodyMuscle.forearmsFront),
+        _stab(BodyMuscle.biceps)
+      ]),
+  _reps('wrist_curl_band', 'Zginanie nadgarstków z gumą', 'Przedramiona',
+      equipment: 'guma oporowa', level: 'Początkujący', sets: 3, reps: 20,
+      met: 3.0, illustration: 'wristCurl',
+      description:
+          'Przedramiona na udach, zginaj nadgarstki z gumą. Delikatny, wysoki zakres pod pompę przedramion.',
+      impacts: [_pri(BodyMuscle.forearmsFront)]),
+  _reps('reverse_curl_band', 'Uginanie nachwytem z gumą', 'Przedramiona',
+      equipment: 'guma oporowa', level: 'Początkujący', sets: 3, reps: 16,
+      met: 3.2, illustration: 'bicepCurl',
+      description:
+          'Uginaj ramiona nachwytem (grzbiety dłoni w górę). Mocno angażuje górę przedramion i ramienno-promieniowy.',
+      impacts: [
+        _pri(BodyMuscle.forearmsBack),
+        _sec(BodyMuscle.biceps)
+      ]),
+  _timed('plate_pinch', 'Ściskanie talerza (pinch grip)', 'Przedramiona',
+      durationSec: 30, equipment: 'hantel', level: 'Średniozaawansowany',
+      met: 3.4, illustration: 'farmerCarry',
+      description:
+          'Ściskaj obciążenie palcami z góry i utrzymaj. Buduje siłę chwytu szczypcowego i kciuka.',
+      impacts: [_pri(BodyMuscle.forearmsFront)]),
+];
+
+final List<Exercise> _coreExtra = [
+  _timed('dead_bug', 'Dead bug (martwy robak)', 'Brzuch / core',
+      durationSec: 40, equipment: 'masa ciała', met: 3.2, illustration: 'plank',
+      description:
+          'Leżąc na plecach opuszczaj przeciwną rękę i nogę, trzymając lędźwie przy podłodze. Uczy napięcia głębokiego brzucha.',
+      impacts: [
+        _pri(BodyMuscle.abs),
+        _sec(BodyMuscle.transverseAbdominis),
+        _stab(BodyMuscle.hipFlexors)
+      ]),
+  _timed('bird_dog', 'Bird dog (pies myśliwski)', 'Brzuch / core',
+      durationSec: 40, equipment: 'masa ciała', met: 3.0, illustration: 'plank',
+      description:
+          'W klęku podporzie wyprostuj przeciwną rękę i nogę, trzymając biodra równo. Stabilizacja tułowia i grzbietu.',
+      impacts: [
+        _pri(BodyMuscle.erectorSpinae),
+        _sec(BodyMuscle.glutes),
+        _stab(BodyMuscle.abs)
+      ]),
+  _reps('v_up', 'V-up (scyzoryk)', 'Brzuch / core',
+      level: 'Średniozaawansowany', sets: 3, reps: 12, met: 4.2,
+      illustration: 'crunch',
+      description:
+          'Jednocześnie unoś proste nogi i tułów, sięgając dłońmi do stóp w kształt litery V. Mocny bodziec na proste brzucha.',
+      impacts: [_pri(BodyMuscle.abs), _sec(BodyMuscle.hipFlexors)]),
+  _reps('toe_touch_crunch', 'Spięcia z dotknięciem stóp', 'Brzuch / core',
+      level: 'Początkujący', sets: 3, reps: 18, met: 3.6, illustration: 'crunch',
+      description:
+          'Nogi w górze prosto, unoś tułów sięgając do palców stóp. Izoluje górę prostego brzucha.',
+      impacts: [_pri(BodyMuscle.abs)]),
+  _timed('side_plank_reach', 'Deska bokiem z sięganiem', 'Brzuch / core',
+      durationSec: 30, equipment: 'masa ciała', level: 'Średniozaawansowany',
+      met: 3.4, illustration: 'plank',
+      description:
+          'W desce bokiem przeplataj wolną rękę pod tułowiem i wracaj. Skośne brzucha i stabilizacja barku.',
+      impacts: [
+        _pri(BodyMuscle.obliques),
+        _sec(BodyMuscle.abs),
+        _stab(BodyMuscle.glutes)
+      ]),
+  _reps('hanging_knee_raise', 'Unoszenie kolan w zwisie', 'Brzuch / core',
+      equipment: 'drążek', level: 'Średniozaawansowany', sets: 3, reps: 12,
+      met: 4.2, illustration: 'pullUp',
+      description:
+          'Wisząc na drążku unoś kolana do klatki bez bujania. Dół brzucha i mocny chwyt.',
+      impacts: [
+        _pri(BodyMuscle.abs),
+        _sec(BodyMuscle.hipFlexors),
+        _stab(BodyMuscle.forearmsFront)
+      ]),
+  _reps('cable_woodchopper', 'Drwal na wyciągu', 'Brzuch / core',
+      equipment: 'wyciąg', level: 'Średniozaawansowany', sets: 3, reps: 14,
+      met: 4.0, illustration: 'twist',
+      description:
+          'Prowadź uchwyt wyciągu po skosie od góry do biodra, obracając tułów. Dynamiczny skos i rotacja.',
+      impacts: [_pri(BodyMuscle.obliques), _sec(BodyMuscle.abs)]),
+];
+
+final List<Exercise> _legsExtra = [
+  _reps('pistol_squat_box', 'Przysiad na jednej nodze na podwyższenie', 'Nogi',
+      equipment: 'podwyższenie', level: 'Zaawansowany', sets: 3, reps: 8,
+      met: 5.0, illustration: 'squat',
+      description:
+          'Przysiad na jednej nodze z siadem na podwyższenie i wstaniem. Ogromna siła i kontrola jednonóż.',
+      impacts: [
+        _pri(BodyMuscle.quads),
+        _sec(BodyMuscle.glutes),
+        _stab(BodyMuscle.abs)
+      ]),
+  _reps('lateral_step_up', 'Wejścia bokiem na podwyższenie', 'Nogi',
+      equipment: 'podwyższenie', level: 'Początkujący', sets: 3, reps: 12,
+      met: 4.6, illustration: 'lunge',
+      description:
+          'Wchodź bokiem na skrzynię jedną nogą i schodź kontrolowanie. Uda, pośladki i stabilizacja kolana.',
+      impacts: [
+        _pri(BodyMuscle.quads),
+        _sec(BodyMuscle.glutes),
+        _sec(BodyMuscle.gluteMedius)
+      ]),
+  _reps('sissy_squat', 'Przysiad sissy', 'Nogi',
+      level: 'Zaawansowany', sets: 3, reps: 12, met: 4.4, illustration: 'squat',
+      description:
+          'Odchylaj tułów i kolana do przodu na palcach, schodząc w tył. Intensywnie rozciąga i buduje czworogłowe.',
+      impacts: [_pri(BodyMuscle.quads), _stab(BodyMuscle.abs)]),
+  _reps('lateral_lunge', 'Wykrok w bok', 'Nogi',
+      level: 'Początkujący', sets: 3, reps: 12, met: 4.4, illustration: 'lunge',
+      description:
+          'Zrób szeroki krok w bok i usiądź na jednej nodze, druga prosta. Uda, pośladki i przywodziciele.',
+      impacts: [
+        _pri(BodyMuscle.quads),
+        _sec(BodyMuscle.glutes),
+        _sec(BodyMuscle.adductors)
+      ]),
+  _reps('leg_extension_band', 'Prostowanie nóg z gumą', 'Nogi',
+      equipment: 'guma oporowa', level: 'Początkujący', sets: 3, reps: 16,
+      met: 3.6, illustration: 'squat',
+      description:
+          'Siedząc zaczep gumę o kostkę i prostuj kolano do końca. Izolacja czworogłowego bez maszyny.',
+      impacts: [_pri(BodyMuscle.quads)]),
+];
+
+final List<Exercise> _hamstringsExtra = [
+  _reps('nordic_curl', 'Nordic ham curl', 'Nogi',
+      level: 'Zaawansowany', sets: 3, reps: 6, met: 4.8, illustration: 'generic',
+      description:
+          'Klęk z zablokowanymi stopami, opuszczaj tułów prosto jak deska i hamuj dwugłowymi. Najsilniejszy bój na tył uda.',
+      impacts: [
+        _pri(BodyMuscle.hamstrings),
+        _sec(BodyMuscle.glutes),
+        _stab(BodyMuscle.erectorSpinae)
+      ]),
+  _reps('band_leg_curl', 'Uginanie nóg z gumą', 'Nogi',
+      equipment: 'guma oporowa', level: 'Początkujący', sets: 3, reps: 16,
+      met: 3.6, illustration: 'generic',
+      description:
+          'Leżąc na brzuchu zaczep gumę o kostkę i uginaj kolano. Izolacja dwugłowego uda bez maszyny.',
+      impacts: [_pri(BodyMuscle.hamstrings)]),
+  _reps('single_leg_rdl', 'Martwy ciąg rumuński jednonóż', 'Nogi',
+      equipment: 'hantel', level: 'Średniozaawansowany', sets: 3, reps: 10,
+      met: 4.6, illustration: 'deadlift',
+      description:
+          'Na jednej nodze opuszczaj hantel, prowadząc drugą nogę w tył jak wagę. Tył uda, pośladek i równowaga.',
+      impacts: [
+        _pri(BodyMuscle.hamstrings),
+        _sec(BodyMuscle.glutes),
+        _stab(BodyMuscle.erectorSpinae)
+      ]),
+  _reps('good_morning', 'Good morning ze sztangą', 'Nogi',
+      equipment: 'sztanga', level: 'Średniozaawansowany', sets: 3, reps: 10,
+      met: 4.6, illustration: 'deadlift',
+      description:
+          'Sztanga na barkach, skłon w biodrach z prostymi plecami i powrót. Silny wzorzec zawiasu biodrowego.',
+      impacts: [
+        _pri(BodyMuscle.hamstrings),
+        _sec(BodyMuscle.glutes),
+        _sec(BodyMuscle.lowerBack)
+      ]),
+  _reps('db_rdl', 'Rumuński martwy ciąg z hantlami', 'Nogi',
+      equipment: 'hantle', level: 'Początkujący', sets: 4, reps: 10, met: 4.6,
+      illustration: 'deadlift',
+      description:
+          'Opuszczaj hantle wzdłuż nóg z lekko ugiętymi kolanami i prostymi plecami. Fundament tyłu ud i pośladków.',
+      impacts: [
+        _pri(BodyMuscle.hamstrings),
+        _sec(BodyMuscle.glutes),
+        _sec(BodyMuscle.lowerBack)
+      ]),
+  _timed('glute_ham_bridge', 'Most na piętach (tył uda)', 'Nogi',
+      durationSec: 40, equipment: 'masa ciała', met: 3.6,
+      illustration: 'hipThrust',
+      description:
+          'Most z ciężarem na piętach i lekko wyprostowanymi nogami — akcent na dwugłowe zamiast pośladków.',
+      impacts: [
+        _pri(BodyMuscle.hamstrings),
+        _sec(BodyMuscle.glutes)
+      ]),
+];
+
+final List<Exercise> _glutesExtra = [
+  _reps('single_leg_glute_bridge', 'Most pośladkowy jednonóż', 'Nogi',
+      level: 'Początkujący', sets: 3, reps: 14, met: 3.8,
+      illustration: 'hipThrust',
+      description:
+          'Most z uniesioną jedną nogą — cały ciężar na jednym pośladku. Świetne na asymetrie bez sprzętu.',
+      impacts: [
+        _pri(BodyMuscle.glutes),
+        _sec(BodyMuscle.hamstrings),
+        _stab(BodyMuscle.abs)
+      ]),
+  _reps('band_hip_abduction', 'Odwodzenie nogi z gumą', 'Nogi',
+      equipment: 'guma oporowa', level: 'Początkujący', sets: 3, reps: 18,
+      met: 3.4, illustration: 'generic',
+      description:
+          'Guma nad kolanami, odwodź nogę w bok stojąc lub leżąc. Celuje w pośladek średni i stabilizację bioder.',
+      impacts: [
+        _pri(BodyMuscle.gluteMedius),
+        _sec(BodyMuscle.glutes)
+      ]),
+  _reps('curtsy_lunge', 'Wykrok ukłon (curtsy)', 'Nogi',
+      level: 'Początkujący', sets: 3, reps: 12, met: 4.4, illustration: 'lunge',
+      description:
+          'Zakrok skośnie za nogę podporową jak ukłon. Mocno angażuje pośladek średni i stabilizatory bioder.',
+      impacts: [
+        _pri(BodyMuscle.glutes),
+        _sec(BodyMuscle.gluteMedius),
+        _sec(BodyMuscle.quads)
+      ]),
+  _reps('kettlebell_swing', 'Wymachy kettlebell', 'Nogi',
+      equipment: 'kettlebell', level: 'Średniozaawansowany', sets: 4, reps: 15,
+      met: 6.0, illustration: 'hipThrust',
+      description:
+          'Dynamiczny zawias biodrowy wyrzucający kettlebell do linii oczu. Moc pośladków i kondycja w jednym.',
+      impacts: [
+        _pri(BodyMuscle.glutes),
+        _sec(BodyMuscle.hamstrings),
+        _sec(BodyMuscle.erectorSpinae)
+      ]),
+  _reps('frog_pump', 'Frog pump (żaba)', 'Nogi',
+      level: 'Początkujący', sets: 3, reps: 20, met: 3.4,
+      illustration: 'hipThrust',
+      description:
+          'Leżąc złącz stopy podeszwami i unoś biodra, ściskając pośladki na górze. Czysta izolacja pośladków.',
+      impacts: [_pri(BodyMuscle.glutes)]),
+  _reps('db_hip_thrust', 'Hip thrust z hantlem', 'Nogi',
+      equipment: 'hantel', level: 'Początkujący', sets: 4, reps: 12, met: 4.6,
+      illustration: 'hipThrust',
+      description:
+          'Plecy oparte o ławkę, hantel na biodrach, wypychaj biodra do linii ud. Główny bój na masę pośladków.',
+      impacts: [
+        _pri(BodyMuscle.glutes),
+        _sec(BodyMuscle.hamstrings),
+        _stab(BodyMuscle.abs)
+      ]),
+];
+
+final List<Exercise> _calvesExtra = [
+  _reps('single_leg_calf_raise', 'Wspięcia na palce na jednej nodze', 'Nogi',
+      level: 'Początkujący', sets: 3, reps: 15, met: 3.6,
+      illustration: 'calfRaise',
+      description:
+          'Wspięcia na palce jednej nogi dla pełnego zakresu i większego obciążenia. Łydka i stabilizacja kostki.',
+      impacts: [
+        _pri(BodyMuscle.gastrocnemius),
+        _sec(BodyMuscle.soleus)
+      ]),
+  _reps('seated_db_calf_raise', 'Wspięcia siedząc z hantlem (soleus)', 'Nogi',
+      equipment: 'hantel', level: 'Początkujący', sets: 3, reps: 18, met: 3.4,
+      illustration: 'calfRaise',
+      description:
+          'Siedząc trzymaj hantel na kolanach i unoś pięty. Zgięte kolano przenosi pracę na płaszczkowaty (soleus).',
+      impacts: [
+        _pri(BodyMuscle.soleus),
+        _sec(BodyMuscle.gastrocnemius)
+      ]),
+  _reps('db_calf_raise', 'Wspięcia na palce z hantlami', 'Nogi',
+      equipment: 'hantle', level: 'Początkujący', sets: 4, reps: 15, met: 3.8,
+      illustration: 'calfRaise',
+      description:
+          'Wspięcia na palce z hantlami w dłoniach dla dodatkowego obciążenia łydek. Pełny zakres w górę i w dół.',
+      impacts: [
+        _pri(BodyMuscle.gastrocnemius),
+        _sec(BodyMuscle.soleus)
+      ]),
+  _reps('calf_raise_step', 'Wspięcia z podwyższenia', 'Nogi',
+      equipment: 'podwyższenie', level: 'Początkujący', sets: 3, reps: 18,
+      met: 3.6, illustration: 'calfRaise',
+      description:
+          'Pięty zwisają poza krawędź stopnia, schodź nisko i unoś się wysoko. Maksymalny zakres ruchu łydki.',
+      impacts: [
+        _pri(BodyMuscle.gastrocnemius),
+        _sec(BodyMuscle.soleus)
+      ]),
+  _reps('donkey_calf_raise', 'Wspięcia oślim sposobem', 'Nogi',
+      level: 'Średniozaawansowany', sets: 3, reps: 18, met: 3.8,
+      illustration: 'calfRaise',
+      description:
+          'Skłon w biodrach z podparciem, unoś pięty z tułowiem w poziomie. Klasyczne, mocne rozciągnięcie łydki.',
+      impacts: [
+        _pri(BodyMuscle.gastrocnemius),
+        _sec(BodyMuscle.soleus)
+      ]),
+  _reps('toe_raise_wall', 'Unoszenie palców przy ścianie (piszczel)', 'Nogi',
+      level: 'Początkujący', sets: 3, reps: 20, met: 3.0,
+      illustration: 'calfRaise',
+      description:
+          'Oparty plecami o ścianę unoś palce stóp do siebie. Wzmacnia piszczelowy przedni i chroni kolana biegaczy.',
+      impacts: [_pri(BodyMuscle.tibialis)]),
+];
+
 /// Pełna pula dodatkowych ćwiczeń dołączana do [ExerciseRepo.all].
 final List<Exercise> kProgramExercises = [
   ..._chest,
@@ -884,4 +1484,16 @@ final List<Exercise> kProgramExercises = [
   ..._stretches,
   ..._warmups,
   ..._cardio,
+  // — Rozbudowa bazy: dodatkowe zamienniki na każdą partię —
+  ..._chestExtra,
+  ..._backExtra,
+  ..._shouldersExtra,
+  ..._bicepsExtra,
+  ..._tricepsExtra,
+  ..._forearmsExtra,
+  ..._coreExtra,
+  ..._legsExtra,
+  ..._hamstringsExtra,
+  ..._glutesExtra,
+  ..._calvesExtra,
 ];

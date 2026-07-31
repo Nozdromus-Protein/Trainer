@@ -6437,6 +6437,14 @@ class AppStore extends ChangeNotifier {
   }) {
     final advice = weeklyTrainingAdvice(now);
     final ctx = coachContext();
+    // GRANULARNY sprzęt z ustawień — nadrzędny nad zgrubnym `equipmentMode`.
+    // `equipmentMode == 'full_gym'` przepuszczał WSZYSTKO (też maszyny/wyciąg),
+    // przez co do zestawu trafiało ćwiczenie na sprzęcie, którego użytkownik
+    // nie ma zaznaczonego. Ten filtr pilnuje dokładnie zaznaczonego sprzętu.
+    final ownedEquipment = settings.equipmentProfile.resolveOwned();
+    bool equipmentOk(Exercise def) =>
+        _plannerEquipmentAllows(equipmentMode, def.equipment) &&
+        isExerciseAvailable(def, ownedEquipment);
 
     PlannerExerciseInput inputFor(
       Exercise def, {
@@ -6500,7 +6508,7 @@ class AppStore extends ChangeNotifier {
       if (!isRest) {
         for (final item in day.items) {
           final def = ExerciseRepo.byId(item.exerciseId, customExercises);
-          if (!_plannerEquipmentAllows(equipmentMode, def.equipment)) continue;
+          if (!equipmentOk(def)) continue;
           items.add(inputFor(
             def,
             plannedSets: item.sets,
@@ -6532,7 +6540,7 @@ class AppStore extends ChangeNotifier {
               impact.role == MuscleRole.primary &&
               extra.muscles.contains(impact.muscleGroup));
           if (!hitsExtra) continue;
-          if (!_plannerEquipmentAllows(equipmentMode, def.equipment)) continue;
+          if (!equipmentOk(def)) continue;
           items.add(inputFor(def));
           added++;
         }
@@ -6555,7 +6563,7 @@ class AppStore extends ChangeNotifier {
     final dynamicInputs = <PlannerExerciseInput>[];
     for (final suggestion in advice.todayExercises) {
       final def = ExerciseRepo.byId(suggestion.exerciseId, customExercises);
-      if (!_plannerEquipmentAllows(equipmentMode, def.equipment)) continue;
+      if (!equipmentOk(def)) continue;
       dynamicInputs.add(inputFor(def));
     }
 
@@ -28540,6 +28548,24 @@ Future<void> showReplaceActiveExerciseSheet(BuildContext context) async {
       .map((exercise) => exercise.exerciseId)
       .toSet();
   var query = '';
+  MuscleGroup? muscleFilter;
+  // Domyślny filtr: partia główna zamienianego ćwiczenia — najczęściej chcesz
+  // zamiennik na tę samą partię, więc podpowiadamy ją od razu.
+  final currentExercise =
+      ExerciseRepo.byId(current.exerciseId, store.customExercises);
+  muscleFilter = currentExercise.muscleGroups.isNotEmpty
+      ? currentExercise.muscleGroups.first
+      : null;
+  final owned = store.settings.equipmentProfile.resolveOwned();
+  var showUnavailable = false;
+  final poolMuscles = muscleGroupsInPool(
+    ExerciseRepo.combined(store.customExercises).where(
+      (exercise) =>
+          exercise.id != current.exerciseId &&
+          !usedExerciseIds.contains(exercise.id) &&
+          !store.isExerciseHidden(exercise.id),
+    ),
+  );
   final replacement = await showModalBottomSheet<Exercise>(
     context: context,
     isScrollControlled: true,
@@ -28552,7 +28578,12 @@ Future<void> showReplaceActiveExerciseSheet(BuildContext context) async {
           if (exercise.id == current.exerciseId ||
               usedExerciseIds.contains(exercise.id) ||
               store.isExerciseHidden(exercise.id)) return false;
-          return query.isEmpty || exercise.name.toLowerCase().contains(query);
+          if (!showUnavailable && !isExerciseAvailable(exercise, owned)) {
+            return false;
+          }
+          if (muscleFilter != null &&
+              !exercise.muscleGroups.contains(muscleFilter)) return false;
+          return exerciseMatchesQuery(exercise, query);
         }).toList();
         return FractionallySizedBox(
           heightFactor: 0.86,
@@ -28582,9 +28613,36 @@ Future<void> showReplaceActiveExerciseSheet(BuildContext context) async {
                       autofocus: true,
                       decoration: const InputDecoration(
                           prefixIcon: Icon(Icons.search_rounded),
-                          labelText: 'Szukaj po nazwie'),
-                      onChanged: (value) => setSheetState(
-                          () => query = value.trim().toLowerCase()),
+                          labelText: 'Szukaj: nazwa lub partia mięśniowa'),
+                      onChanged: (value) =>
+                          setSheetState(() => query = value.trim()),
+                    ),
+                    const SizedBox(height: 10),
+                    MuscleFilterChipRow(
+                      selected: muscleFilter,
+                      available: poolMuscles,
+                      onSelected: (group) =>
+                          setSheetState(() => muscleFilter = group),
+                    ),
+                    const SizedBox(height: 6),
+                    Align(
+                      alignment: Alignment.centerLeft,
+                      child: FilterChip(
+                        materialTapTargetSize: MaterialTapTargetSize.shrinkWrap,
+                        visualDensity: VisualDensity.compact,
+                        avatar: Icon(
+                          showUnavailable
+                              ? Icons.fitness_center_rounded
+                              : Icons.check_circle_outline_rounded,
+                          size: 18,
+                        ),
+                        label: Text(showUnavailable
+                            ? 'Wszystkie (też bez sprzętu)'
+                            : 'Tylko na mój sprzęt'),
+                        selected: !showUnavailable,
+                        onSelected: (_) => setSheetState(
+                            () => showUnavailable = !showUnavailable),
+                      ),
                     ),
                   ],
                 ),
@@ -32058,6 +32116,57 @@ class _StatusIcon extends StatelessWidget {
 
 /// Wspólny wybór ćwiczenia z biblioteki (zwraca wybrane [Exercise] albo null).
 /// Używane m.in. do podmiany ćwiczenia w dniu. Etap 29.
+/// Poziomy pasek szybkiego filtra partii mięśniowej dla arkuszy wyboru
+/// ćwiczenia. „Wszystkie" = brak filtra. Pokazujemy tylko partie, które mają
+/// jakiekolwiek ćwiczenie w podanej puli — pusty chip byłby ślepą uliczką.
+class MuscleFilterChipRow extends StatelessWidget {
+  const MuscleFilterChipRow({
+    super.key,
+    required this.selected,
+    required this.onSelected,
+    required this.available,
+  });
+
+  final MuscleGroup? selected;
+  final ValueChanged<MuscleGroup?> onSelected;
+  final Set<MuscleGroup> available;
+
+  @override
+  Widget build(BuildContext context) {
+    // Kolejność jak w enumie, ale bez „Inne"/„Całe ciało" na siłę, jeśli puste.
+    final groups = <MuscleGroup>[
+      for (final g in MuscleGroup.values)
+        if (available.contains(g)) g,
+    ];
+    if (groups.isEmpty) return const SizedBox.shrink();
+    return SizedBox(
+      height: 40,
+      child: ListView.separated(
+        scrollDirection: Axis.horizontal,
+        itemCount: groups.length + 1,
+        separatorBuilder: (_, __) => const SizedBox(width: 8),
+        itemBuilder: (context, i) {
+          final isAll = i == 0;
+          final group = isAll ? null : groups[i - 1];
+          final isSelected = isAll ? selected == null : selected == group;
+          return FilterChip(
+            materialTapTargetSize: MaterialTapTargetSize.shrinkWrap,
+            visualDensity: VisualDensity.compact,
+            label: Text(isAll ? 'Wszystkie' : group!.label),
+            selected: isSelected,
+            onSelected: (_) => onSelected(isAll ? null : group),
+          );
+        },
+      ),
+    );
+  }
+}
+
+/// Partie mięśniowe obecne w danej puli ćwiczeń (do zbudowania pasków filtra).
+Set<MuscleGroup> muscleGroupsInPool(Iterable<Exercise> exercises) => {
+      for (final exercise in exercises) ...exercise.muscleGroups,
+    };
+
 Future<Exercise?> pickExerciseFromLibrary(
   BuildContext context, {
   String title = 'Wybierz ćwiczenie',
@@ -32066,6 +32175,21 @@ Future<Exercise?> pickExerciseFromLibrary(
 }) async {
   final store = AppScope.read(context);
   var query = '';
+  MuscleGroup? muscleFilter;
+  // Domyślnie chowamy ćwiczenia wymagające sprzętu, którego użytkownik nie ma
+  // zaznaczonego w ustawieniach — inaczej do zestawu trafiało np. ćwiczenie na
+  // maszynie/wyciągu, którego nie da się wykonać. Przełącznik pozwala je
+  // pokazać świadomie.
+  final owned = store.settings.equipmentProfile.resolveOwned();
+  var showUnavailable = false;
+  // Partie obecne w widocznej puli — do pasków filtra (liczone raz).
+  final poolMuscles = muscleGroupsInPool(
+    ExerciseRepo.combined(store.customExercises).where(
+      (exercise) =>
+          !excludeIds.contains(exercise.id) &&
+          !store.isExerciseHidden(exercise.id),
+    ),
+  );
   return showModalBottomSheet<Exercise>(
     context: context,
     isScrollControlled: true,
@@ -32077,7 +32201,12 @@ Future<Exercise?> pickExerciseFromLibrary(
             ExerciseRepo.combined(store.customExercises).where((exercise) {
           if (excludeIds.contains(exercise.id) ||
               store.isExerciseHidden(exercise.id)) return false;
-          return query.isEmpty || exercise.name.toLowerCase().contains(query);
+          if (!showUnavailable && !isExerciseAvailable(exercise, owned)) {
+            return false;
+          }
+          if (muscleFilter != null &&
+              !exercise.muscleGroups.contains(muscleFilter)) return false;
+          return exerciseMatchesQuery(exercise, query);
         }).toList();
         return FractionallySizedBox(
           heightFactor: 0.86,
@@ -32109,9 +32238,36 @@ Future<Exercise?> pickExerciseFromLibrary(
                       autofocus: true,
                       decoration: const InputDecoration(
                           prefixIcon: Icon(Icons.search_rounded),
-                          labelText: 'Szukaj po nazwie'),
+                          labelText: 'Szukaj: nazwa lub partia mięśniowa'),
                       onChanged: (value) => setSheetState(
-                          () => query = value.trim().toLowerCase()),
+                          () => query = value.trim()),
+                    ),
+                    const SizedBox(height: 10),
+                    MuscleFilterChipRow(
+                      selected: muscleFilter,
+                      available: poolMuscles,
+                      onSelected: (group) =>
+                          setSheetState(() => muscleFilter = group),
+                    ),
+                    const SizedBox(height: 6),
+                    Align(
+                      alignment: Alignment.centerLeft,
+                      child: FilterChip(
+                        materialTapTargetSize: MaterialTapTargetSize.shrinkWrap,
+                        visualDensity: VisualDensity.compact,
+                        avatar: Icon(
+                          showUnavailable
+                              ? Icons.fitness_center_rounded
+                              : Icons.check_circle_outline_rounded,
+                          size: 18,
+                        ),
+                        label: Text(showUnavailable
+                            ? 'Wszystkie (też bez sprzętu)'
+                            : 'Tylko na mój sprzęt'),
+                        selected: !showUnavailable,
+                        onSelected: (_) => setSheetState(
+                            () => showUnavailable = !showUnavailable),
+                      ),
                     ),
                   ],
                 ),
@@ -34183,6 +34339,11 @@ Future<void> showPlanExercisePicker(BuildContext context,
 
   var query = '';
   ExerciseIntensityTier? tierFilter;
+  MuscleGroup? muscleFilter;
+  final poolMuscles = muscleGroupsInPool(
+    ExerciseRepo.combined(store.customExercises)
+        .where((exercise) => !store.isExerciseHidden(exercise.id)),
+  );
   final selected = await showModalBottomSheet<Exercise>(
     context: context,
     isScrollControlled: true,
@@ -34197,7 +34358,9 @@ Future<void> showPlanExercisePicker(BuildContext context,
               exerciseIntensityTier(exercise) != tierFilter) {
             return false;
           }
-          return query.isEmpty || exercise.name.toLowerCase().contains(query);
+          if (muscleFilter != null &&
+              !exercise.muscleGroups.contains(muscleFilter)) return false;
+          return exerciseMatchesQuery(exercise, query);
         }).toList();
         // Najpierw propozycje pod ten dzień; ćwiczenia ponad poziom, bez
         // sprzętu albo kolidujące z ograniczeniami spadają na koniec listy.
@@ -34229,9 +34392,18 @@ Future<void> showPlanExercisePicker(BuildContext context,
                       autofocus: true,
                       decoration: const InputDecoration(
                           prefixIcon: Icon(Icons.search_rounded),
-                          labelText: 'Szukaj po nazwie'),
-                      onChanged: (value) => setSheetState(
-                          () => query = value.trim().toLowerCase()),
+                          labelText: 'Szukaj: nazwa lub partia mięśniowa'),
+                      onChanged: (value) =>
+                          setSheetState(() => query = value.trim()),
+                    ),
+                    const SizedBox(height: 10),
+                    // Szybki filtr partii mięśniowej — żeby błyskawicznie znaleźć
+                    // czym zastąpić ćwiczenie na tę samą partię.
+                    MuscleFilterChipRow(
+                      selected: muscleFilter,
+                      available: poolMuscles,
+                      onSelected: (group) =>
+                          setSheetState(() => muscleFilter = group),
                     ),
                     const SizedBox(height: 10),
                     // Filtr intensywności — pozwala dobrać ćwiczenie świadomie

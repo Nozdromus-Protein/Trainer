@@ -64,12 +64,19 @@ enum TrainingFocusArea {
   // obciąża klatkę, przedni bark i triceps, dzień ciągnięcia — plecy, tylny
   // bark, biceps i przedramiona. Dzięki temu regeneracja liczona dla bloku
   // uwzględnia wszystko, co ten dzień realnie męczy.
-  push('Push (pchanie)', [
-    BodyMuscle.chest,
-    BodyMuscle.frontShoulders,
-    BodyMuscle.triceps,
-    BodyMuscle.serratusAnterior,
-  ]),
+  push(
+    'Push (pchanie)',
+    [
+      BodyMuscle.chest,
+      BodyMuscle.frontShoulders,
+      BodyMuscle.triceps,
+      BodyMuscle.serratusAnterior,
+    ],
+    // DEFINIUJE push tylko klatka i przedni bark. Triceps PRACUJE w pchaniu,
+    // ale nie definiuje dnia — bez tego trening ramion (triceps) fałszywie
+    // uznawał dzień push/klatki za niegotowy i rozkład go przestawiał.
+    [BodyMuscle.chest, BodyMuscle.frontShoulders],
+  ),
   pull(
     'Pull (ciągnięcie)',
     [
@@ -81,7 +88,9 @@ enum TrainingFocusArea {
       BodyMuscle.forearmsFront,
       BodyMuscle.traps,
     ],
-    [BodyMuscle.lats, BodyMuscle.upperBack, BodyMuscle.biceps],
+    // Analogicznie: pull definiują plecy, nie biceps. Biceps pracuje w
+    // ciągnięciu, ale dzień ramion nie może blokować dnia pleców.
+    [BodyMuscle.lats, BodyMuscle.upperBack],
   ),
   // — tor drugorzędny —
   shoulders('Barki',

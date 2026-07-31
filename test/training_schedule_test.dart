@@ -1,6 +1,8 @@
 import 'package:flutter_test/flutter_test.dart';
 import 'package:licznik_treningu/features/trainer/application/training_schedule.dart';
 import 'package:licznik_treningu/features/trainer/application/weekly_training_planner.dart';
+import 'package:licznik_treningu/features/trainer/domain/body_muscle.dart';
+import 'package:licznik_treningu/features/trainer/domain/muscle_recovery.dart';
 
 void main() {
   // 2026-01-05 to poniedziałek.
@@ -293,6 +295,46 @@ void main() {
       final monday = config.planForWeekday(1);
       expect(monday.primary, TrainingFocusArea.legs);
       expect(monday.secondary, TrainingFocusArea.shoulders);
+    });
+  });
+
+  group('partie definiujące obszar (blokada regeneracji)', () {
+    test('push NIE jest definiowany przez triceps — ramiona nie blokują klatki',
+        () {
+      final push = TrainingFocusArea.push.signatureMuscles;
+      expect(push, contains(BodyMuscle.chest));
+      expect(push, isNot(contains(BodyMuscle.triceps)),
+          reason: 'triceps pracuje w pchaniu, ale nie definiuje dnia push');
+    });
+
+    test('pull NIE jest definiowany przez biceps — ramiona nie blokują pleców',
+        () {
+      final pull = TrainingFocusArea.pull.signatureMuscles;
+      expect(pull, contains(BodyMuscle.lats));
+      expect(pull, isNot(contains(BodyMuscle.biceps)),
+          reason: 'biceps pracuje w ciągnięciu, ale nie definiuje dnia pull');
+    });
+
+    test('zmęczony triceps po dniu ramion nie obniża gotowości push', () {
+      final now = DateTime(2026, 8, 1, 8);
+      final recovery = <BodyMuscle, MuscleRecoveryState>{
+        BodyMuscle.triceps: MuscleRecoveryState(
+          muscleGroup: BodyMuscle.triceps,
+          recoveryPercent: 20,
+          fatiguePercent: 80,
+          status: recoveryStatusForPercent(20),
+        ),
+        BodyMuscle.chest: MuscleRecoveryState(
+          muscleGroup: BodyMuscle.chest,
+          recoveryPercent: 95,
+          fatiguePercent: 5,
+          status: recoveryStatusForPercent(95),
+        ),
+      };
+      final readiness = scheduleReadiness(
+          TrainingFocusArea.push, now, now, recovery);
+      expect(readiness, greaterThanOrEqualTo(90),
+          reason: 'push liczy się z klatki (95%), nie z tricepsa (20%)');
     });
   });
 }
