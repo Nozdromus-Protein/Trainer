@@ -10,11 +10,16 @@
 ///  * SERIE     — ile serii w jednym ćwiczeniu tej partii,
 ///  * POWTÓRZENIA — zakres powtórzeń pojedynczej serii.
 ///
-/// WAŻNE (założenie z etapu): ręczne PODBIJANIE I ZBIJANIE INTENSYWNOŚCI jest
-/// NIEZALEŻNE od tych limitów. Limity opisują, jak zestaw ma być ZBUDOWANY;
-/// gałka intensywności (program + dzień) świadomie wychodzi poza nie i nie jest
-/// przez nie przycinana — patrz [applyIntensityStepToItem] w `deload_cycle.dart`.
-/// Dlatego limity egzekwujemy PRZED nałożeniem korekty intensywności, a nie po.
+/// INTENSYWNOŚĆ A LIMITY (zmiana względem wcześniejszego założenia): wybrana
+/// intensywność ([WorkoutIntensityLevel]) PRZESUWA granice — lekki dzień ma
+/// węższy zakres ćwiczeń i serii, bardzo wysoki szerszy. Wcześniej limity były
+/// od intensywności całkowicie niezależne, przez co „bardzo wysoka" i „lekka"
+/// dawały ten sam projekt zestawu.
+///
+/// Rozdział ról zostaje: limity opisują ZAKRES, w jakim zestaw ma być
+/// zbudowany, a gałka kroków intensywności ([applyIntensityStepToItem]
+/// w `deload_cycle.dart`) nadal działa NA GOTOWYM zestawie i nie jest przez nie
+/// przycinana. Limity egzekwujemy PRZED nałożeniem korekty, nie po.
 ///
 /// Czysty Dart — bez UI, deterministyczny, łatwy do testów.
 library;
@@ -66,7 +71,8 @@ class VolumeBounds {
 
   Map<String, dynamic> toJson() => {'min': min, 'max': max};
 
-  factory VolumeBounds.fromJson(Map<String, dynamic> json, VolumeBounds fallback) =>
+  factory VolumeBounds.fromJson(
+          Map<String, dynamic> json, VolumeBounds fallback) =>
       VolumeBounds(
         (json['min'] as num?)?.toInt() ?? fallback.min,
         (json['max'] as num?)?.toInt() ?? fallback.max,
@@ -371,14 +377,111 @@ int _levelRank(String level) {
   return 0;
 }
 
+// ============================================================================
+// Intensywność treningu
+// ============================================================================
+
+/// Poziom intensywności zestawu — wspólny język dla limitów, prognoz i UI.
+///
+/// Aplikacja przechowuje intensywność jako KROKI (−6…+6, gałka programu i dnia).
+/// Ten enum tłumaczy je na cztery czytelne poziomy i mówi, co każdy z nich robi
+/// z objętością: ile ćwiczeń, ile serii, jaki zakres powtórzeń i jak długa
+/// przerwa.
+enum WorkoutIntensityLevel {
+  light('light', 'Lekka'),
+  moderate('moderate', 'Umiarkowana'),
+  high('high', 'Wysoka'),
+  veryHigh('veryHigh', 'Bardzo wysoka');
+
+  const WorkoutIntensityLevel(this.key, this.label);
+
+  final String key;
+  final String label;
+
+  /// Poziom wynikający z kroków gałki intensywności.
+  ///
+  /// Progi są asymetryczne, bo „standard" (0 kroków) ma być umiarkowany, a nie
+  /// środkiem między lekkim a bardzo wysokim.
+  static WorkoutIntensityLevel fromSteps(int steps) {
+    if (steps <= -3) return light;
+    if (steps <= 0) return moderate;
+    if (steps <= 3) return high;
+    return veryHigh;
+  }
+
+  static WorkoutIntensityLevel fromKey(Object? value) {
+    final key = value?.toString().trim() ?? '';
+    for (final level in WorkoutIntensityLevel.values) {
+      if (level.key == key || level.name == key) return level;
+    }
+    return WorkoutIntensityLevel.moderate;
+  }
+
+  /// Przesunięcie MAKSIMUM liczby różnych ćwiczeń na partię.
+  int get exerciseMaxShift => switch (this) {
+        WorkoutIntensityLevel.light => -1,
+        WorkoutIntensityLevel.moderate => 0,
+        WorkoutIntensityLevel.high => 1,
+        WorkoutIntensityLevel.veryHigh => 2,
+      };
+
+  /// Przesunięcie MINIMUM liczby różnych ćwiczeń na partię. Rośnie wolniej niż
+  /// maksimum — wysoka intensywność ma dawać SWOBODĘ, a nie przymus objętości.
+  int get exerciseMinShift => switch (this) {
+        WorkoutIntensityLevel.light => -1,
+        WorkoutIntensityLevel.moderate => 0,
+        WorkoutIntensityLevel.high => 0,
+        WorkoutIntensityLevel.veryHigh => 1,
+      };
+
+  /// Przesunięcie granic liczby serii na ćwiczenie (min, max).
+  (int, int) get setShift => switch (this) {
+        WorkoutIntensityLevel.light => (-1, -1),
+        WorkoutIntensityLevel.moderate => (0, 0),
+        WorkoutIntensityLevel.high => (0, 1),
+        WorkoutIntensityLevel.veryHigh => (1, 1),
+      };
+
+  /// Mnożnik długości przerwy między seriami. Ciężej = dłuższa przerwa.
+  double get restFactor => switch (this) {
+        WorkoutIntensityLevel.light => 0.85,
+        WorkoutIntensityLevel.moderate => 1.0,
+        WorkoutIntensityLevel.high => 1.1,
+        WorkoutIntensityLevel.veryHigh => 1.2,
+      };
+
+  /// Przesunięcie zakresu powtórzeń. Lekki dzień idzie wyżej w powtórzeniach
+  /// (mniejszy ciężar), bardzo wysoki — niżej.
+  (int, int) get repShift => switch (this) {
+        WorkoutIntensityLevel.light => (2, 3),
+        WorkoutIntensityLevel.moderate => (0, 0),
+        WorkoutIntensityLevel.high => (-1, -1),
+        WorkoutIntensityLevel.veryHigh => (-2, -2),
+      };
+
+  /// Ile razy szybciej narasta zmęczenie na tym poziomie (do prognoz
+  /// regeneracji i ostrzeżeń o przeciążeniu).
+  double get fatigueFactor => switch (this) {
+        WorkoutIntensityLevel.light => 0.75,
+        WorkoutIntensityLevel.moderate => 1.0,
+        WorkoutIntensityLevel.high => 1.2,
+        WorkoutIntensityLevel.veryHigh => 1.4,
+      };
+}
+
 /// Limity EFEKTYWNE dla partii: surowe granice skorygowane poziomem
-/// (początkujący dostaje węższy zestaw, zaawansowany szerszy) i celem
-/// (zakres powtórzeń zawężony do strategii, ale nigdy poza twarde granice).
+/// (początkujący dostaje węższy zestaw, zaawansowany szerszy), INTENSYWNOŚCIĄ
+/// (lekka zwęża, bardzo wysoka poszerza) i celem (zakres powtórzeń zawężony do
+/// strategii, ale nigdy poza twarde granice).
+///
+/// [intensity] domyślnie jest umiarkowana, więc wywołania bez tego argumentu
+/// zachowują dotychczasowe wartości co do jednego.
 MuscleVolumeLimits volumeLimitsFor(
   MuscleGroup group, {
   String level = '',
   String goal = '',
   VolumeLimitsConfig config = VolumeLimitsConfig.standard,
+  WorkoutIntensityLevel intensity = WorkoutIntensityLevel.moderate,
 }) {
   var limits = config.rawFor(group);
   final rank = _levelRank(level);
@@ -395,6 +498,22 @@ MuscleVolumeLimits volumeLimitsFor(
         sets: limits.sets.shifted(0, 1, floor: 1),
       );
     }
+  }
+  // Intensywność przesuwa ZAKRES budowy zestawu. Gałka kroków nadal działa
+  // niezależnie, na gotowym zestawie — tu chodzi o to, żeby „bardzo wysoka"
+  // i „lekka" nie projektowały identycznego treningu.
+  if (intensity != WorkoutIntensityLevel.moderate) {
+    final (setsMin, setsMax) = intensity.setShift;
+    final (repsMin, repsMax) = intensity.repShift;
+    limits = limits.copyWith(
+      exercises: limits.exercises.shifted(
+        intensity.exerciseMinShift,
+        intensity.exerciseMaxShift,
+        floor: 1,
+      ),
+      sets: limits.sets.shifted(setsMin, setsMax, floor: 1),
+      reps: limits.reps.shifted(repsMin, repsMax, floor: 1),
+    );
   }
   if (goal.trim().isNotEmpty) {
     limits = limits.copyWith(reps: limits.reps.intersect(goalRepBounds(goal)));
@@ -416,7 +535,8 @@ MuscleGroup primaryMuscleGroupOf(Exercise exercise) {
     }
   }
   final impacts = exercise.effectiveMuscleImpacts;
-  if (impacts.isNotEmpty) return muscleGroupOfBodyMuscle(impacts.first.muscleGroup);
+  if (impacts.isNotEmpty)
+    return muscleGroupOfBodyMuscle(impacts.first.muscleGroup);
   return MuscleGroup.fromText(exercise.primaryMuscle);
 }
 
@@ -482,7 +602,8 @@ MuscleGroup muscleGroupOfBodyMuscle(BodyMuscle muscle) {
 /// do limitów zawyżałoby zestaw i kazało wyrzucać realne boje.
 bool isWorkingVolumeItem(PlanItem item, Exercise exercise) {
   final note = item.note.toLowerCase();
-  if (note.contains('rozgrzew') || note.contains('rozciąg') ||
+  if (note.contains('rozgrzew') ||
+      note.contains('rozciąg') ||
       note.contains('rozciag')) {
     return false;
   }
@@ -612,6 +733,7 @@ WorkoutVolumeReport analyzeWorkoutVolume({
   String level = '',
   String goal = '',
   VolumeLimitsConfig config = VolumeLimitsConfig.standard,
+  WorkoutIntensityLevel intensity = WorkoutIntensityLevel.moderate,
 }) {
   final byGroup = <MuscleGroup, List<({PlanItem item, Exercise exercise})>>{};
   for (final item in items) {
@@ -624,8 +746,8 @@ WorkoutVolumeReport analyzeWorkoutVolume({
   final counts = <MuscleGroup, MuscleVolumeCount>{};
   final issues = <VolumeIssue>[];
   byGroup.forEach((group, entries) {
-    final limits =
-        volumeLimitsFor(group, level: level, goal: goal, config: config);
+    final limits = volumeLimitsFor(group,
+        level: level, goal: goal, config: config, intensity: intensity);
     final ids = <String>[];
     var sets = 0;
     for (final entry in entries) {
@@ -718,6 +840,7 @@ PlanItem clampPlanItemToLimits(
   String level = '',
   String goal = '',
   VolumeLimitsConfig config = VolumeLimitsConfig.standard,
+  WorkoutIntensityLevel intensity = WorkoutIntensityLevel.moderate,
 }) {
   if (!config.enabled) return item;
   if (!isWorkingVolumeItem(item, exercise)) return item;
@@ -726,6 +849,7 @@ PlanItem clampPlanItemToLimits(
     level: level,
     goal: goal,
     config: config,
+    intensity: intensity,
   );
   final sets = limits.sets.clampValue(item.sets);
   final reps = item.reps > 0 ? limits.reps.clampValue(item.reps) : item.reps;
@@ -743,13 +867,14 @@ List<PlanItem> enforceVolumeLimits(
   String level = '',
   String goal = '',
   VolumeLimitsConfig config = VolumeLimitsConfig.standard,
+  WorkoutIntensityLevel intensity = WorkoutIntensityLevel.moderate,
   int Function(Exercise exercise)? weightOf,
 }) {
   if (!config.enabled || items.isEmpty) return items;
   final clamped = <PlanItem>[
     for (final item in items)
       clampPlanItemToLimits(item, resolve(item.exerciseId),
-          level: level, goal: goal, config: config),
+          level: level, goal: goal, config: config, intensity: intensity),
   ];
 
   // Nadmiar ćwiczeń w partii — wypada najlżejsze (najniższy „ciężar" pozycji).
@@ -757,14 +882,12 @@ List<PlanItem> enforceVolumeLimits(
   for (var i = 0; i < clamped.length; i++) {
     final exercise = resolve(clamped[i].exerciseId);
     if (!isWorkingVolumeItem(clamped[i], exercise)) continue;
-    indexesByGroup
-        .putIfAbsent(primaryMuscleGroupOf(exercise), () => [])
-        .add(i);
+    indexesByGroup.putIfAbsent(primaryMuscleGroupOf(exercise), () => []).add(i);
   }
   final drop = <int>{};
   indexesByGroup.forEach((group, indexes) {
-    final limits =
-        volumeLimitsFor(group, level: level, goal: goal, config: config);
+    final limits = volumeLimitsFor(group,
+        level: level, goal: goal, config: config, intensity: intensity);
     var excess = indexes.length - limits.exercises.max;
     if (excess <= 0) return;
     final ordered = [...indexes]..sort((a, b) {
@@ -794,10 +917,11 @@ int missingExerciseCount(
   String level = '',
   String goal = '',
   VolumeLimitsConfig config = VolumeLimitsConfig.standard,
+  WorkoutIntensityLevel intensity = WorkoutIntensityLevel.moderate,
 }) {
   if (!config.enabled) return 0;
-  final limits =
-      volumeLimitsFor(group, level: level, goal: goal, config: config);
+  final limits = volumeLimitsFor(group,
+      level: level, goal: goal, config: config, intensity: intensity);
   final ids = <String>{};
   for (final item in items) {
     final exercise = resolve(item.exerciseId);
@@ -818,9 +942,10 @@ List<String> topUpToMinimumExercises({
   String level = '',
   String goal = '',
   VolumeLimitsConfig config = VolumeLimitsConfig.standard,
+  WorkoutIntensityLevel intensity = WorkoutIntensityLevel.moderate,
 }) {
   final missing = missingExerciseCount(items, resolve, group,
-      level: level, goal: goal, config: config);
+      level: level, goal: goal, config: config, intensity: intensity);
   if (missing <= 0 || pool.isEmpty) return const [];
   final used = {for (final item in items) item.exerciseId};
   final result = <String>[];
@@ -831,4 +956,212 @@ List<String> topUpToMinimumExercises({
     result.add(id);
   }
   return result;
+}
+
+// ============================================================================
+// Pasmo objętości: gdzie zestaw stoi względem limitu
+// ============================================================================
+
+/// Jak daleko od zalecanego zakresu leży objętość zestawu.
+///
+/// Rozróżnienie „nieznacznie" / „znacznie" jest celowe: drobne odchylenie to
+/// normalna praca, dopiero duże ma sens komunikować jako ryzyko dla regeneracji.
+enum VolumeBandStatus {
+  farBelow,
+  slightlyBelow,
+  within,
+  slightlyAbove,
+  farAbove;
+
+  bool get isWithin => this == VolumeBandStatus.within;
+  bool get isBelow =>
+      this == VolumeBandStatus.farBelow ||
+      this == VolumeBandStatus.slightlyBelow;
+  bool get isAbove =>
+      this == VolumeBandStatus.farAbove ||
+      this == VolumeBandStatus.slightlyAbove;
+
+  /// Czy odchylenie zasługuje na ostrzeżenie o wpływie na regenerację.
+  bool get isSevere =>
+      this == VolumeBandStatus.farAbove || this == VolumeBandStatus.farBelow;
+
+  String get label => switch (this) {
+        VolumeBandStatus.farBelow => 'Znacznie poniżej limitu',
+        VolumeBandStatus.slightlyBelow => 'Nieznacznie poniżej limitu',
+        VolumeBandStatus.within => 'W limicie',
+        VolumeBandStatus.slightlyAbove => 'Nieznacznie powyżej limitu',
+        VolumeBandStatus.farAbove => 'Znacznie powyżej limitu',
+      };
+}
+
+/// Objętość zestawu porównana z zakresem zalecanym dla wybranej intensywności.
+class WorkoutVolumeBand {
+  const WorkoutVolumeBand({
+    required this.workingSets,
+    required this.recommendedMin,
+    required this.recommendedMax,
+    required this.status,
+    required this.intensity,
+    required this.exerciseCount,
+    required this.exerciseMin,
+    required this.exerciseMax,
+  });
+
+  /// Serie ROBOCZE w całym zestawie (bez rozgrzewki i rozciągania).
+  final int workingSets;
+  final int recommendedMin;
+  final int recommendedMax;
+  final VolumeBandStatus status;
+  final WorkoutIntensityLevel intensity;
+
+  /// Liczba pozycji roboczych i zalecany zakres (do komunikatu „6 z 8").
+  final int exerciseCount;
+  final int exerciseMin;
+  final int exerciseMax;
+
+  static const WorkoutVolumeBand empty = WorkoutVolumeBand(
+    workingSets: 0,
+    recommendedMin: 0,
+    recommendedMax: 0,
+    status: VolumeBandStatus.within,
+    intensity: WorkoutIntensityLevel.moderate,
+    exerciseCount: 0,
+    exerciseMin: 0,
+    exerciseMax: 0,
+  );
+
+  bool get hasData => recommendedMax > 0;
+
+  /// O ile serii przekroczono górną granicę (0, gdy nie przekroczono).
+  int get setsOverMax =>
+      workingSets > recommendedMax ? workingSets - recommendedMax : 0;
+
+  /// O ile serii brakuje do dolnej granicy (0, gdy nie brakuje).
+  int get setsUnderMin =>
+      workingSets < recommendedMin ? recommendedMin - workingSets : 0;
+
+  /// Odchylenie w procentach względem naruszonej granicy (0 = w limicie).
+  int get deviationPercent {
+    if (setsOverMax > 0 && recommendedMax > 0) {
+      return ((setsOverMax / recommendedMax) * 100).round();
+    }
+    if (setsUnderMin > 0 && recommendedMin > 0) {
+      return ((setsUnderMin / recommendedMin) * 100).round();
+    }
+    return 0;
+  }
+
+  /// Np. „Aktualna objętość: 34 serie robocze".
+  String get currentLabel =>
+      'Aktualna objętość: $workingSets ${_workingSetWord(workingSets)}';
+
+  /// Np. „Zalecany zakres dla intensywności umiarkowanej: 18–24 serie".
+  String get recommendedLabel =>
+      'Zalecany zakres dla intensywności ${intensity.label.toLowerCase()}: '
+      '$recommendedMin–$recommendedMax ${_setWord(recommendedMax)}';
+
+  /// Zdanie podsumowujące odchylenie (puste, gdy zestaw jest w limicie).
+  String get deviationLabel {
+    switch (status) {
+      case VolumeBandStatus.within:
+        return '';
+      case VolumeBandStatus.slightlyAbove:
+      case VolumeBandStatus.farAbove:
+        return 'Przekroczono górny limit o $setsOverMax '
+            '${_setWord(setsOverMax)} ($deviationPercent%).';
+      case VolumeBandStatus.slightlyBelow:
+      case VolumeBandStatus.farBelow:
+        return 'Aktualna objętość jest o $deviationPercent% niższa niż dolna '
+            'granica ustawiona dla intensywności ${intensity.label.toLowerCase()}.';
+    }
+  }
+
+  static String _setWord(int value) =>
+      _plural(value, 'seria', 'serie', 'serii');
+
+  static String _workingSetWord(int value) => _plural(
+        value,
+        'seria robocza',
+        'serie robocze',
+        'serii roboczych',
+      );
+
+  static String _plural(int value, String one, String few, String many) {
+    if (value == 1) return one;
+    final mod10 = value % 10;
+    final mod100 = value % 100;
+    if (mod10 >= 2 && mod10 <= 4 && (mod100 < 12 || mod100 > 14)) return few;
+    return many;
+  }
+}
+
+/// Liczy objętość zestawu i porównuje ją z zakresem zalecanym dla [intensity].
+///
+/// Zakres powstaje z limitów WSZYSTKICH partii obecnych w zestawie: dolna
+/// granica to suma minimów, górna — suma maksimów. Dzięki temu dzień na dwie
+/// partie ma naturalnie szersze pasmo niż dzień na jedną.
+WorkoutVolumeBand describeWorkoutVolumeBand({
+  required List<PlanItem> items,
+  required Exercise Function(String id) resolve,
+  String level = '',
+  String goal = '',
+  VolumeLimitsConfig config = VolumeLimitsConfig.standard,
+  WorkoutIntensityLevel intensity = WorkoutIntensityLevel.moderate,
+}) {
+  final groups = <MuscleGroup, int>{};
+  final exerciseIds = <MuscleGroup, Set<String>>{};
+  var workingSets = 0;
+  for (final item in items) {
+    final exercise = resolve(item.exerciseId);
+    if (!isWorkingVolumeItem(item, exercise)) continue;
+    final group = primaryMuscleGroupOf(exercise);
+    final sets = item.sets < 1 ? 1 : item.sets;
+    groups[group] = (groups[group] ?? 0) + sets;
+    (exerciseIds[group] ??= <String>{}).add(item.exerciseId);
+    workingSets += sets;
+  }
+  if (groups.isEmpty) return WorkoutVolumeBand.empty;
+
+  var min = 0;
+  var max = 0;
+  var exerciseMin = 0;
+  var exerciseMax = 0;
+  var exerciseCount = 0;
+  for (final group in groups.keys) {
+    final limits = volumeLimitsFor(group,
+        level: level, goal: goal, config: config, intensity: intensity);
+    min += limits.minWorkingSets;
+    max += limits.maxWorkingSets;
+    exerciseMin += limits.exercises.min;
+    exerciseMax += limits.exercises.max;
+    exerciseCount += exerciseIds[group]?.length ?? 0;
+  }
+
+  // Próg „nieznacznie": 15% szerokości pasma (co najmniej 2 serie robocze),
+  // żeby jedna dołożona seria nie od razu krzyczała „znacznie powyżej".
+  final span = (max - min).abs();
+  final tolerance = (span * 0.15).round().clamp(2, 8);
+  final VolumeBandStatus status;
+  if (workingSets < min) {
+    status = (min - workingSets) <= tolerance
+        ? VolumeBandStatus.slightlyBelow
+        : VolumeBandStatus.farBelow;
+  } else if (workingSets > max) {
+    status = (workingSets - max) <= tolerance
+        ? VolumeBandStatus.slightlyAbove
+        : VolumeBandStatus.farAbove;
+  } else {
+    status = VolumeBandStatus.within;
+  }
+
+  return WorkoutVolumeBand(
+    workingSets: workingSets,
+    recommendedMin: min,
+    recommendedMax: max,
+    status: status,
+    intensity: intensity,
+    exerciseCount: exerciseCount,
+    exerciseMin: exerciseMin,
+    exerciseMax: exerciseMax,
+  );
 }

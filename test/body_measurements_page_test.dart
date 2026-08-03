@@ -6,7 +6,9 @@ import 'package:shared_preferences/shared_preferences.dart';
 void main() {
   TestWidgetsFlutterBinding.ensureInitialized();
 
-  testWidgets('body measurements page saves locally and renders history without overflow', (tester) async {
+  testWidgets(
+      'body measurements page saves locally and renders history without overflow',
+      (tester) async {
     SharedPreferences.setMockInitialValues({});
     final store = AppStore();
     await store.load();
@@ -24,7 +26,10 @@ void main() {
     );
     await tester.pump();
 
-    expect(find.text('Pomiary sylwetki'), findsOneWidget);
+    expect(find.text('Pomiar sylwetki'), findsOneWidget);
+    // Cel wagowy i migawka sylwetki mieszkają teraz TU (przeniesione z Postępu).
+    expect(find.byKey(const Key('body_snapshot_card')), findsOneWidget);
+    expect(find.byKey(const Key('weight_goal_card')), findsOneWidget);
     // Cała funkcja analizy sylwetki na początku strony: trzy okna zdjęć
     // (przód/bok/tył) obok siebie + cel + przycisk analizy.
     expect(find.text('Zdjęcia progresu'), findsOneWidget);
@@ -41,8 +46,10 @@ void main() {
     await tester.enterText(find.byKey(const Key('measurement_thigh')), '64');
     await tester.enterText(find.byKey(const Key('measurement_hips')), '105');
     await tester.enterText(find.byKey(const Key('measurement_calf')), '41');
-    await tester.enterText(find.byKey(const Key('measurement_shoulders')), '128');
-    await tester.enterText(find.byKey(const Key('measurement_note')), 'Pomiar rano');
+    await tester.enterText(
+        find.byKey(const Key('measurement_shoulders')), '128');
+    await tester.enterText(
+        find.byKey(const Key('measurement_note')), 'Pomiar rano');
     await tester.ensureVisible(find.byKey(const Key('save_body_measurement')));
     await tester.pumpAndSettle();
     await tester.tap(find.byKey(const Key('save_body_measurement')));
@@ -86,13 +93,15 @@ void main() {
     expect(tester.takeException(), isNull);
   });
 
-  testWidgets('body analysis runs locally without photos and saves to history', (tester) async {
+  testWidgets('body analysis runs locally without photos and saves to history',
+      (tester) async {
     SharedPreferences.setMockInitialValues({});
     final store = AppStore();
     await store.load();
     // Profil domyślny (masa+wzrost) wystarcza do lokalnego szacunku;
     // wybrany cel podpina się do wyniku analizy.
-    await store.updateSettings(store.settings.copyWith(targetSilhouette: 'v_taper'));
+    await store
+        .updateSettings(store.settings.copyWith(targetSilhouette: 'v_taper'));
     await tester.binding.setSurfaceSize(const Size(420, 1400));
     addTearDown(() => tester.binding.setSurfaceSize(null));
 
@@ -136,7 +145,8 @@ void main() {
     final restored = AppStore();
     await restored.load();
     expect(restored.bodyAnalyses, hasLength(1));
-    expect(restored.bodyAnalyses.single.composition.bodyFatPercent, analysis.composition.bodyFatPercent);
+    expect(restored.bodyAnalyses.single.composition.bodyFatPercent,
+        analysis.composition.bodyFatPercent);
     expect(tester.takeException(), isNull);
   });
 
@@ -160,11 +170,11 @@ void main() {
     await tester.pump();
 
     await tester.scrollUntilVisible(
-      find.text('Pomiary sylwetki'),
+      find.text('Pomiar sylwetki'),
       300,
       scrollable: find.byType(Scrollable).first,
     );
-    await tester.tap(find.text('Pomiary sylwetki'));
+    await tester.tap(find.text('Pomiar sylwetki'));
     await tester.pumpAndSettle();
 
     expect(find.text('Dodaj pomiar'), findsOneWidget);

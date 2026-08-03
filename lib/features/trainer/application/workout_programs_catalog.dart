@@ -159,51 +159,57 @@ class _ProgramTemplate {
 // Pule rozgrzewkowe POD PARTIE. Rozgrzewka ma przygotować to, co za chwilę
 // pracuje — wymachy nóg przed wyciskaniem tylko kradną czas. Każdy program ma
 // więc własną pulę; wspólnej puli ogólnej nie ma, bo nie miała odbiorcy.
-const List<String> _warmupPush = [ // klatka: wyciskania, pompki, dipy
+const List<String> _warmupPush = [
+  // klatka: wyciskania, pompki, dipy
   'arm_circles',
   'scapular_pushup',
   'doorway_chest_opener',
   'band_pull_apart',
   'wall_slides',
 ];
-const List<String> _warmupShoulders = [ // barki: praca nad głową, rotatory
+const List<String> _warmupShoulders = [
+  // barki: praca nad głową, rotatory
   'arm_circles',
   'wall_slides',
   'shoulder_external_rotation',
   'band_pull_apart',
   'scapular_pushup',
 ];
-const List<String> _warmupPull = [ // plecy: podciąganie, wiosłowanie
+const List<String> _warmupPull = [
+  // plecy: podciąganie, wiosłowanie
   'thoracic_rotation',
   'band_pull_apart',
   'scapular_pull',
   'arm_circles',
   'cat_cow',
 ];
-const List<String> _warmupArms = [ // ramiona: łokcie, nadgarstki, obręcz
+const List<String> _warmupArms = [
+  // ramiona: łokcie, nadgarstki, obręcz
   'arm_circles',
   'wrist_circles',
   'band_pull_apart',
   'scapular_pushup',
 ];
-const List<String> _warmupForearms = [ // przedramiona: chwyt i nadgarstki
+const List<String> _warmupForearms = [
+  // przedramiona: chwyt i nadgarstki
   'wrist_circles',
   'arm_circles',
   'band_pull_apart',
 ];
-const List<String> _warmupLegs = [ // nogi: biodra, kolana, kostki
+const List<String> _warmupLegs = [
+  // nogi: biodra, kolana, kostki
   'leg_swings',
   'hip_circles',
   'ankle_rocks',
   'world_greatest_stretch',
 ];
-const List<String> _warmupCore = [ // brzuch: tułów i biodra
+const List<String> _warmupCore = [
+  // brzuch: tułów i biodra
   'torso_twist',
   'cat_cow',
   'hip_circles',
   'world_greatest_stretch',
 ];
-
 
 // Pule ROZCIĄGANIA pod partie. Rozciąganie nie wchodzi już do dni treningowych
 // (robiło z nich dziury) — ma własne, krótkie zestawy w sekcji „Rozciąganie".
@@ -610,9 +616,8 @@ List<String> _pickIntense(
   Exercise Function(String) resolve,
 ) {
   if (pool.isEmpty) return const [];
-  final ranked = [...pool]
-    ..sort((a, b) => exerciseIntensityScore(resolve(b))
-        .compareTo(exerciseIntensityScore(resolve(a))));
+  final ranked = [...pool]..sort((a, b) => exerciseIntensityScore(resolve(b))
+      .compareTo(exerciseIntensityScore(resolve(a))));
   final loaded = [
     for (final id in ranked)
       if (_usesLoad(resolve(id).equipment)) id,
@@ -634,6 +639,7 @@ List<WorkoutPlan> buildWorkoutProgramCatalog({
   double heightCm = 0,
   int age = 0,
   VolumeLimitsConfig volumeLimits = VolumeLimitsConfig.standard,
+  WorkoutIntensityLevel intensity = WorkoutIntensityLevel.moderate,
 }) {
   return [
     for (final meta in kWorkoutProgramCatalog)
@@ -645,6 +651,7 @@ List<WorkoutPlan> buildWorkoutProgramCatalog({
         heightCm: heightCm,
         age: age,
         volumeLimits: volumeLimits,
+        intensity: intensity,
       ),
   ];
 }
@@ -680,6 +687,10 @@ WorkoutPlan buildWorkoutProgram(
   double heightCm = 0,
   int age = 0,
   VolumeLimitsConfig volumeLimits = VolumeLimitsConfig.standard,
+
+  /// Wybrana intensywność treningu. Przesuwa limity objętości (ile ćwiczeń,
+  /// serii i powtórzeń projektuje generator) oraz długość przerw.
+  WorkoutIntensityLevel intensity = WorkoutIntensityLevel.moderate,
 }) {
   final template = _templates[programId] ?? _templates['program_core']!;
   var profile = _profileFor(level);
@@ -704,10 +715,23 @@ WorkoutPlan buildWorkoutProgram(
   }
   final lowImpact = bmi >= 30;
 
+  // Intensywność zmienia też DŁUGOŚĆ PRZERW — ciężej znaczy dłużej odpocząć.
+  // Bez tego „bardzo wysoka" dawała więcej serii przy przerwach jak przy lekkiej.
+  if (intensity != WorkoutIntensityLevel.moderate) {
+    profile = _LevelProfile(
+      profile.baseSets,
+      (profile.strengthRest * intensity.restFactor).round(),
+      (profile.coreRest * intensity.restFactor).round(),
+      profile.repShift,
+    );
+  }
+
   final days = <WorkoutDay>[
     for (var d = 1; d <= 30; d++)
       _buildDay(d, template, profile, normalizedLevel, resolveExercise,
-          lowImpact: lowImpact, volumeLimits: volumeLimits),
+          lowImpact: lowImpact,
+          volumeLimits: volumeLimits,
+          intensity: intensity),
   ];
   return WorkoutPlan(
     id: '${programId}_$normalizedLevel',
@@ -728,6 +752,7 @@ WorkoutDay _buildDay(
   Exercise Function(String) resolve, {
   bool lowImpact = false,
   VolumeLimitsConfig volumeLimits = VolumeLimitsConfig.standard,
+  WorkoutIntensityLevel intensity = WorkoutIntensityLevel.moderate,
 }) {
   final week = (dayNumber - 1) ~/ 7; // 0..4
   final kind = _weekRhythm[(dayNumber - 1) % _weekRhythm.length];
@@ -973,6 +998,7 @@ WorkoutDay _buildDay(
     strengthRest: profile.strengthRest,
     coreRest: profile.coreRest,
     offset: offset,
+    intensity: intensity,
   );
   // Dzień CIĘŻKI idzie od najcięższego boju do najlżejszej pracy — bez
   // przeplatania go rozciąganiem. Mobilność ma swoje własne dni.
@@ -986,13 +1012,17 @@ WorkoutDay _buildDay(
 }
 
 /// Doprowadza zestaw dnia do LIMITÓW OBJĘTOŚCI partii:
-///  1. uzupełnia PARTIĘ WIODĄCĄ dnia, gdy ma mniej ćwiczeń niż minimum,
-///  2. przycina serie i powtórzenia do granic partii,
-///  3. usuwa nadmiar ćwiczeń ponad maksimum (odpadają najlżejsze).
+///  1. uzupełnia PARTIĘ WIODĄCĄ dnia do jej minimum ćwiczeń,
+///  2. uzupełnia POZOSTAŁE partie robocze dnia do ich minimów — najpierw
+///     z puli głównej, potem pomocniczej (kolejność: boje główne ▸ pomocnicze),
+///  3. przycina serie i powtórzenia do granic partii,
+///  4. usuwa nadmiar ćwiczeń ponad maksimum (odpadają najlżejsze).
 ///
-/// Uzupełniamy tylko partię wiodącą (tę, wokół której zbudowany jest dzień) —
-/// dokładanie ruchów każdej partii pobocznej rozdmuchałoby dzień do kilkunastu
-/// pozycji, mimo że limit mówi o partii, którą się dziś TRENUJE.
+/// Krok 2 jest nowy. Wcześniej uzupełniana była WYŁĄCZNIE partia wiodąca, więc
+/// dzień z limitem „8 ćwiczeń" potrafił zostać przy czterech, mimo że pula
+/// miała czym go dopełnić. Uzupełniamy tylko do MINIMÓW partii już obecnych
+/// w dniu — nie dokładamy nowych partii i nie pompujemy zestawu do maksimum
+/// „dla samej liczby".
 ///
 /// Limit powtórzeń bierzemy BEZ zawężania celem: dzień „Siła A" w programie na
 /// masę ma prawo iść po 5 powtórzeń. Zakres celu zawęża rekomendacje trenera
@@ -1009,37 +1039,50 @@ List<PlanItem> _withVolumeLimits(
   required int strengthRest,
   required int coreRest,
   required int offset,
+  WorkoutIntensityLevel intensity = WorkoutIntensityLevel.moderate,
 }) {
   if (!config.enabled || items.isEmpty) return items;
   var result = items;
+  final ordered = _pick(pool, pool.length, offset);
 
-  final leading = _leadingGroupOf(result, resolve);
-  if (leading != null) {
+  /// Dokłada brakujące ćwiczenia partii [group] z puli, zachowując kolejność.
+  void topUp(MuscleGroup group, String note) {
     final additions = topUpToMinimumExercises(
       items: result,
-      pool: _pick(pool, pool.length, offset),
+      pool: ordered,
       resolve: resolve,
-      group: leading,
+      group: group,
       level: level,
       config: config,
+      intensity: intensity,
     );
-    if (additions.isNotEmpty) {
-      result = [
-        ...result,
-        for (final id in additions)
-          _smartItem(
-            id,
-            resolve,
-            sets: sets,
-            strengthRest: strengthRest,
-            coreRest: coreRest,
-            durationBonus: durationBonus,
-            repBonus: repBonus,
-            weightHint: false,
-            note: 'Uzupełnienie objętości partii',
-          ),
-      ];
-    }
+    if (additions.isEmpty) return;
+    result = [
+      ...result,
+      for (final id in additions)
+        _smartItem(
+          id,
+          resolve,
+          sets: sets,
+          strengthRest: strengthRest,
+          coreRest: coreRest,
+          durationBonus: durationBonus,
+          repBonus: repBonus,
+          weightHint: false,
+          note: note,
+        ),
+    ];
+  }
+
+  // 1. Partia wiodąca — ta, wokół której zbudowany jest dzień.
+  final leading = _leadingGroupOf(result, resolve);
+  if (leading != null) topUp(leading, 'Uzupełnienie objętości partii');
+
+  // 2. Pozostałe partie robocze dnia, w kolejności pojawienia się w zestawie
+  //    (a więc od najcięższej pracy do najlżejszej).
+  for (final group in _workingGroupsInOrder(result, resolve)) {
+    if (group == leading) continue;
+    topUp(group, 'Uzupełnienie objętości partii');
   }
 
   return enforceVolumeLimits(
@@ -1047,8 +1090,25 @@ List<PlanItem> _withVolumeLimits(
     resolve,
     level: level,
     config: config,
+    intensity: intensity,
     weightOf: exerciseIntensityScore,
   );
+}
+
+/// Partie robocze zestawu w kolejności ich pierwszego wystąpienia.
+List<MuscleGroup> _workingGroupsInOrder(
+  List<PlanItem> items,
+  Exercise Function(String) resolve,
+) {
+  final seen = <MuscleGroup>{};
+  final result = <MuscleGroup>[];
+  for (final item in items) {
+    final exercise = resolve(item.exerciseId);
+    if (!isWorkingVolumeItem(item, exercise)) continue;
+    final group = primaryMuscleGroupOf(exercise);
+    if (seen.add(group)) result.add(group);
+  }
+  return result;
 }
 
 /// Partia WIODĄCA dnia: ta z największą liczbą pozycji roboczych; przy remisie
@@ -1659,7 +1719,6 @@ WorkoutPlan buildWarmupWorkout(
     ],
   );
 }
-
 
 // ============================================================================
 // Katalog zestawów ROZCIĄGANIA (osobno, poza dniami treningowymi)

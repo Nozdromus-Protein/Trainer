@@ -7,7 +7,9 @@ import 'package:shared_preferences/shared_preferences.dart';
 void main() {
   TestWidgetsFlutterBinding.ensureInitialized();
 
-  testWidgets('Trening tab shows the Intelligent Planner hero for an active program', (tester) async {
+  testWidgets(
+      'Trening tab shows the Intelligent Planner hero for an active program',
+      (tester) async {
     SharedPreferences.setMockInitialValues({});
     final store = AppStore();
     await store.load();
@@ -22,8 +24,14 @@ void main() {
       level: 'Średniozaawansowany',
       days: [
         WorkoutDay(weekday: today, title: 'Klatka + triceps', items: const [
-          PlanItem(exerciseId: 'pushup', sets: 3, reps: 10, durationSec: 0, note: ''),
-          PlanItem(exerciseId: 'squat', sets: 3, reps: 8, durationSec: 0, note: ''),
+          PlanItem(
+              exerciseId: 'pushup',
+              sets: 3,
+              reps: 10,
+              durationSec: 0,
+              note: ''),
+          PlanItem(
+              exerciseId: 'squat', sets: 3, reps: 8, durationSec: 0, note: ''),
         ]),
       ],
     );
@@ -46,8 +54,12 @@ void main() {
 
       // Planer na pierwszym planie: nagłówek dnia + akcja startu.
       expect(find.text('DZISIEJSZY TRENING'), findsOneWidget);
-      // Zamiast startu „w ciemno" prowadzimy do dnia z planu.
-      expect(find.byKey(const Key('continue_program_tile')), findsOneWidget);
+      // Wejście do zestawu prowadzi przez kafelki torów dnia. Osobny kafelek
+      // „Zacznij zestaw główny" został usunięty jako duplikat — te kafelki
+      // prowadzą do tych samych zestawów i pokazują ich zawartość.
+      expect(find.byKey(const Key('continue_program_tile')), findsNothing);
+      expect(find.byKey(const Key('today_blocks_section')), findsOneWidget);
+      expect(find.byKey(const Key('today_block_1')), findsOneWidget);
       expect(find.text('Rozpocznij trening'), findsNothing);
       // Program 30-dniowy pozostaje niżej (nie usunięty).
       expect(find.text('Programy 30-dniowe'), findsOneWidget);
@@ -55,7 +67,8 @@ void main() {
     }
   });
 
-  testWidgets('Czas i sprzęt są zwinięte, rozwijają się na żądanie', (tester) async {
+  testWidgets('Czas i sprzęt są zwinięte, rozwijają się na żądanie',
+      (tester) async {
     SharedPreferences.setMockInitialValues({});
     final store = AppStore();
     await store.load();
@@ -71,7 +84,11 @@ void main() {
       days: [
         WorkoutDay(weekday: today, title: 'Klatka', items: const [
           PlanItem(
-              exerciseId: 'pushup', sets: 3, reps: 10, durationSec: 0, note: ''),
+              exerciseId: 'pushup',
+              sets: 3,
+              reps: 10,
+              durationSec: 0,
+              note: ''),
         ]),
       ],
     ));
@@ -109,7 +126,9 @@ void main() {
     expect(tester.takeException(), isNull);
   });
 
-  testWidgets('Pre-workout analysis page renders planned exercises and forecast', (tester) async {
+  testWidgets(
+      'Pre-workout analysis page renders planned exercises and forecast',
+      (tester) async {
     SharedPreferences.setMockInitialValues({});
     final store = AppStore();
     await store.load();
@@ -123,7 +142,13 @@ void main() {
       isActive: true,
       days: [
         WorkoutDay(weekday: today, title: 'Nogi', items: const [
-          PlanItem(exerciseId: 'squat', sets: 4, reps: 8, durationSec: 0, note: '', suggestedWeightKg: 40),
+          PlanItem(
+              exerciseId: 'squat',
+              sets: 4,
+              reps: 8,
+              durationSec: 0,
+              note: '',
+              suggestedWeightKg: 40),
         ]),
       ],
     );

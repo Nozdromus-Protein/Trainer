@@ -5,8 +5,18 @@ import 'package:licznik_treningu/main.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
 const _exercisePool = [
-  'squat', 'goblet_squat', 'front_squat', 'lunge', 'reverse_lunge', 'pushup',
-  'incline_pushup', 'plank', 'side_plank', 'crunch', 'mountain_climber', 'burpee',
+  'squat',
+  'goblet_squat',
+  'front_squat',
+  'lunge',
+  'reverse_lunge',
+  'pushup',
+  'incline_pushup',
+  'plank',
+  'side_plank',
+  'crunch',
+  'mountain_climber',
+  'burpee',
 ];
 
 List<PlanItem> _buildItems(int count) => [
@@ -20,7 +30,8 @@ List<PlanItem> _buildItems(int count) => [
         ),
     ];
 
-Future<AppStore> _storeWithDay(List<PlanItem> items, {String title = 'Trening A'}) async {
+Future<AppStore> _storeWithDay(List<PlanItem> items,
+    {String title = 'Trening A'}) async {
   SharedPreferences.setMockInitialValues({});
   final store = AppStore();
   await store.load();
@@ -41,7 +52,8 @@ void main() {
   TestWidgetsFlutterBinding.ensureInitialized();
 
   for (final count in [5, 15, 30]) {
-    testWidgets('day details renders $count exercises without overflow', (tester) async {
+    testWidgets('day details renders $count exercises without overflow',
+        (tester) async {
       final store = await _storeWithDay(_buildItems(count));
       await tester.binding.setSurfaceSize(const Size(320, 720));
       addTearDown(() => tester.binding.setSurfaceSize(null));
@@ -51,7 +63,8 @@ void main() {
           theme: buildTheme(const Color(0xFF24D6A3), true),
           home: AppScope(
             store: store,
-            child: const WorkoutDayDetailsPage(planId: 'day-test-plan', dayIndex: 0),
+            child: const WorkoutDayDetailsPage(
+                planId: 'day-test-plan', dayIndex: 0),
           ),
         ),
       );
@@ -60,7 +73,18 @@ void main() {
       expect(find.text('Dzień 1'), findsOneWidget);
       expect(find.text('$count ćwiczeń'), findsOneWidget);
       expect(find.text('START'), findsOneWidget);
-      expect(find.text('Przewodnik'), findsOneWidget);
+      // Osobny kafelek „Przewodnik / Instrukcja ćwiczeń" został usunięty —
+      // instrukcja otwiera się dotknięciem konkretnego ćwiczenia na liście.
+      expect(find.text('Przewodnik'), findsNothing);
+      // Sprzęt i partie trenowane są ZWINIĘTE w jeden wiersz szczegółów.
+      expect(find.byKey(const Key('day_facts_toggle')), findsOneWidget);
+      expect(find.text('Sprzęt potrzebny'), findsNothing);
+      expect(find.text('Partie trenowane'), findsNothing);
+      // Sugestie progresji żyją pod ikoną przy statusie dnia.
+      expect(
+          find.byKey(const Key('progression_suggestion_icon')), findsWidgets);
+      // Nawigacja stoi w prawdziwym AppBarze nad grafiką nagłówka.
+      expect(find.byType(AppBar), findsOneWidget);
       // Przełącznik widoku Lista/Kompakt jest dostępny.
       expect(find.text('Lista'), findsOneWidget);
       expect(find.text('Kompakt'), findsOneWidget);
@@ -68,7 +92,8 @@ void main() {
     });
   }
 
-  testWidgets('day details works without multimedia (fallback thumbnails)', (tester) async {
+  testWidgets('day details works without multimedia (fallback thumbnails)',
+      (tester) async {
     // „lunge"/„crunch" nie mają multimediów — powinien pojawić się fallback bez crasha.
     final store = await _storeWithDay(_buildItems(6));
     await tester.binding.setSurfaceSize(const Size(360, 760));
@@ -79,7 +104,8 @@ void main() {
         theme: buildTheme(const Color(0xFF24D6A3), false),
         home: AppScope(
           store: store,
-          child: const WorkoutDayDetailsPage(planId: 'day-test-plan', dayIndex: 0),
+          child:
+              const WorkoutDayDetailsPage(planId: 'day-test-plan', dayIndex: 0),
         ),
       ),
     );
@@ -89,7 +115,8 @@ void main() {
     expect(tester.takeException(), isNull);
   });
 
-  testWidgets('rest day shows recovery screen instead of exercises', (tester) async {
+  testWidgets('rest day shows recovery screen instead of exercises',
+      (tester) async {
     final store = await _storeWithDay(const [], title: 'Dzień odpoczynku');
     await tester.binding.setSurfaceSize(const Size(320, 720));
     addTearDown(() => tester.binding.setSurfaceSize(null));
@@ -99,7 +126,8 @@ void main() {
         theme: buildTheme(const Color(0xFF24D6A3), true),
         home: AppScope(
           store: store,
-          child: const WorkoutDayDetailsPage(planId: 'day-test-plan', dayIndex: 0),
+          child:
+              const WorkoutDayDetailsPage(planId: 'day-test-plan', dayIndex: 0),
         ),
       ),
     );

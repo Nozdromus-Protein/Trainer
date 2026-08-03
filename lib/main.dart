@@ -579,6 +579,95 @@ double uiCornerRadius(BuildContext context, double base) {
   return base * _cornerScaleFor(style);
 }
 
+// ── GĘSTOŚĆ INTERFEJSU — jedna konfiguracja dla całej aplikacji ─────────────
+//
+// PROBLEM, KTÓRY TO ROZWIĄZUJE: ustawienie „Gęstość UI" sterowało tylko
+// [VisualDensity] i paddingiem przycisków, więc kafelki, odstępy sekcji
+// i nagłówki zostawały tej samej wysokości niezależnie od wyboru. Tryb
+// kompaktowy nic realnie nie zmniejszał.
+//
+// Teraz jedna skala ([uiDensityScale]) przechodzi przez wszystkie odstępy
+// ([uiGap]), paddingi ([uiInsets]) i rozmiary kafelków ([uiSize]). NIE dotyczy
+// obszarów dotykowych — te mają własną podłogę ([uiTouchSize]), żeby tryb
+// kompaktowy nie zrobił z przycisków celów nie do trafienia.
+
+/// Klucz gęstości ('compact' | 'normal' | 'large') z ustawień użytkownika.
+String uiDensityOf(BuildContext context) {
+  final scope = context
+      .getElementForInheritedWidgetOfExactType<AppScope>()
+      ?.widget as AppScope?;
+  final value = scope?.notifier?.settings.uiDensity ?? 'normal';
+  return normalizeUiDensity(value);
+}
+
+/// Normalizuje zapisany klucz gęstości (obce/stare wartości → 'normal').
+String normalizeUiDensity(String value) {
+  switch (value.trim().toLowerCase()) {
+    case 'compact':
+      return 'compact';
+    case 'large':
+      return 'large';
+    default:
+      return 'normal';
+  }
+}
+
+/// Mnożnik odstępów dla klucza gęstości.
+double uiDensityScaleFor(String density) {
+  switch (normalizeUiDensity(density)) {
+    case 'compact':
+      return 0.68;
+    case 'large':
+      return 1.22;
+    default:
+      return 1.0;
+  }
+}
+
+/// Mnożnik odstępów wynikający z aktualnych ustawień.
+double uiDensityScale(BuildContext context) =>
+    uiDensityScaleFor(uiDensityOf(context));
+
+/// Odstęp (SizedBox / margines) przeskalowany gęstością. Zaokrąglany do
+/// pełnych pikseli, żeby wiersze nie „drgały" po zmianie ustawienia.
+double uiGap(BuildContext context, double base) {
+  if (base <= 0) return base;
+  final scaled = base * uiDensityScale(context);
+  // Odstęp nigdy nie znika całkowicie — bez tego elementy skleiłyby się w blok.
+  return scaled < 2 ? 2 : scaled.roundToDouble();
+}
+
+/// Padding karty/kafelka przeskalowany gęstością (z podłogą czytelności).
+EdgeInsets uiInsets(BuildContext context, EdgeInsets base) {
+  final scale = uiDensityScale(context);
+  double axis(double value) {
+    if (value <= 0) return value;
+    final scaled = value * scale;
+    return scaled < 6 ? 6 : scaled.roundToDouble();
+  }
+
+  return EdgeInsets.fromLTRB(
+    axis(base.left),
+    axis(base.top),
+    axis(base.right),
+    axis(base.bottom),
+  );
+}
+
+/// Rozmiar elementu dekoracyjnego (ikona, awatar, pasek) wg gęstości.
+/// [min] chroni przed zniknięciem elementu w trybie kompaktowym.
+double uiSize(BuildContext context, double base, {double min = 12}) {
+  final scaled = base * uiDensityScale(context);
+  return scaled < min ? min : scaled.roundToDouble();
+}
+
+/// Rozmiar elementu DOTYKOWEGO. Skaluje się jak reszta, ale nigdy nie schodzi
+/// poniżej bezpiecznych 44 px — tryb kompaktowy zmniejsza wygląd, nie celność.
+double uiTouchSize(BuildContext context, double base) {
+  final scaled = base * uiDensityScale(context);
+  return scaled < 44 ? 44 : scaled.roundToDouble();
+}
+
 String normalizeLevel(String value) {
   final v = value.trim().toLowerCase();
   // „śred" MUSI być sprawdzone przed „zaaw": słowo „średnioza(zaaw)ansowany"
@@ -656,9 +745,11 @@ class _FitnessAppState extends State<FitnessApp> with WidgetsBindingObserver {
       unawaited(
         Future<void>.delayed(const Duration(seconds: 30), () async {
           await trainerAccountService.init();
-          await trainerAccountService.autoBackupDailyIfNeeded(
-            () => buildFullExport(store),
-          );
+          // Limit czasu: zawieszony upload nie może wisieć bez końca
+          // z pełnym eksportem trzymanym w pamięci.
+          await trainerAccountService
+              .autoBackupDailyIfNeeded(() => buildFullExport(store))
+              .timeout(AppStore.kCloudBackupTimeout, onTimeout: () {});
         }),
       );
     });
@@ -696,9 +787,9 @@ class _FitnessAppState extends State<FitnessApp> with WidgetsBindingObserver {
       unawaited(
         Future<void>.delayed(
           const Duration(seconds: 10),
-          () => trainerAccountService.autoBackupDailyIfNeeded(
-            () => buildFullExport(store),
-          ),
+          () => trainerAccountService
+              .autoBackupDailyIfNeeded(() => buildFullExport(store))
+              .timeout(AppStore.kCloudBackupTimeout, onTimeout: () {}),
         ),
       );
     }
@@ -1192,6 +1283,31 @@ Widget? trainerBackgroundImageLayer(AppSettings settings) {
   );
 }
 
+// Cache palet [ColorScheme.fromSeed]. Wyliczenie palety z ziarna to pełna
+// analiza barwna (HCT) — kosztowna i całkowicie deterministyczna.
+//
+// PROBLEM, KTÓRY TO ROZWIĄZUJE: cały `MaterialApp` przebudowuje się przy KAŻDYM
+// `notifyListeners()` sklepu, a jego budowa woła `buildTheme` dwa razy (jasny
+// i ciemny). Po zakończeniu treningu notyfikacji jest kilka pod rząd (zapis
+// logów, korekta dnia, plany, synchronizacja zdrowia) — i każda liczyła paletę
+// od zera dwa razy. To była wymierna część „zawieszenia" po kliknięciu Gotowe.
+final Map<int, ColorScheme> _seededSchemeCache = <int, ColorScheme>{};
+
+ColorScheme _seededScheme(Color seed, bool dark) {
+  final key = Object.hash(seed.toARGB32(), dark);
+  final cached = _seededSchemeCache[key];
+  if (cached != null) return cached;
+  final scheme = ColorScheme.fromSeed(
+    seedColor: seed,
+    brightness: dark ? Brightness.dark : Brightness.light,
+  );
+  // Paleta zależy wyłącznie od ziarna i jasności, więc cache nie rośnie poza
+  // liczbę użytych kolorów akcentu. Bezpiecznik na wypadek generatorów kolorów.
+  if (_seededSchemeCache.length > 64) _seededSchemeCache.clear();
+  _seededSchemeCache[key] = scheme;
+  return scheme;
+}
+
 /// Buduje motyw aplikacji. [settings] (opcjonalne — testy wołają bez nich)
 /// wnosi personalizację: motyw UI, zaokrąglenia, styl kart i gęstość.
 ThemeData buildTheme(Color accent, bool dark, {AppSettings? settings}) {
@@ -1199,12 +1315,9 @@ ThemeData buildTheme(Color accent, bool dark, {AppSettings? settings}) {
   final style = themeStyleById(settings?.themeStyleId ?? 'classic_sport');
   final cornerScale = _cornerScaleFor(settings?.cornerStyle ?? 'soft');
   final cardStyle = settings?.cardStyle ?? 'flat';
-  final density = settings?.uiDensity ?? 'normal';
+  final density = normalizeUiDensity(settings?.uiDensity ?? 'normal');
 
-  final scheme = ColorScheme.fromSeed(
-    seedColor: seed,
-    brightness: dark ? Brightness.dark : Brightness.light,
-  );
+  final scheme = _seededScheme(seed, dark);
 
   final scaffoldColor = dark
       ? Color(style.scaffoldDark ?? 0xFF0D1117)
@@ -1417,8 +1530,10 @@ class AppStore extends ChangeNotifier {
   /// [onProgress] raportuje postęp (0..1) i nazwę bieżącego kroku — splash
   /// pokazuje z tego pasek i podpis małym druczkiem. Etapy są dobrane tak, by
   /// odpowiadały realnej pracy, a nie równym odcinkom paska.
-  Future<void> load({void Function(double progress, String step)? onProgress}) async {
-    void step(double progress, String label) => onProgress?.call(progress, label);
+  Future<void> load(
+      {void Function(double progress, String step)? onProgress}) async {
+    void step(double progress, String label) =>
+        onProgress?.call(progress, label);
 
     step(0.04, 'Otwieram bazę treningów…');
     final trainerData = await _trainerRepository.load();
@@ -1792,10 +1907,17 @@ class AppStore extends ChangeNotifier {
 
   Future<void> saveLogs() async {
     _recoveryCache = null; // każda zmiana logów unieważnia mapę regeneracji
+    // …a wraz z nią rozstrzygnięty plan dnia: nowy trening zmienia regenerację,
+    // więc rozkład może przestawić dni. Bez tego kalendarz i „Dzisiejszy
+    // trening" trzymałyby stan sprzed treningu aż do restartu aplikacji.
+    invalidatePlannerCaches();
     await _trainerRepository.saveSessions(logs);
   }
 
   Future<void> savePlans() async {
+    // Ukończone dni i zmiany w zestawach zmieniają bloki dnia oraz propozycję
+    // Planera — cache musi za tym nadążyć bez restartu.
+    invalidatePlannerCaches();
     await _trainerRepository.savePlans(plans);
   }
 
@@ -1825,18 +1947,123 @@ class AppStore extends ChangeNotifier {
   TrainingScheduleConfig get trainingScheduleConfig => settings.trainingSchedule
       .copyWith(trainingWeekdays: settings.trainingWeekdays);
 
+  // ── ROZSTRZYGNIĘTY PLAN DNIA — JEDNO ŹRÓDŁO PRAWDY ────────────────────────
+  //
+  // PROBLEM, KTÓRY TO ROZWIĄZUJE: każdy ekran liczył rozkład we WŁASNYM oknie.
+  // Kalendarz brał 7 dni od poniedziałku, planer 7 dni od dziś, a „Dzisiejszy
+  // trening" — JEDEN dzień. Przestawianie dni pod regenerację
+  // ([resolveScheduleWithRecovery]) szuka zamiany wśród KOLEJNYCH dni okna, więc
+  // w oknie jednodniowym nie miało z czym zamieniać: kalendarz pokazywał już
+  // zamienione Pull, a ekran dnia — nieprzestawiony Push. Dwa ekrany, dwie
+  // odpowiedzi na to samo pytanie.
+  //
+  // Teraz rozstrzygnięty rozkład powstaje RAZ, w jednym kanonicznym oknie
+  // (od poniedziałku bieżącego tygodnia, [_kResolvedScheduleDays] dni), jest
+  // cache'owany i wszyscy tylko go KROJĄ. Plan pierwotny (rotacja z ustawień),
+  // plan po korektach Planera (to okno) i trening faktycznie przypisany do dnia
+  // ([resolvedDayFor]) są rozróżnione i wyprowadzone z tego samego źródła.
+  List<ScheduledDay>? _resolvedScheduleCache;
+  String _resolvedScheduleCacheKey = '';
+  DateTime _resolvedScheduleStart = DateTime(2000);
+
+  /// Długość kanonicznego okna rozstrzygania (6 tygodni od poniedziałku).
+  /// Musi być dłuższa niż każdy widok, który z niego kroi (kalendarz miesiąca,
+  /// planer 4-tygodniowy), inaczej ekran znów liczyłby po swojemu.
+  static const int _kResolvedScheduleDays = 42;
+
+  /// Początek kanonicznego okna: poniedziałek tygodnia, w którym jest [now].
+  DateTime _resolvedScheduleAnchor(DateTime now) {
+    final today = DateTime(now.year, now.month, now.day);
+    return today.subtract(Duration(days: today.weekday - 1));
+  }
+
+  /// Odcisk danych, po zmianie których rozkład trzeba przeliczyć.
+  String _resolvedScheduleKey(DateTime anchor, DateTime now) {
+    final minuteBucket = now.millisecondsSinceEpoch ~/ 60000;
+    return '${anchor.toIso8601String()}_$minuteBucket'
+        '_${logs.length}_${logs.isEmpty ? '' : logs.first.id}'
+        '_${activityEntries.length}'
+        '_${activityEntries.isEmpty ? '' : activityEntries.first.id}'
+        '_${_weekPlanCacheKey()}'
+        '_${trainingScheduleConfig.enabled}'
+        '_${trainingScheduleConfig.strategy.key}'
+        '_${settings.trainingWeekdays.join(',')}'
+        '_${settings.level}_${settings.bodyWeightKg}'
+        '_${deloadCycle.toJson()}'
+        '_${customExercises.length}';
+  }
+
+  /// Unieważnia wszystkie pochodne planu dnia (rozkład, porada tygodnia,
+  /// propozycja Planera). Wołane po każdej zmianie, która może przestawić dzień
+  /// — dzięki temu ekrany odświeżają się bez restartu aplikacji.
+  void invalidatePlannerCaches() {
+    _resolvedScheduleCache = null;
+    _resolvedScheduleCacheKey = '';
+    _weeklyAdviceCache = null;
+    _weeklyAdviceCacheKey = '';
+    _plannedWorkoutCache = null;
+    _plannedWorkoutCacheKey = '';
+  }
+
+  /// KANONICZNY rozstrzygnięty rozkład (cache). To on jest źródłem prawdy dla
+  /// kalendarza, „Dzisiejszego treningu", szczegółów dnia i rekomendacji.
+  List<ScheduledDay> resolvedSchedule([DateTime? now]) {
+    final reference = now ?? DateTime.now();
+    final anchor = _resolvedScheduleAnchor(reference);
+    final key = _resolvedScheduleKey(anchor, reference);
+    final cached = _resolvedScheduleCache;
+    if (cached != null && key == _resolvedScheduleCacheKey) return cached;
+    final computed =
+        _computeSchedule(anchor, _kResolvedScheduleDays, now: reference);
+    _resolvedScheduleCache = computed;
+    _resolvedScheduleCacheKey = key;
+    _resolvedScheduleStart = anchor;
+    return computed;
+  }
+
+  /// Rozstrzygnięty dzień dla dowolnej daty (`null` = poza oknem / brak rozkładu).
+  ScheduledDay? resolvedDayFor(DateTime date, [DateTime? now]) {
+    final schedule = resolvedSchedule(now);
+    if (schedule.isEmpty) return null;
+    final target = DateTime(date.year, date.month, date.day);
+    final index = target.difference(_resolvedScheduleStart).inDays;
+    if (index < 0 || index >= schedule.length) return null;
+    return schedule[index];
+  }
+
   /// Rozkład na kolejne [days] dni od [from] (domyślnie od dziś).
   ///
-  /// Deterministyczny: nie zależy od tego, który zestaw ostatnio otworzyłeś.
-  /// Regeneracja może PRZESTAWIĆ dni (z adnotacją), a dni deloadu są oznaczone.
+  /// KROI kanoniczne okno, kiedy tylko żądany zakres się w nim mieści — dzięki
+  /// temu kalendarz, planer i „dzisiejszy trening" nie mogą się rozjechać.
+  /// Poza oknem (odległa przyszłość) liczy osobno, bo to już tylko podgląd.
   List<ScheduledDay> trainingScheduleFor({DateTime? from, int days = 28}) {
+    if (days <= 0) return const [];
     final now = DateTime.now();
-    final start = from ?? DateTime(now.year, now.month, now.day);
+    final start = from == null
+        ? DateTime(now.year, now.month, now.day)
+        : DateTime(from.year, from.month, from.day);
+    final canonical = resolvedSchedule(now);
+    if (canonical.isNotEmpty) {
+      final offset = start.difference(_resolvedScheduleStart).inDays;
+      if (offset >= 0 && offset + days <= canonical.length) {
+        return canonical.sublist(offset, offset + days);
+      }
+    }
+    return _computeSchedule(start, days, now: now);
+  }
+
+  /// Surowe liczenie rozkładu dla wskazanego okna (bez cache).
+  List<ScheduledDay> _computeSchedule(
+    DateTime start,
+    int days, {
+    DateTime? now,
+  }) {
+    final reference = now ?? DateTime.now();
     final base = buildSchedule(trainingScheduleConfig, start, days);
     if (base.isEmpty) return base;
-    final recovery = muscleRecoveryMap(now);
+    final recovery = muscleRecoveryMap(reference);
     double readiness(TrainingFocusArea area, DateTime date) =>
-        scheduleReadiness(area, date, now, recovery);
+        scheduleReadiness(area, date, reference, recovery);
     // 1. Regeneracja PRZESTAWIA dni (rotacja partii/bloków w tygodniu).
     //    Dodatek dnia oceniamy z pominięciem partii, które i tak obciąża dziś
     //    blok główny — inaczej „barki po klatce" kasowały same siebie —
@@ -1847,9 +2074,9 @@ class AppStore extends ChangeNotifier {
       base,
       readiness,
       readinessIgnoring: (area, date, ignore) => scheduleReadiness(
-          area, date, now, recovery,
+          area, date, reference, recovery,
           ignoreMuscles: ignore, bestMuscle: true),
-      isLocked: (day) => isScheduleDayLocked(day, now),
+      isLocked: (day) => isScheduleDayLocked(day, reference),
     );
     // 2. Oznaczamy okno deloadu…
     final withDeload = [
@@ -1864,7 +2091,7 @@ class AppStore extends ChangeNotifier {
       readiness,
       deloadScale:
           deloadStatusToday.isDeload ? deloadStatusToday.intensityFactor : 0.6,
-      isLocked: (day) => isScheduleDayLocked(day, now),
+      isLocked: (day) => isScheduleDayLocked(day, reference),
     );
   }
 
@@ -1901,9 +2128,63 @@ class AppStore extends ChangeNotifier {
   /// Dzień rozkładu przypadający na DZIŚ (obszar, deload, ewentualne
   /// przestawienie). To on decyduje, co pokazujemy jako „dzisiejszy trening" —
   /// nie ostatnio kliknięty zestaw.
-  ScheduledDay? get todayScheduled {
-    final today = trainingScheduleFor(days: 1);
-    return today.isEmpty ? null : today.first;
+  ///
+  /// Bierze go z KANONICZNEGO okna ([resolvedSchedule]), więc jest dokładnie
+  /// tym samym dniem, który widać w kalendarzu. Wcześniej liczył własne okno
+  /// jednodniowe, w którym przestawianie dni nie miało z czym zamieniać — i to
+  /// był powód, dla którego kalendarz pokazywał Pull, a ten ekran Push.
+  ScheduledDay? get todayScheduled => resolvedDayFor(DateTime.now());
+
+  /// Dzień DZISIEJSZY wg planu PIERWOTNEGO (sama rotacja z ustawień, bez
+  /// korekt regeneracji). Potrzebny, żeby powiedzieć użytkownikowi, co się
+  /// zmieniło — nie do prowadzenia treningu.
+  TrainingDayPlan get todayOriginalPlan =>
+      trainingScheduleConfig.planForWeekday(DateTime.now().weekday);
+
+  /// Zmiana dzisiejszego dnia wprowadzona przez Inteligentny Planer
+  /// (`null` = plan dnia jest zgodny z rotacją).
+  PlannerDayChange? get todayPlanChange {
+    final now = DateTime.now();
+    final today = resolvedDayFor(now, now);
+    if (today == null || today.isRest) return null;
+    final actual = today.area;
+    final planned = today.movedFrom;
+    if (actual == null || planned == null || planned == actual) return null;
+
+    // Dokąd trafił pierwotny dzień: pierwszy późniejszy dzień okna, który
+    // przejął naszą partię (i oddał tę, którą dziś trenujemy).
+    DateTime? movedTo;
+    for (final day in resolvedSchedule(now)) {
+      if (!day.date.isAfter(today.date)) continue;
+      if (day.area == planned) {
+        movedTo = day.date;
+        break;
+      }
+    }
+
+    // Partia, przez którą dzień się nie odbył — najsłabiej zregenerowana
+    // z partii DEFINIUJĄCYCH pierwotny obszar.
+    final recovery = muscleRecoveryMap(now);
+    BodyMuscle? blocking;
+    var worst = 101.0;
+    for (final muscle in planned.signatureMuscles) {
+      final state = recovery[muscle];
+      final percent = state == null || !state.hasData
+          ? 100.0
+          : (state.recoveryPercent ?? 100);
+      if (percent < worst) {
+        worst = percent;
+        blocking = muscle;
+      }
+    }
+
+    return PlannerDayChange(
+      plannedArea: planned,
+      actualArea: actual,
+      movedTo: movedTo,
+      blockingMuscle: blocking,
+      blockingPercent: worst > 100 ? 100 : worst,
+    );
   }
 
   /// Rozkład tygodnia w postaci przekazywanej planerowi (7 dni od dziś).
@@ -2888,6 +3169,10 @@ class AppStore extends ChangeNotifier {
   }
 
   Future<void> saveSettings() async {
+    // Ustawienia niosą rotację, dni treningowe, poziom i deload — czyli
+    // wszystko, z czego powstaje rozstrzygnięty plan dnia. Zapis musi ten plan
+    // unieważnić, inaczej ekrany pokazywałyby poprzedni rozkład do restartu.
+    invalidatePlannerCaches();
     final prefs = await SharedPreferences.getInstance();
     await prefs.setString(_settingsKey, jsonEncode(settings.toJson()));
   }
@@ -5439,8 +5724,29 @@ class AppStore extends ChangeNotifier {
   /// pokazuje przed startem to, co za chwilę zobaczysz na ekranie ćwiczenia —
   /// można przygotować obciążenie, zanim naciśniesz „Start". Zwraca 0, gdy typ
   /// wpisu nie korzysta z ciężaru albo nie ma z czego go wyliczyć.
+  // Cache ciężarów z recepty. Liczy je pełny silnik recept po historii
+  // ćwiczenia, a lista dnia woła go DLA KAŻDEJ POZYCJI przy każdym buildzie —
+  // to jeden z ekranów, na który wraca się po zakończeniu treningu, więc koszt
+  // przypadał dokładnie na moment, w którym UI musi być płynne.
+  final Map<String, double> _plannedWeightCache = <String, double>{};
+  String _plannedWeightCacheSignature = '';
+
   double plannedWeightForPlanItem(PlanItem item, Exercise def) {
     if (!def.entryType.showsWeight) return 0;
+    if (_plannedWeightCacheSignature != _logsSignature) {
+      _plannedWeightCacheSignature = _logsSignature;
+      _plannedWeightCache.clear();
+    }
+    final key = '${def.id}|${item.sets}|${item.reps}|${item.suggestedWeightKg}'
+        '|${item.restSeconds}|${item.durationSec}';
+    final cached = _plannedWeightCache[key];
+    if (cached != null) return cached;
+    final value = _computePlannedWeightForPlanItem(item, def);
+    _plannedWeightCache[key] = value;
+    return value;
+  }
+
+  double _computePlannedWeightForPlanItem(PlanItem item, Exercise def) {
     final rx = buildSessionPrescription(
       def,
       baseSets: item.sets,
@@ -6020,14 +6326,150 @@ class AppStore extends ChangeNotifier {
   /// przepisuje w tle programu, w którym użytkownik jest w połowie.
   Future<void> setVolumeLimits(VolumeLimitsConfig config) async {
     volumeLimits = config;
+    invalidatePlannerCaches();
     final prefs = await SharedPreferences.getInstance();
     await prefs.setString(_volumeLimitsKey, jsonEncode(config.toJson()));
     notifyListeners();
   }
 
-  /// Limity dla partii z uwzględnieniem poziomu użytkownika.
-  MuscleVolumeLimits volumeLimitsForGroup(MuscleGroup group) =>
-      volumeLimitsFor(group, level: settings.level, config: volumeLimits);
+  /// Limity dla partii z uwzględnieniem poziomu użytkownika i INTENSYWNOŚCI.
+  MuscleVolumeLimits volumeLimitsForGroup(
+    MuscleGroup group, {
+    WorkoutIntensityLevel? intensity,
+  }) =>
+      volumeLimitsFor(
+        group,
+        level: settings.level,
+        config: volumeLimits,
+        intensity: intensity ?? activeIntensityLevel,
+      );
+
+  /// Intensywność obowiązująca dla bieżącego dnia programu — wyprowadzona
+  /// z gałki kroków (program + dzień). To ona przesuwa limity objętości.
+  WorkoutIntensityLevel get activeIntensityLevel =>
+      WorkoutIntensityLevel.fromSteps(activeEffectiveIntensitySteps);
+
+  /// Intensywność konkretnego dnia planu.
+  WorkoutIntensityLevel intensityLevelFor(WorkoutPlan plan, WorkoutDay day) =>
+      WorkoutIntensityLevel.fromSteps(effectiveIntensitySteps(plan, day));
+
+  /// Dlaczego zestaw ma MNIEJ ćwiczeń, niż pozwalają limity.
+  ///
+  /// Generator uzupełnia dzień do minimum partii, ale nie zawsze ma czym:
+  /// warianty bywają zablokowane regeneracją, brakiem sprzętu, ograniczeniami
+  /// albo poziomem. Zamiast po cichu oddawać krótszy zestaw, mówimy wprost
+  /// „użyto 6 z 8, ponieważ…".
+  SetCompleteness describeSetCompleteness(
+    List<PlanItem> items, {
+    WorkoutIntensityLevel? intensity,
+  }) {
+    final level = intensity ?? activeIntensityLevel;
+    final band = volumeBandFor(items, intensity: level);
+    if (!band.hasData || band.exerciseCount >= band.exerciseMin) {
+      return SetCompleteness(
+        used: band.exerciseCount,
+        target: band.exerciseMin,
+        reasons: const [],
+      );
+    }
+
+    // Partie, którym brakuje ćwiczeń do minimum.
+    Exercise resolve(String id) => ExerciseRepo.byId(id, customExercises);
+    final report = analyzeWorkoutVolume(
+      items: items,
+      resolve: resolve,
+      level: settings.level,
+      config: volumeLimits,
+      intensity: level,
+    );
+    final shortGroups = report.groupsNeedingMore.toSet();
+    if (shortGroups.isEmpty) {
+      return SetCompleteness(
+          used: band.exerciseCount,
+          target: band.exerciseMin,
+          reasons: const []);
+    }
+
+    final owned = settings.equipmentProfile.resolveOwned();
+    final limits = settings.limitationProfile;
+    final recovery = muscleRecoveryMap();
+    final used = {for (final item in items) item.exerciseId};
+    final userRank = _volumeLevelRank(settings.level);
+
+    final tiredMuscles = <BodyMuscle>{};
+    var blockedByRecovery = 0;
+    var blockedByEquipment = 0;
+    var blockedByLimitation = 0;
+    var blockedByLevel = 0;
+    var available = 0;
+
+    for (final def in ExerciseRepo.combined(customExercises)) {
+      if (used.contains(def.id)) continue;
+      if (!shortGroups.contains(primaryMuscleGroupOf(def))) continue;
+      // Kolejność sprawdzania = kolejność ważności powodu w komunikacie.
+      final tired = <BodyMuscle>[
+        for (final impact in def.effectiveMuscleImpacts)
+          if (impact.role != MuscleRole.stabilizer &&
+              (recovery[impact.muscleGroup]?.recoveryPercent ?? 100) < 60)
+            impact.muscleGroup,
+      ];
+      if (tired.isNotEmpty) {
+        blockedByRecovery++;
+        tiredMuscles.addAll(tired);
+        continue;
+      }
+      if (exerciseViolatesLimitation(def, limits)) {
+        blockedByLimitation++;
+        continue;
+      }
+      if (!isExerciseAvailable(def, owned)) {
+        blockedByEquipment++;
+        continue;
+      }
+      if (_volumeLevelRank(def.level) > userRank) {
+        blockedByLevel++;
+        continue;
+      }
+      available++;
+    }
+
+    final reasons = <String>[
+      if (blockedByRecovery > 0)
+        'kolidują z regeneracją '
+            '(${tiredMuscles.take(2).map((m) => m.label.toLowerCase()).join(', ')})',
+      if (blockedByEquipment > 0) 'wymagają niedostępnego sprzętu',
+      if (blockedByLimitation > 0) 'kolidują z Twoimi ograniczeniami',
+      if (blockedByLevel > 0) 'są trudniejsze niż Twój poziom',
+      if (blockedByRecovery == 0 &&
+          blockedByEquipment == 0 &&
+          blockedByLimitation == 0 &&
+          blockedByLevel == 0 &&
+          available == 0)
+        'baza nie ma więcej bezpiecznych wariantów na tę partię',
+    ];
+
+    return SetCompleteness(
+      used: band.exerciseCount,
+      target: band.exerciseMin,
+      reasons: reasons,
+    );
+  }
+
+  /// Objętość zestawu vs zakres zalecany dla wybranej intensywności.
+  ///
+  /// Zasila komunikat „Aktualna objętość: 34 serie robocze / Zalecany zakres…"
+  /// oraz rozróżnienie w limicie ▸ nieznacznie ▸ znacznie poza limitem.
+  WorkoutVolumeBand volumeBandFor(
+    List<PlanItem> items, {
+    WorkoutIntensityLevel? intensity,
+  }) =>
+      describeWorkoutVolumeBand(
+        items: items,
+        resolve: (id) => ExerciseRepo.byId(id, customExercises),
+        level: settings.level,
+        config: volumeLimits,
+        intensity: intensity ?? activeIntensityLevel,
+      );
 
   /// Czy rozgrzewka [warmupId] została ukończona na tyle niedawno, że bramka
   /// ciężkiego dnia może przepuścić trening (okno [kWarmupFreshness]).
@@ -6220,11 +6662,13 @@ class AppStore extends ChangeNotifier {
     workoutResumeColdStart = false;
     await saveActiveWorkoutSession();
     notifyListeners();
-    // Kopia w chmurze po zakończeniu treningu — wymuszona (bez throttla).
-    unawaited(trainerAccountService.autoBackupEvent(
-      () => buildFullExport(this),
-      minInterval: Duration.zero,
-    ));
+    // Kopia w chmurze po zakończeniu treningu — wymuszona (bez throttla), ale
+    // ODROCZONA. `buildFullExport` + `jsonEncode` całej historii to sekundy
+    // pracy NA WĄTKU UI; puszczone tutaj konkurowały z otwieraniem podsumowania
+    // i z powrotem po „Gotowe", przez co ekran wyglądał na zawieszony.
+    // Trening jest już zapisany LOKALNIE — chmura może poczekać kilka sekund
+    // i jej niepowodzenie niczego nie blokuje.
+    _scheduleCloudBackupAfterWorkout();
 
     // Log pomocniczy po treningu: ćwiczenia, obciążone partie, wagi i % regeneracji.
     if (kDebugMode) {
@@ -6243,6 +6687,40 @@ class AppStore extends ChangeNotifier {
       });
     }
     return summary;
+  }
+
+  /// Ile czekamy z kopią w chmurze po zakończeniu treningu. Na tyle długo, żeby
+  /// podsumowanie zdążyło się otworzyć i zamknąć bez rywalizacji o wątek UI.
+  static const Duration kPostWorkoutBackupDelay = Duration(seconds: 12);
+
+  /// Limit czasu operacji sieciowej kopii. Brak internetu albo zawieszony
+  /// upload NIE może zostawić wiszącego zadania trzymającego dane w pamięci.
+  static const Duration kCloudBackupTimeout = Duration(seconds: 45);
+
+  /// Odroczona kopia w chmurze po treningu (bez blokowania UI i nawigacji).
+  void _scheduleCloudBackupAfterWorkout() {
+    // Bez konta/Firebase kopia i tak nic by nie zrobiła — nie zostawiamy
+    // wiszącego timera (przeszkadzałby też testom widgetowym).
+    if (!trainerAccountService.firebaseAvailable ||
+        !trainerAccountService.signedIn) {
+      return;
+    }
+    unawaited(
+      Future<void>.delayed(kPostWorkoutBackupDelay, () async {
+        try {
+          await trainerAccountService
+              .autoBackupEvent(
+                () => buildFullExport(this),
+                minInterval: Duration.zero,
+              )
+              .timeout(kCloudBackupTimeout);
+        } catch (error) {
+          if (kDebugMode) {
+            debugPrint('[Account] Kopia po treningu nieudana: $error');
+          }
+        }
+      }),
+    );
   }
 
   /// Etap 31: dopisuje informację zwrotną (ocena / ból) do notatki sesji w historii.
@@ -6337,6 +6815,9 @@ class AppStore extends ChangeNotifier {
         '_${_weekPlanCacheKey()}'
         '_${activeWorkoutPlan?.id ?? ''}_${activeWorkoutPlan?.completedDays.length ?? 0}'
         '_${customExercises.length}_$bucket'
+        // Rozstrzygnięty dzień (po przestawieniach Planera) należy do klucza —
+        // inaczej porada mogłaby przez kilka minut opisywać dzień sprzed zmiany.
+        '_${resolvedDayFor(reference, reference)?.labelWithLoad ?? ''}'
         '_${deloadStatusOn(reference).intensityFactor.toStringAsFixed(2)}';
     final cached = _weeklyAdviceCache;
     if (cached != null && key == _weeklyAdviceCacheKey) return cached;
@@ -6408,7 +6889,10 @@ class AppStore extends ChangeNotifier {
         '_${settings.bodyWeightKg}_${settings.trainingWeekdays.join(',')}'
         '_${_weekPlanCacheKey()}'
         '_${activeWorkoutPlan?.id ?? ''}_${activeWorkoutPlan?.completedDays.length ?? 0}'
-        '_${customExercises.length}_$bucket';
+        '_${customExercises.length}_$bucket'
+        // Ten sam rozstrzygnięty dzień, co w kalendarzu — propozycja Planera nie
+        // może opisywać innego treningu niż ten, który widać w planie tygodnia.
+        '_${resolvedDayFor(reference, reference)?.labelWithLoad ?? ''}';
     final cached = _plannedWorkoutCache;
     if (cached != null && key == _plannedWorkoutCacheKey) return cached;
     final planned = _composePlannedWorkout(now: reference);
@@ -7506,7 +7990,8 @@ ProgressionSuggestion? progressionSuggestionForExercise({
 
 /// Drobny helper czytelności: „weź to, a jak puste — policz zamiennik".
 extension _StringFallback on String {
-  String ifEmpty(String Function() fallback) => trim().isEmpty ? fallback() : this;
+  String ifEmpty(String Function() fallback) =>
+      trim().isEmpty ? fallback() : this;
 }
 
 class WorkoutAiAnalysis {
@@ -7910,6 +8395,56 @@ class AppSettings {
   /// przestawia się po kliknięciu innego zestawu.
   final TrainingScheduleConfig trainingSchedule;
 
+  // === Profil użytkownika (Etap: rozbudowa profilu) ===
+
+  /// Imię albo pseudonim pokazywany w profilu i w powitaniu.
+  final String displayName;
+
+  /// Krótkie „O mnie" (dowolny tekst użytkownika).
+  final String aboutMe;
+
+  /// Ścieżka do zdjęcia profilowego na urządzeniu ('' = brak).
+  /// Zdjęcie leży w katalogu dokumentów aplikacji — nigdy w cache systemowym,
+  /// żeby nie zniknęło przy sprzątaniu pamięci.
+  final String avatarPath;
+
+  /// Wybrana gotowa ikona awatara ([kTrainerAvatarIcons]); '' = inicjały.
+  final String avatarIconKey;
+
+  /// Data rozpoczęcia treningów (do stażu i statystyk profilu).
+  final DateTime? trainingStartDate;
+
+  /// Ulubione rodzaje aktywności (wolny tekst z listy podpowiedzi).
+  final List<String> favoriteActivities;
+
+  /// Preferowana długość pojedynczego treningu w minutach (0 = bez preferencji).
+  final int preferredWorkoutMinutes;
+
+  /// Preferowana długość przerwy między seriami w sekundach (0 = z planu).
+  final int preferredRestSeconds;
+
+  /// Preferowana intensywność ([WorkoutIntensityLevel.key]).
+  final String preferredIntensity;
+
+  /// Staż treningowy w miesiącach (0 = nie podano).
+  final int experienceMonths;
+
+  /// Id ćwiczeń, których użytkownik nie lubi — generator ich unika.
+  final List<String> dislikedExerciseIds;
+
+  /// Czy statystyki profilu mają zostać prywatne (nie trafiają do kontekstu AI).
+  final bool profileStatsPrivate;
+
+  /// Czy kreator pierwszej konfiguracji został ukończony.
+  ///
+  /// MIGRACJA: zapisy sprzed tego pola dostają `true` (istniejący użytkownicy
+  /// nie mogą zobaczyć kreatora), a świeża instalacja startuje z `false`
+  /// z [AppSettings.defaults].
+  final bool onboardingCompleted;
+
+  /// Etap, na którym przerwano kreator (0 = od początku) — „dokończ później".
+  final int onboardingStep;
+
   const AppSettings({
     required this.bodyWeightKg,
     required this.heightCm,
@@ -7954,6 +8489,20 @@ class AppSettings {
     this.guidanceMode = 'full',
     this.deloadCycle = const DeloadCycle(),
     this.trainingSchedule = const TrainingScheduleConfig(),
+    this.displayName = '',
+    this.aboutMe = '',
+    this.avatarPath = '',
+    this.avatarIconKey = '',
+    this.trainingStartDate,
+    this.favoriteActivities = const <String>[],
+    this.preferredWorkoutMinutes = 0,
+    this.preferredRestSeconds = 0,
+    this.preferredIntensity = 'moderate',
+    this.experienceMonths = 0,
+    this.dislikedExerciseIds = const <String>[],
+    this.profileStatsPrivate = false,
+    this.onboardingCompleted = true,
+    this.onboardingStep = 0,
   });
 
   factory AppSettings.defaults() => const AppSettings(
@@ -7970,6 +8519,9 @@ class AppSettings {
         darkMode: true,
         accentColorValue: 0xFF24D6A3,
         trainingWeekdays: [1, 2, 3, 4, 5, 6],
+        // Świeża instalacja = kreator profilu jeszcze przed użytkownikiem.
+        // Zapisane profile dostają `true` w [AppSettings.fromJson].
+        onboardingCompleted: false,
       );
 
   AppSettings copyWith({
@@ -8016,6 +8568,20 @@ class AppSettings {
     String? guidanceMode,
     DeloadCycle? deloadCycle,
     TrainingScheduleConfig? trainingSchedule,
+    String? displayName,
+    String? aboutMe,
+    String? avatarPath,
+    String? avatarIconKey,
+    DateTime? trainingStartDate,
+    List<String>? favoriteActivities,
+    int? preferredWorkoutMinutes,
+    int? preferredRestSeconds,
+    String? preferredIntensity,
+    int? experienceMonths,
+    List<String>? dislikedExerciseIds,
+    bool? profileStatsPrivate,
+    bool? onboardingCompleted,
+    int? onboardingStep,
   }) {
     return AppSettings(
       bodyWeightKg: bodyWeightKg ?? this.bodyWeightKg,
@@ -8062,6 +8628,21 @@ class AppSettings {
       guidanceMode: guidanceMode ?? this.guidanceMode,
       deloadCycle: deloadCycle ?? this.deloadCycle,
       trainingSchedule: trainingSchedule ?? this.trainingSchedule,
+      displayName: displayName ?? this.displayName,
+      aboutMe: aboutMe ?? this.aboutMe,
+      avatarPath: avatarPath ?? this.avatarPath,
+      avatarIconKey: avatarIconKey ?? this.avatarIconKey,
+      trainingStartDate: trainingStartDate ?? this.trainingStartDate,
+      favoriteActivities: favoriteActivities ?? this.favoriteActivities,
+      preferredWorkoutMinutes:
+          preferredWorkoutMinutes ?? this.preferredWorkoutMinutes,
+      preferredRestSeconds: preferredRestSeconds ?? this.preferredRestSeconds,
+      preferredIntensity: preferredIntensity ?? this.preferredIntensity,
+      experienceMonths: experienceMonths ?? this.experienceMonths,
+      dislikedExerciseIds: dislikedExerciseIds ?? this.dislikedExerciseIds,
+      profileStatsPrivate: profileStatsPrivate ?? this.profileStatsPrivate,
+      onboardingCompleted: onboardingCompleted ?? this.onboardingCompleted,
+      onboardingStep: onboardingStep ?? this.onboardingStep,
     );
   }
 
@@ -8109,6 +8690,21 @@ class AppSettings {
         'guidanceMode': guidanceMode,
         'deloadCycle': deloadCycle.toJson(),
         'trainingSchedule': trainingSchedule.toJson(),
+        'displayName': displayName,
+        'aboutMe': aboutMe,
+        'avatarPath': avatarPath,
+        'avatarIconKey': avatarIconKey,
+        if (trainingStartDate != null)
+          'trainingStartDate': trainingStartDate!.toIso8601String(),
+        'favoriteActivities': favoriteActivities,
+        'preferredWorkoutMinutes': preferredWorkoutMinutes,
+        'preferredRestSeconds': preferredRestSeconds,
+        'preferredIntensity': preferredIntensity,
+        'experienceMonths': experienceMonths,
+        'dislikedExerciseIds': dislikedExerciseIds,
+        'profileStatsPrivate': profileStatsPrivate,
+        'onboardingCompleted': onboardingCompleted,
+        'onboardingStep': onboardingStep,
       };
 
   factory AppSettings.fromJson(Map<String, dynamic> json) => AppSettings(
@@ -8146,7 +8742,10 @@ class AppSettings {
             .toSet()
             .toList(),
         themeStyleId: json['themeStyleId']?.toString() ?? 'classic_sport',
-        uiDensity: json['uiDensity']?.toString() ?? 'normal',
+        // Migracja: nieznana/stara wartość gęstości wraca do 'normal' zamiast
+        // wyłączać skalowanie po cichu.
+        uiDensity:
+            normalizeUiDensity(json['uiDensity']?.toString() ?? 'normal'),
         cornerStyle: json['cornerStyle']?.toString() ?? 'soft',
         cardStyle: json['cardStyle']?.toString() ?? 'flat',
         tileLayout: json['tileLayout']?.toString() ?? 'list',
@@ -8190,6 +8789,38 @@ class AppSettings {
             ? TrainingScheduleConfig.fromJson(
                 Map<String, dynamic>.from(json['trainingSchedule'] as Map))
             : const TrainingScheduleConfig(),
+        displayName: json['displayName']?.toString() ?? '',
+        aboutMe: json['aboutMe']?.toString() ?? '',
+        avatarPath: json['avatarPath']?.toString() ?? '',
+        avatarIconKey: json['avatarIconKey']?.toString() ?? '',
+        trainingStartDate: json['trainingStartDate'] == null
+            ? null
+            : DateTime.tryParse(json['trainingStartDate'].toString()),
+        favoriteActivities: [
+          for (final value in (json['favoriteActivities'] as List? ?? const []))
+            value.toString(),
+        ],
+        preferredWorkoutMinutes:
+            ((json['preferredWorkoutMinutes'] as num?)?.toInt() ?? 0)
+                .clamp(0, 300),
+        preferredRestSeconds:
+            ((json['preferredRestSeconds'] as num?)?.toInt() ?? 0)
+                .clamp(0, 600),
+        preferredIntensity:
+            WorkoutIntensityLevel.fromKey(json['preferredIntensity']).key,
+        experienceMonths:
+            ((json['experienceMonths'] as num?)?.toInt() ?? 0).clamp(0, 1200),
+        dislikedExerciseIds: [
+          for (final value
+              in (json['dislikedExerciseIds'] as List? ?? const []))
+            value.toString(),
+        ],
+        profileStatsPrivate: json['profileStatsPrivate'] as bool? ?? false,
+        // MIGRACJA: zapisany profil bez tego pola należy do użytkownika, który
+        // już korzysta z aplikacji — kreator ma się NIE pokazać.
+        onboardingCompleted: json['onboardingCompleted'] as bool? ?? true,
+        onboardingStep:
+            ((json['onboardingStep'] as num?)?.toInt() ?? 0).clamp(0, 10),
       );
 
   Map<String, dynamic> toAiProfile() => {
@@ -10831,6 +11462,14 @@ class _TrainerAuthGateState extends State<TrainerAuthGate> {
       builder: (context, _) {
         final st = trainerAccountService.state;
         if (!st.firebaseAvailable || st.signedIn || _skipped) {
+          // Kreator profilu pokazuje się TYLKO wtedy, gdy profil nie został
+          // jeszcze ukończony — czyli po pierwszym logowaniu / założeniu konta,
+          // a nie przy każdym uruchomieniu. Istniejące profile mają
+          // `onboardingCompleted == true` (migracja w AppSettings.fromJson).
+          final store = AppScope.of(context);
+          if (!store.settings.onboardingCompleted) {
+            return const ProfileSetupWizardPage();
+          }
           return const HomeShell();
         }
         return TrainerLoginScreen(onSkip: _skip);
@@ -11050,6 +11689,821 @@ class TrainerLoginScreen extends StatelessWidget {
   }
 }
 
+// ============================================================================
+// KREATOR PIERWSZEJ KONFIGURACJI PROFILU
+// ----------------------------------------------------------------------------
+// Pokazuje się PO PIERWSZYM zalogowaniu / założeniu konta oraz wtedy, gdy
+// profil nie został ukończony — NIE przy każdym uruchomieniu aplikacji. Istnieje
+// też jawne wejście „Uzupełnij profil" (Więcej → Profil treningowy).
+//
+// Zbiera komplet danych, na których stoi dopasowanie: dane podstawowe, cel,
+// doświadczenie, sprzęt, ograniczenia, preferencje i integracje. Każdy etap
+// zapisuje się od razu ([AppStore.updateSettings]), więc przerwanie kreatora
+// nie kasuje tego, co już wpisano — „Dokończę później" wraca dokładnie tu,
+// gdzie skończyliśmy ([AppSettings.onboardingStep]).
+// ============================================================================
+
+/// Gotowe ikony awatara dla użytkowników, którzy nie chcą zdjęcia.
+const Map<String, IconData> kTrainerAvatarIcons = <String, IconData>{
+  'dumbbell': Icons.fitness_center_rounded,
+  'run': Icons.directions_run_rounded,
+  'bolt': Icons.bolt_rounded,
+  'heart': Icons.favorite_rounded,
+  'trophy': Icons.emoji_events_rounded,
+  'shield': Icons.shield_moon_rounded,
+  'spark': Icons.auto_awesome_rounded,
+  'mountain': Icons.terrain_rounded,
+};
+
+/// Podpowiedzi ulubionych aktywności w kreatorze i profilu.
+const List<String> kFavoriteActivitySuggestions = <String>[
+  'Siłownia',
+  'Bieganie',
+  'Rower',
+  'Pływanie',
+  'Kalistenika',
+  'Marsz',
+  'Rozciąganie',
+  'Sporty walki',
+  'Wspinaczka',
+  'Piłka nożna',
+];
+
+class ProfileSetupWizardPage extends StatefulWidget {
+  const ProfileSetupWizardPage({super.key});
+
+  @override
+  State<ProfileSetupWizardPage> createState() => _ProfileSetupWizardPageState();
+}
+
+class _ProfileSetupWizardPageState extends State<ProfileSetupWizardPage> {
+  /// Etapy kreatora — kolejność ma znaczenie (każdy korzysta z poprzednich).
+  static const List<String> _stepTitles = <String>[
+    'Dane podstawowe',
+    'Cel',
+    'Doświadczenie',
+    'Sprzęt i miejsce',
+    'Ograniczenia',
+    'Preferencje',
+    'Integracje',
+    'Podsumowanie',
+  ];
+
+  late int _step;
+  bool _saving = false;
+
+  // Etap 1
+  late final TextEditingController _name;
+  late final TextEditingController _about;
+  late final TextEditingController _height;
+  late final TextEditingController _weight;
+  late final TextEditingController _age;
+  String _sex = '';
+
+  // Etap 2
+  String _silhouette = '';
+  late final TextEditingController _targetWeight;
+  String _mode = 'Rekompozycja';
+
+  // Etap 3
+  String _level = 'Średniozaawansowany';
+  int _experienceMonths = 0;
+  Set<int> _weekdays = <int>{};
+
+  // Etap 4
+  String _equipmentMode = '';
+  Set<String> _ownedEquipment = <String>{};
+
+  // Etap 5
+  Set<String> _limitations = <String>{};
+  late final TextEditingController _limitationNote;
+
+  // Etap 6
+  Set<String> _favorites = <String>{};
+  String _intensity = 'moderate';
+  int _restSeconds = 90;
+  int _workoutMinutes = 60;
+  String _guidance = 'full';
+
+  @override
+  void initState() {
+    super.initState();
+    final settings = AppScope.read(context).settings;
+    _step = settings.onboardingStep.clamp(0, _stepTitles.length - 1);
+    _name = TextEditingController(text: settings.displayName);
+    _about = TextEditingController(text: settings.aboutMe);
+    _height = TextEditingController(
+        text:
+            settings.heightCm > 0 ? settings.heightCm.round().toString() : '');
+    _weight = TextEditingController(
+        text: settings.bodyWeightKg > 0
+            ? settings.bodyWeightKg.toStringAsFixed(1)
+            : '');
+    _age =
+        TextEditingController(text: settings.age > 0 ? '${settings.age}' : '');
+    _sex = settings.sex;
+    _silhouette = settings.targetSilhouette;
+    _targetWeight = TextEditingController(
+        text: settings.targetWeightKg > 0
+            ? settings.targetWeightKg.toStringAsFixed(1)
+            : '');
+    _mode = normalizeTrainingMode(settings.trainingMode);
+    _level = normalizeTrainingLevel(settings.level);
+    _experienceMonths = settings.experienceMonths;
+    _weekdays = {...settings.trainingWeekdays};
+    _equipmentMode = settings.equipmentModeKey;
+    _ownedEquipment = {...settings.ownedEquipmentKeys};
+    _limitations = {...settings.limitationFlagKeys};
+    _limitationNote = TextEditingController(text: settings.limitations);
+    _favorites = {...settings.favoriteActivities};
+    _intensity = WorkoutIntensityLevel.fromKey(settings.preferredIntensity).key;
+    _restSeconds =
+        settings.preferredRestSeconds > 0 ? settings.preferredRestSeconds : 90;
+    _workoutMinutes = settings.preferredWorkoutMinutes > 0
+        ? settings.preferredWorkoutMinutes
+        : 60;
+    _guidance = settings.guidanceMode;
+  }
+
+  @override
+  void dispose() {
+    _name.dispose();
+    _about.dispose();
+    _height.dispose();
+    _weight.dispose();
+    _age.dispose();
+    _targetWeight.dispose();
+    _limitationNote.dispose();
+    super.dispose();
+  }
+
+  double _parseDouble(TextEditingController c, double fallback) {
+    final parsed = double.tryParse(c.text.replaceAll(',', '.').trim());
+    return parsed == null || parsed <= 0 ? fallback : parsed;
+  }
+
+  /// Zapisuje WSZYSTKO, co dotąd wpisano. Wołane po każdym etapie, więc
+  /// przerwanie kreatora nie kosztuje ani jednego pola.
+  Future<void> _persist({bool? completed, int? step}) async {
+    final store = AppScope.read(context);
+    final current = store.settings;
+    await store.updateSettings(current.copyWith(
+      displayName: _name.text.trim(),
+      aboutMe: _about.text.trim(),
+      heightCm: _parseDouble(_height, current.heightCm),
+      bodyWeightKg: _parseDouble(_weight, current.bodyWeightKg),
+      age: int.tryParse(_age.text.trim()) ?? current.age,
+      sex: _sex,
+      targetSilhouette: _silhouette,
+      targetWeightKg: _parseDouble(_targetWeight, 0).clamp(0, 400),
+      trainingMode: _mode,
+      goal: _mode,
+      level: _level,
+      experienceMonths: _experienceMonths,
+      trainingWeekdays: _weekdays.isEmpty
+          ? current.trainingWeekdays
+          : (_weekdays.toList()..sort()),
+      equipmentModeKey: _equipmentMode,
+      ownedEquipmentKeys: _ownedEquipment.toList(),
+      limitationFlagKeys: _limitations.toList(),
+      limitations: _limitationNote.text.trim(),
+      favoriteActivities: _favorites.toList(),
+      preferredIntensity: _intensity,
+      preferredRestSeconds: _restSeconds,
+      preferredWorkoutMinutes: _workoutMinutes,
+      guidanceMode: _guidance,
+      trainingStartDate: current.trainingStartDate ?? DateTime.now(),
+      onboardingCompleted: completed ?? current.onboardingCompleted,
+      onboardingStep: step ?? _step,
+    ));
+  }
+
+  Future<void> _next() async {
+    if (_saving) return;
+    setState(() => _saving = true);
+    try {
+      final isLast = _step >= _stepTitles.length - 1;
+      await _persist(
+        completed: isLast ? true : null,
+        step: isLast ? 0 : _step + 1,
+      );
+      if (!mounted) return;
+      if (isLast) return; // brama sama przełączy na HomeShell
+      setState(() => _step++);
+    } finally {
+      if (mounted) setState(() => _saving = false);
+    }
+  }
+
+  Future<void> _back() async {
+    if (_step == 0 || _saving) return;
+    setState(() => _step--);
+    await _persist(step: _step);
+  }
+
+  /// „Dokończę później" — dane zostają, kreator znika, wejście wraca w profilu.
+  Future<void> _finishLater() async {
+    if (_saving) return;
+    setState(() => _saving = true);
+    try {
+      await _persist(completed: true, step: _step);
+    } finally {
+      if (mounted) setState(() => _saving = false);
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final theme = Theme.of(context);
+    final scheme = theme.colorScheme;
+    final progress = (_step + 1) / _stepTitles.length;
+
+    return Scaffold(
+      appBar: AppBar(
+        title: Text(_stepTitles[_step]),
+        leading: _step == 0
+            ? null
+            : IconButton(
+                key: const Key('wizard_back'),
+                tooltip: 'Wstecz',
+                onPressed: _back,
+                icon: const Icon(Icons.arrow_back_rounded),
+              ),
+        automaticallyImplyLeading: false,
+        actions: [
+          TextButton(
+            key: const Key('wizard_finish_later'),
+            onPressed: _saving ? null : _finishLater,
+            child: const Text('Później'),
+          ),
+        ],
+        bottom: PreferredSize(
+          preferredSize: const Size.fromHeight(24),
+          child: Padding(
+            padding: const EdgeInsets.fromLTRB(16, 0, 16, 8),
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                ClipRRect(
+                  borderRadius: BorderRadius.circular(6),
+                  child: LinearProgressIndicator(
+                    key: const Key('wizard_progress'),
+                    value: progress,
+                    minHeight: 6,
+                    backgroundColor:
+                        scheme.surfaceContainerHighest.withValues(alpha: 0.6),
+                  ),
+                ),
+                const SizedBox(height: 3),
+                Text('Etap ${_step + 1} z ${_stepTitles.length}',
+                    style: theme.textTheme.labelSmall
+                        ?.copyWith(color: scheme.onSurfaceVariant)),
+              ],
+            ),
+          ),
+        ),
+      ),
+      body: SafeArea(
+        child: ListView(
+          padding: const EdgeInsets.fromLTRB(16, 12, 16, 24),
+          children: [_buildStep(theme)],
+        ),
+      ),
+      bottomNavigationBar: SafeArea(
+        child: Padding(
+          padding: const EdgeInsets.fromLTRB(16, 8, 16, 12),
+          child: FilledButton.icon(
+            key: const Key('wizard_next'),
+            onPressed: _saving ? null : _next,
+            icon: _saving
+                ? const SizedBox(
+                    width: 18,
+                    height: 18,
+                    child: CircularProgressIndicator(strokeWidth: 2))
+                : Icon(_step >= _stepTitles.length - 1
+                    ? Icons.check_rounded
+                    : Icons.arrow_forward_rounded),
+            label: Text(_step >= _stepTitles.length - 1
+                ? 'Zapisz profil i zacznij'
+                : 'Dalej'),
+            style:
+                FilledButton.styleFrom(minimumSize: const Size.fromHeight(50)),
+          ),
+        ),
+      ),
+    );
+  }
+
+  Widget _sectionHint(ThemeData theme, String text) => Padding(
+        padding: const EdgeInsets.only(bottom: 14),
+        child: Text(text,
+            style: theme.textTheme.bodySmall?.copyWith(
+                color: theme.colorScheme.onSurfaceVariant, height: 1.35)),
+      );
+
+  Widget _label(ThemeData theme, String text) => Padding(
+        padding: const EdgeInsets.fromLTRB(2, 14, 2, 6),
+        child: Text(text,
+            style: theme.textTheme.labelLarge
+                ?.copyWith(fontWeight: FontWeight.w900)),
+      );
+
+  Widget _buildStep(ThemeData theme) {
+    switch (_step) {
+      case 0:
+        return _stepBasics(theme);
+      case 1:
+        return _stepGoal(theme);
+      case 2:
+        return _stepExperience(theme);
+      case 3:
+        return _stepEquipment(theme);
+      case 4:
+        return _stepLimitations(theme);
+      case 5:
+        return _stepPreferences(theme);
+      case 6:
+        return _stepIntegrations(theme);
+      default:
+        return _stepSummary(theme);
+    }
+  }
+
+  Widget _stepBasics(ThemeData theme) {
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.stretch,
+      children: [
+        _sectionHint(
+            theme,
+            'Te dane napędzają regenerację, kalorie i dobór ciężarów. Możesz je '
+            'później zmienić w profilu treningowym.'),
+        TextField(
+          key: const Key('wizard_name'),
+          controller: _name,
+          textCapitalization: TextCapitalization.words,
+          decoration: const InputDecoration(
+              labelText: 'Imię lub pseudonim', hintText: 'np. Dawid'),
+        ),
+        _label(theme, 'Płeć (używana w obliczeniach)'),
+        Wrap(
+          spacing: 8,
+          children: [
+            for (final option in const [
+              ('', 'Nie podaję'),
+              ('male', 'Mężczyzna'),
+              ('female', 'Kobieta')
+            ])
+              ChoiceChip(
+                label: Text(option.$2),
+                selected: _sex == option.$1,
+                onSelected: (_) => setState(() => _sex = option.$1),
+              ),
+          ],
+        ),
+        _label(theme, 'Wiek, wzrost i waga'),
+        Row(
+          children: [
+            Expanded(
+              child: TextField(
+                key: const Key('wizard_age'),
+                controller: _age,
+                keyboardType: TextInputType.number,
+                decoration:
+                    const InputDecoration(labelText: 'Wiek', suffixText: 'lat'),
+              ),
+            ),
+            const SizedBox(width: 10),
+            Expanded(
+              child: TextField(
+                controller: _height,
+                keyboardType: TextInputType.number,
+                decoration: const InputDecoration(
+                    labelText: 'Wzrost', suffixText: 'cm'),
+              ),
+            ),
+            const SizedBox(width: 10),
+            Expanded(
+              child: TextField(
+                controller: _weight,
+                keyboardType:
+                    const TextInputType.numberWithOptions(decimal: true),
+                decoration:
+                    const InputDecoration(labelText: 'Waga', suffixText: 'kg'),
+              ),
+            ),
+          ],
+        ),
+        _label(theme, 'O mnie (opcjonalnie)'),
+        TextField(
+          controller: _about,
+          minLines: 2,
+          maxLines: 4,
+          decoration: const InputDecoration(
+              hintText:
+                  'Krótko o sobie — cel, historia treningowa, cokolwiek.'),
+        ),
+      ],
+    );
+  }
+
+  Widget _stepGoal(ThemeData theme) {
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.stretch,
+      children: [
+        _sectionHint(
+            theme,
+            'Sylwetka to miejsce docelowe, strategia to droga. Kalorie i objętość '
+            'liczymy ze strategii, a nie z samego wyglądu.'),
+        _label(theme, 'Cel sylwetkowy'),
+        Wrap(
+          spacing: 8,
+          runSpacing: 8,
+          children: [
+            for (final goal in SilhouetteGoal.values)
+              ChoiceChip(
+                label: Text(goal.label),
+                selected: _silhouette == goal.id,
+                onSelected: (_) => setState(() => _silhouette = goal.id),
+              ),
+          ],
+        ),
+        _label(theme, 'Strategia treningowa'),
+        Wrap(
+          spacing: 8,
+          runSpacing: 8,
+          children: [
+            for (final mode in const [
+              'Masa',
+              'Redukcja',
+              'Rekompozycja',
+              'Kondycja'
+            ])
+              ChoiceChip(
+                label: Text(mode),
+                selected: _mode == mode,
+                onSelected: (_) => setState(() => _mode = mode),
+              ),
+          ],
+        ),
+        _label(theme, 'Cel wagowy'),
+        TextField(
+          key: const Key('wizard_target_weight'),
+          controller: _targetWeight,
+          keyboardType: const TextInputType.numberWithOptions(decimal: true),
+          decoration: const InputDecoration(
+              labelText: 'Docelowa masa ciała',
+              suffixText: 'kg',
+              hintText: 'zostaw puste, jeśli nie masz celu'),
+        ),
+      ],
+    );
+  }
+
+  Widget _stepExperience(ThemeData theme) {
+    const weekdayNames = ['Pn', 'Wt', 'Śr', 'Cz', 'Pt', 'So', 'Nd'];
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.stretch,
+      children: [
+        _sectionHint(
+            theme,
+            'Poziom decyduje o doborze ćwiczeń i limitach objętości, a dni '
+            'treningowe — o rozkładzie tygodnia.'),
+        _label(theme, 'Poziom zaawansowania'),
+        Wrap(
+          spacing: 8,
+          children: [
+            for (final level in const [
+              'Początkujący',
+              'Średniozaawansowany',
+              'Zaawansowany'
+            ])
+              ChoiceChip(
+                label: Text(level),
+                selected: _level == level,
+                onSelected: (_) => setState(() => _level = level),
+              ),
+          ],
+        ),
+        _label(theme, 'Staż treningowy: ${_experienceLabel()}'),
+        Slider(
+          value: _experienceMonths.toDouble().clamp(0, 120),
+          min: 0,
+          max: 120,
+          divisions: 40,
+          label: _experienceLabel(),
+          onChanged: (v) => setState(() => _experienceMonths = v.round()),
+        ),
+        _label(theme, 'Dni treningowe w tygodniu'),
+        Wrap(
+          spacing: 6,
+          children: [
+            for (var day = 1; day <= 7; day++)
+              FilterChip(
+                label: Text(weekdayNames[day - 1]),
+                selected: _weekdays.contains(day),
+                onSelected: (on) => setState(() {
+                  if (on) {
+                    _weekdays.add(day);
+                  } else {
+                    _weekdays.remove(day);
+                  }
+                }),
+              ),
+          ],
+        ),
+      ],
+    );
+  }
+
+  String _experienceLabel() {
+    if (_experienceMonths <= 0) return 'zaczynam';
+    if (_experienceMonths < 12) return '$_experienceMonths mies.';
+    final years = _experienceMonths ~/ 12;
+    final months = _experienceMonths % 12;
+    return months == 0 ? '$years lat' : '$years lat $months mies.';
+  }
+
+  Widget _stepEquipment(ThemeData theme) {
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.stretch,
+      children: [
+        _sectionHint(
+            theme,
+            'Generator NIE zaproponuje ćwiczenia na sprzęcie, którego nie masz. '
+            'Im dokładniej tu zaznaczysz, tym mniej podmian w zestawach.'),
+        _label(theme, 'Gdzie trenujesz'),
+        Wrap(
+          spacing: 8,
+          runSpacing: 8,
+          children: [
+            for (final mode in EquipmentMode.values)
+              ChoiceChip(
+                label: Text(mode.label),
+                selected: _equipmentMode == mode.key,
+                onSelected: (_) => setState(() => _equipmentMode = mode.key),
+              ),
+          ],
+        ),
+        _label(theme, 'Posiadany sprzęt'),
+        Wrap(
+          spacing: 8,
+          runSpacing: 8,
+          children: [
+            for (final type in EquipmentType.values)
+              FilterChip(
+                label: Text(type.label),
+                selected: _ownedEquipment.contains(type.key),
+                onSelected: (on) => setState(() {
+                  if (on) {
+                    _ownedEquipment.add(type.key);
+                  } else {
+                    _ownedEquipment.remove(type.key);
+                  }
+                }),
+              ),
+          ],
+        ),
+      ],
+    );
+  }
+
+  Widget _stepLimitations(ThemeData theme) {
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.stretch,
+      children: [
+        _sectionHint(
+            theme,
+            'Zaznaczone ograniczenia wykluczają kolidujące ćwiczenia z zestawów '
+            'i z podmian. Możesz je zmienić w każdej chwili.'),
+        Wrap(
+          spacing: 8,
+          runSpacing: 8,
+          children: [
+            for (final limit in TrainingLimitation.values)
+              FilterChip(
+                label: Text(limit.label),
+                selected: _limitations.contains(limit.key),
+                onSelected: (on) => setState(() {
+                  if (on) {
+                    _limitations.add(limit.key);
+                  } else {
+                    _limitations.remove(limit.key);
+                  }
+                }),
+              ),
+          ],
+        ),
+        _label(theme, 'Własna notatka'),
+        TextField(
+          controller: _limitationNote,
+          minLines: 2,
+          maxLines: 4,
+          decoration: const InputDecoration(
+              hintText:
+                  'np. lewy bark boli przy wyciskaniu nad głowę — omijać'),
+        ),
+      ],
+    );
+  }
+
+  Widget _stepPreferences(ThemeData theme) {
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.stretch,
+      children: [
+        _sectionHint(
+            theme,
+            'Preferencje sterują tym, JAK Trainer prowadzi trening — nie tym, '
+            'czy prowadzi.'),
+        _label(theme, 'Ulubione rodzaje aktywności'),
+        Wrap(
+          spacing: 8,
+          runSpacing: 8,
+          children: [
+            for (final activity in kFavoriteActivitySuggestions)
+              FilterChip(
+                label: Text(activity),
+                selected: _favorites.contains(activity),
+                onSelected: (on) => setState(() {
+                  if (on) {
+                    _favorites.add(activity);
+                  } else {
+                    _favorites.remove(activity);
+                  }
+                }),
+              ),
+          ],
+        ),
+        _label(theme, 'Preferowana intensywność'),
+        Wrap(
+          spacing: 8,
+          runSpacing: 8,
+          children: [
+            for (final level in WorkoutIntensityLevel.values)
+              ChoiceChip(
+                label: Text(level.label),
+                selected: _intensity == level.key,
+                onSelected: (_) => setState(() => _intensity = level.key),
+              ),
+          ],
+        ),
+        _label(theme, 'Przerwa między seriami: $_restSeconds s'),
+        Slider(
+          value: _restSeconds.toDouble().clamp(30, 240),
+          min: 30,
+          max: 240,
+          divisions: 14,
+          label: '$_restSeconds s',
+          onChanged: (v) => setState(() => _restSeconds = v.round()),
+        ),
+        _label(theme, 'Dostępny czas na trening: $_workoutMinutes min'),
+        Slider(
+          value: _workoutMinutes.toDouble().clamp(15, 150),
+          min: 15,
+          max: 150,
+          divisions: 9,
+          label: '$_workoutMinutes min',
+          onChanged: (v) => setState(() => _workoutMinutes = v.round()),
+        ),
+        _label(theme, 'Tryb prowadzenia przez Trainera'),
+        // Świadomie ListTile z ikoną zamiast RadioListTile: `groupValue`
+        // i `onChanged` są w tej wersji Fluttera przestarzałe, a RadioGroup
+        // nie wnosi tu niczego poza dodatkowym opakowaniem.
+        for (final mode in GuidanceMode.values)
+          ListTile(
+            contentPadding: EdgeInsets.zero,
+            leading: Icon(_guidance == mode.key
+                ? Icons.radio_button_checked_rounded
+                : Icons.radio_button_unchecked_rounded),
+            onTap: () => setState(() => _guidance = mode.key),
+            title: Text(mode.label),
+            subtitle: Text(mode.description,
+                style: theme.textTheme.bodySmall
+                    ?.copyWith(color: theme.colorScheme.onSurfaceVariant)),
+          ),
+      ],
+    );
+  }
+
+  Widget _stepIntegrations(ThemeData theme) {
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.stretch,
+      children: [
+        _sectionHint(
+            theme,
+            'Integracje możesz włączyć teraz albo później — profil działa bez '
+            'nich, tylko z mniejszą liczbą danych o aktywności.'),
+        Card(
+          child: ListTile(
+            leading: const Icon(Icons.health_and_safety_outlined),
+            title: const Text('Health Connect / Samsung Health'),
+            subtitle: const Text(
+                'Kroki, dystans, aktywne kalorie, sen i tętno z zegarka'),
+            trailing: const Icon(Icons.chevron_right_rounded),
+            onTap: () => Navigator.of(context).push(MaterialPageRoute(
+                builder: (_) => const HealthConnectSettingsPage())),
+          ),
+        ),
+        const SizedBox(height: 8),
+        Card(
+          child: ListTile(
+            leading: const Icon(Icons.sync_alt_rounded),
+            title: const Text('Licznik Kalorii — most danych'),
+            subtitle:
+                const Text('Kalorie treningu, cele dnia i wspólny profil'),
+            trailing: const Icon(Icons.chevron_right_rounded),
+            onTap: () => openTrainerSubPage(context, const IntegrationsPage(),
+                title: 'Integracje'),
+          ),
+        ),
+        const SizedBox(height: 8),
+        Card(
+          child: ListTile(
+            leading: const Icon(Icons.cloud_sync_outlined),
+            title: const Text('Konto i kopia w chmurze'),
+            subtitle: const Text(
+                'Treningi, plany i postępy przeżyją reinstalację telefonu'),
+            trailing: const Icon(Icons.chevron_right_rounded),
+            onTap: () => Navigator.of(context).push(
+                MaterialPageRoute(builder: (_) => const AccountSyncPage())),
+          ),
+        ),
+      ],
+    );
+  }
+
+  Widget _stepSummary(ThemeData theme) {
+    final scheme = theme.colorScheme;
+    Widget row(String label, String value) => Padding(
+          padding: const EdgeInsets.symmetric(vertical: 3),
+          child: Row(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              SizedBox(
+                width: 140,
+                child: Text(label,
+                    style: theme.textTheme.bodySmall
+                        ?.copyWith(color: scheme.onSurfaceVariant)),
+              ),
+              Expanded(
+                child: Text(value.isEmpty ? '—' : value,
+                    style: theme.textTheme.bodyMedium
+                        ?.copyWith(fontWeight: FontWeight.w700)),
+              ),
+            ],
+          ),
+        );
+
+    final goal = SilhouetteGoal.fromId(_silhouette);
+    const weekdayNames = ['Pn', 'Wt', 'Śr', 'Cz', 'Pt', 'So', 'Nd'];
+    final days =
+        (_weekdays.toList()..sort()).map((d) => weekdayNames[d - 1]).join(', ');
+
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.stretch,
+      children: [
+        _sectionHint(
+            theme,
+            'Sprawdź, czy wszystko się zgadza. Po zatwierdzeniu Trainer ułoży '
+            'rozkład tygodnia i pierwsze zestawy pod te dane.'),
+        Card(
+          key: const Key('wizard_summary'),
+          child: Padding(
+            padding: const EdgeInsets.all(16),
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                row('Imię', _name.text.trim()),
+                row('Wiek / wzrost / waga',
+                    '${_age.text.trim()} lat · ${_height.text.trim()} cm · ${_weight.text.trim()} kg'),
+                row('Cel sylwetkowy', goal?.label ?? ''),
+                row('Strategia', _mode),
+                row(
+                    'Cel wagowy',
+                    _targetWeight.text.trim().isEmpty
+                        ? ''
+                        : '${_targetWeight.text.trim()} kg'),
+                row('Poziom', _level),
+                row('Staż', _experienceLabel()),
+                row('Dni treningowe', days),
+                row('Sprzęt',
+                    '${EquipmentMode.fromKey(_equipmentMode)?.label ?? 'nie wybrano'} · ${_ownedEquipment.length} pozycji'),
+                row(
+                    'Ograniczenia',
+                    _limitations.isEmpty
+                        ? 'brak'
+                        : '${_limitations.length} zaznaczone'),
+                row('Intensywność',
+                    WorkoutIntensityLevel.fromKey(_intensity).label),
+                row('Prowadzenie', GuidanceMode.fromKey(_guidance).label),
+              ],
+            ),
+          ),
+        ),
+      ],
+    );
+  }
+}
+
 /// Awatar użytkownika w nagłówku Trainera — otwiera ekran „Konto i synchronizacja".
 class TrainerUserAvatarButton extends StatelessWidget {
   const TrainerUserAvatarButton({super.key});
@@ -11057,6 +12511,13 @@ class TrainerUserAvatarButton extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final scheme = Theme.of(context).colorScheme;
+    final settings = AppScope.of(context).settings;
+    // Awatar z PROFILU (zdjęcie / ikona / inicjały pseudonimu) ma pierwszeństwo
+    // przed inicjałem adresu e-mail — profil jest tym, co użytkownik ustawił
+    // świadomie, konto tylko go przechowuje.
+    final hasProfileAvatar = settings.avatarPath.trim().isNotEmpty ||
+        settings.avatarIconKey.trim().isNotEmpty ||
+        settings.displayName.trim().isNotEmpty;
     return AnimatedBuilder(
       animation: trainerAccountService,
       builder: (context, _) {
@@ -11065,39 +12526,48 @@ class TrainerUserAvatarButton extends StatelessWidget {
         final letter = (st.email ?? st.displayName ?? '').trim();
         return Tooltip(
           message: signedIn ? (st.email ?? 'Konto') : 'Konto i synchronizacja',
-          child: InkWell(
-            borderRadius: BorderRadius.circular(22),
-            onTap: () => Navigator.of(context).push(
-              MaterialPageRoute(builder: (_) => const AccountSyncPage()),
-            ),
-            child: Container(
-              width: 40,
-              height: 40,
-              alignment: Alignment.center,
-              decoration: BoxDecoration(
-                shape: BoxShape.circle,
-                color:
-                    signedIn ? scheme.primary : scheme.surfaceContainerHighest,
-                border: Border.all(
-                  color: scheme.primary.withValues(alpha: signedIn ? 0.0 : 0.5),
-                  width: 1.2,
-                ),
-              ),
-              child: signedIn
-                  ? Text(
-                      letter.isEmpty
-                          ? '?'
-                          : letter.substring(0, 1).toUpperCase(),
-                      style: TextStyle(
-                        color: scheme.onPrimary,
-                        fontWeight: FontWeight.w900,
-                        fontSize: 17,
+          child: hasProfileAvatar
+              ? TrainerProfileAvatar(
+                  size: 40,
+                  onTap: () => Navigator.of(context).push(
+                    MaterialPageRoute(builder: (_) => const AccountSyncPage()),
+                  ),
+                )
+              : InkWell(
+                  borderRadius: BorderRadius.circular(22),
+                  onTap: () => Navigator.of(context).push(
+                    MaterialPageRoute(builder: (_) => const AccountSyncPage()),
+                  ),
+                  child: Container(
+                    width: 40,
+                    height: 40,
+                    alignment: Alignment.center,
+                    decoration: BoxDecoration(
+                      shape: BoxShape.circle,
+                      color: signedIn
+                          ? scheme.primary
+                          : scheme.surfaceContainerHighest,
+                      border: Border.all(
+                        color: scheme.primary
+                            .withValues(alpha: signedIn ? 0.0 : 0.5),
+                        width: 1.2,
                       ),
-                    )
-                  : Icon(Icons.person_outline_rounded,
-                      color: scheme.primary, size: 22),
-            ),
-          ),
+                    ),
+                    child: signedIn
+                        ? Text(
+                            letter.isEmpty
+                                ? '?'
+                                : letter.substring(0, 1).toUpperCase(),
+                            style: TextStyle(
+                              color: scheme.onPrimary,
+                              fontWeight: FontWeight.w900,
+                              fontSize: 17,
+                            ),
+                          )
+                        : Icon(Icons.person_outline_rounded,
+                            color: scheme.primary, size: 22),
+                  ),
+                ),
         );
       },
     );
@@ -11675,7 +13145,9 @@ class PageFrame extends StatelessWidget {
     return CustomScrollView(
       slivers: [
         SliverPadding(
-          padding: const EdgeInsets.fromLTRB(20, 18, 16, 0),
+          // Nagłówek strony też podlega gęstości — w trybie kompaktowym
+          // nie ma sensu trzymać 18 px zapasu nad tytułem.
+          padding: uiInsets(context, const EdgeInsets.fromLTRB(20, 18, 16, 0)),
           sliver: SliverToBoxAdapter(
             child: Row(
               crossAxisAlignment: CrossAxisAlignment.start,
@@ -11709,7 +13181,8 @@ class PageFrame extends StatelessWidget {
         ),
         if (child != null)
           SliverPadding(
-            padding: const EdgeInsets.fromLTRB(16, 14, 16, 16),
+            padding:
+                uiInsets(context, const EdgeInsets.fromLTRB(16, 14, 16, 16)),
             sliver: SliverToBoxAdapter(child: child),
           ),
         ...slivers,
@@ -13543,109 +15016,114 @@ class _TrainingCalendarDialogState extends State<_TrainingCalendarDialog> {
 
     return AlertDialog(
       contentPadding: const EdgeInsets.fromLTRB(16, 12, 16, 8),
+      // Treść PRZEWIJALNA: siatka miesiąca plus legenda i opis nie mieszczą
+      // się na niskich ekranach i przy powiększonej czcionce systemowej —
+      // wcześniej kończyło się to „RenderFlex overflowed by 43 pixels".
       content: SizedBox(
         width: 330,
-        child: Column(
-          mainAxisSize: MainAxisSize.min,
-          children: [
-            Row(
-              children: [
-                IconButton(
-                  key: const Key('calendar_prev_month'),
-                  tooltip: 'Poprzedni miesiąc',
-                  onPressed: () => _shiftMonth(-1),
-                  icon: const Icon(Icons.chevron_left_rounded),
-                ),
-                Expanded(
-                  child: Text(
-                    '${_monthNames[_month.month - 1]} ${_month.year}',
-                    textAlign: TextAlign.center,
-                    style: theme.textTheme.titleMedium
-                        ?.copyWith(fontWeight: FontWeight.w900),
+        child: SingleChildScrollView(
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              Row(
+                children: [
+                  IconButton(
+                    key: const Key('calendar_prev_month'),
+                    tooltip: 'Poprzedni miesiąc',
+                    onPressed: () => _shiftMonth(-1),
+                    icon: const Icon(Icons.chevron_left_rounded),
                   ),
-                ),
-                IconButton(
-                  key: const Key('calendar_next_month'),
-                  tooltip: 'Następny miesiąc',
-                  onPressed: () => _shiftMonth(1),
-                  icon: const Icon(Icons.chevron_right_rounded),
-                ),
-              ],
-            ),
-            const SizedBox(height: 4),
-            Row(
-              children: [
-                for (final letter in _dayLetters)
                   Expanded(
                     child: Text(
-                      letter,
+                      '${_monthNames[_month.month - 1]} ${_month.year}',
                       textAlign: TextAlign.center,
-                      style: theme.textTheme.labelSmall?.copyWith(
-                        fontWeight: FontWeight.w800,
-                        color: theme.colorScheme.onSurfaceVariant,
-                      ),
+                      style: theme.textTheme.titleMedium
+                          ?.copyWith(fontWeight: FontWeight.w900),
                     ),
                   ),
-              ],
-            ),
-            const SizedBox(height: 4),
-            GridView.count(
-              crossAxisCount: 7,
-              shrinkWrap: true,
-              physics: const NeverScrollableScrollPhysics(),
-              children: [
-                for (var blank = 0; blank < leadingBlanks; blank++)
-                  const SizedBox.shrink(),
-                for (var day = 1; day <= daysInMonth; day++) dayCell(day),
-              ],
-            ),
-            const SizedBox(height: 8),
-            Row(
-              children: [
-                Container(
-                  width: 10,
-                  height: 10,
-                  decoration:
-                      BoxDecoration(shape: BoxShape.circle, color: accent),
-                ),
-                const SizedBox(width: 8),
-                Expanded(
-                  child: Text(
-                    'Dzień z treningiem',
-                    style: theme.textTheme.labelSmall
-                        ?.copyWith(color: theme.colorScheme.onSurfaceVariant),
+                  IconButton(
+                    key: const Key('calendar_next_month'),
+                    tooltip: 'Następny miesiąc',
+                    onPressed: () => _shiftMonth(1),
+                    icon: const Icon(Icons.chevron_right_rounded),
                   ),
-                ),
-              ],
-            ),
-            const SizedBox(height: 6),
-            Row(
-              children: [
-                Container(
-                  width: 10,
-                  height: 10,
-                  decoration: const BoxDecoration(
-                      shape: BoxShape.circle, color: kDeloadColor),
-                ),
-                const SizedBox(width: 8),
-                Expanded(
-                  child: Text(
-                    'Deload (odciążenie)',
-                    style: theme.textTheme.labelSmall
-                        ?.copyWith(color: theme.colorScheme.onSurfaceVariant),
+                ],
+              ),
+              const SizedBox(height: 4),
+              Row(
+                children: [
+                  for (final letter in _dayLetters)
+                    Expanded(
+                      child: Text(
+                        letter,
+                        textAlign: TextAlign.center,
+                        style: theme.textTheme.labelSmall?.copyWith(
+                          fontWeight: FontWeight.w800,
+                          color: theme.colorScheme.onSurfaceVariant,
+                        ),
+                      ),
+                    ),
+                ],
+              ),
+              const SizedBox(height: 4),
+              GridView.count(
+                crossAxisCount: 7,
+                shrinkWrap: true,
+                physics: const NeverScrollableScrollPhysics(),
+                children: [
+                  for (var blank = 0; blank < leadingBlanks; blank++)
+                    const SizedBox.shrink(),
+                  for (var day = 1; day <= daysInMonth; day++) dayCell(day),
+                ],
+              ),
+              const SizedBox(height: 8),
+              Row(
+                children: [
+                  Container(
+                    width: 10,
+                    height: 10,
+                    decoration:
+                        BoxDecoration(shape: BoxShape.circle, color: accent),
                   ),
-                ),
-              ],
-            ),
-            const SizedBox(height: 6),
-            Text(
-              'Mała cyfra pod datą = który dzień programu wtedy wypada. '
-              'Dotknij dowolny dzień — zobaczysz fazę cyklu, intensywność '
-              'i zestaw na ten dzień.',
-              style: theme.textTheme.labelSmall
-                  ?.copyWith(color: theme.colorScheme.onSurfaceVariant),
-            ),
-          ],
+                  const SizedBox(width: 8),
+                  Expanded(
+                    child: Text(
+                      'Dzień z treningiem',
+                      style: theme.textTheme.labelSmall
+                          ?.copyWith(color: theme.colorScheme.onSurfaceVariant),
+                    ),
+                  ),
+                ],
+              ),
+              const SizedBox(height: 6),
+              Row(
+                children: [
+                  Container(
+                    width: 10,
+                    height: 10,
+                    decoration: const BoxDecoration(
+                        shape: BoxShape.circle, color: kDeloadColor),
+                  ),
+                  const SizedBox(width: 8),
+                  Expanded(
+                    child: Text(
+                      'Deload (odciążenie)',
+                      style: theme.textTheme.labelSmall
+                          ?.copyWith(color: theme.colorScheme.onSurfaceVariant),
+                    ),
+                  ),
+                ],
+              ),
+              const SizedBox(height: 6),
+              Text(
+                'Mała cyfra pod datą = który dzień programu wtedy wypada. '
+                'Dotknij dowolny dzień — zobaczysz fazę cyklu, intensywność '
+                'i zestaw na ten dzień.',
+                style: theme.textTheme.labelSmall
+                    ?.copyWith(color: theme.colorScheme.onSurfaceVariant),
+              ),
+            ],
+          ),
         ),
       ),
       actions: [
@@ -14012,11 +15490,22 @@ class DayIntensityPreviewPage extends StatelessWidget {
     final status = store.deloadStatusOn(day);
     final projected = store.projectedProgramDayForDate(day);
     final logs = store.logsForDay(day);
-    // Plan bierze się z ROZKŁADU na ten dzień (partia główna), a nie z ostatnio
-    // otwartego zestawu — inaczej podgląd dowolnej daty pokazywał ten sam
-    // program przez trzy tygodnie w przód.
-    final dayPlan = store.trainingScheduleConfig.planForWeekday(day.weekday);
+    // Plan bierze się z ROZSTRZYGNIĘTEGO rozkładu na ten dzień — tego samego,
+    // który napędza kalendarz i „Dzisiejszy trening". Wcześniej ten ekran
+    // czytał plan PIERWOTNY (samą rotację z ustawień), więc po przestawieniu
+    // dnia pod regenerację szczegóły pokazywały inną partię niż karteczka
+    // w kalendarzu. Rotacja zostaje wyłącznie awaryjnie — dla dat spoza okna.
+    final resolvedDay = store.resolvedDayFor(day);
+    final rotationPlan =
+        store.trainingScheduleConfig.planForWeekday(day.weekday);
+    final dayPlan = resolvedDay == null
+        ? rotationPlan
+        : TrainingDayPlan(
+            primary: resolvedDay.area, secondary: resolvedDay.secondaryArea);
     final plan = store.scheduledPlanForArea(dayPlan.primary);
+    // Czy Planer przestawił ten dzień (do adnotacji pod nazwą).
+    final movedNote =
+        resolvedDay != null && resolvedDay.moved ? resolvedDay.note : '';
     final factor = status.isActive ? status.intensityFactor : 1.0;
     final percent = (factor * 100).round();
     final isPast =
@@ -14079,6 +15568,24 @@ class DayIntensityPreviewPage extends StatelessWidget {
             ),
           ],
         ),
+        if (movedNote.isNotEmpty) ...[
+          const SizedBox(height: 4),
+          Row(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Icon(Icons.swap_vert_rounded, size: 14, color: scheme.tertiary),
+              const SizedBox(width: 6),
+              Expanded(
+                child: Text(
+                  '${PlannerDayChange.headline} $movedNote',
+                  key: const Key('preview_day_moved'),
+                  style: theme.textTheme.labelSmall
+                      ?.copyWith(color: scheme.tertiary, height: 1.3),
+                ),
+              ),
+            ],
+          ),
+        ],
         const SizedBox(height: 6),
         // Wyjaśnienie rozkładu żyje TU, przy konkretnym dniu — nie zajmuje
         // miejsca na czołówce „Treningu".
@@ -15281,6 +16788,129 @@ Future<void> showPlannerDeloadDialog(
 ///
 /// Oba tory są pełnoprawnymi zestawami wykonywanymi po kolei — [order] mówi,
 /// który jest pierwszy, a [isDone] czy jest już zamknięty.
+/// Ranga poziomu trudności do porównań w limitach objętości.
+/// „śred" MUSI iść przed „zaaw" — „średniozaawansowany" zawiera podciąg „zaaw".
+int _volumeLevelRank(String level) {
+  final n = level.trim().toLowerCase();
+  if (n.contains('śred') ||
+      n.contains('sred') ||
+      n.contains('inter') ||
+      n.contains('mid')) {
+    return 1;
+  }
+  if (n.contains('zaaw') || n.contains('adv')) return 2;
+  return 0;
+}
+
+/// Ile ćwiczeń zestaw realnie ma wobec limitu i dlaczego nie więcej.
+class SetCompleteness {
+  const SetCompleteness({
+    required this.used,
+    required this.target,
+    required this.reasons,
+  });
+
+  final int used;
+  final int target;
+
+  /// Powody, dla których nie dało się dobić do [target] (puste = zestaw pełny).
+  final List<String> reasons;
+
+  bool get isComplete => reasons.isEmpty || used >= target;
+
+  /// Np. „Użyto 6 z 8 możliwych ćwiczeń, ponieważ pozostałe warianty kolidują
+  /// z regeneracją (barki) albo wymagają niedostępnego sprzętu."
+  String get message {
+    if (isComplete) return '';
+    final why = reasons.length == 1
+        ? reasons.first
+        : '${reasons.take(reasons.length - 1).join(', ')} albo ${reasons.last}';
+    return 'Użyto $used z $target możliwych ćwiczeń, ponieważ pozostałe '
+        'warianty $why.';
+  }
+}
+
+/// Wyjaśnienie niepełnego zestawu pod listą ćwiczeń dnia.
+class SetCompletenessNote extends StatelessWidget {
+  const SetCompletenessNote({super.key, required this.items, this.intensity});
+
+  final List<PlanItem> items;
+  final WorkoutIntensityLevel? intensity;
+
+  @override
+  Widget build(BuildContext context) {
+    final info = AppScope.of(context)
+        .describeSetCompleteness(items, intensity: intensity);
+    if (info.isComplete) return const SizedBox.shrink();
+    final theme = Theme.of(context);
+    final scheme = theme.colorScheme;
+    return Padding(
+      key: const Key('set_completeness_note'),
+      padding: EdgeInsets.only(top: uiGap(context, 6)),
+      child: Row(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Icon(Icons.info_outline_rounded,
+              size: 14, color: scheme.onSurfaceVariant),
+          const SizedBox(width: 6),
+          Expanded(
+            child: Text(
+              info.message,
+              style: theme.textTheme.labelSmall
+                  ?.copyWith(color: scheme.onSurfaceVariant, height: 1.3),
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+/// Zmiana dnia wprowadzona przez Inteligentny Planer — do pokazania wprost.
+///
+/// Rozkład potrafi przestawić dni pod regenerację ([resolveScheduleWithRecovery]).
+/// Do tej pory widać to było wyłącznie jako inna partia w kalendarzu; użytkownik
+/// nie wiedział, czy plan się zmienił, czy aplikacja się myli.
+class PlannerDayChange {
+  const PlannerDayChange({
+    required this.plannedArea,
+    required this.actualArea,
+    this.movedTo,
+    this.blockingMuscle,
+    this.blockingPercent = 100,
+  });
+
+  /// Partia, która pierwotnie wypadała dzisiaj.
+  final TrainingFocusArea plannedArea;
+
+  /// Partia, którą Planer postawił na dzisiaj zamiast niej.
+  final TrainingFocusArea actualArea;
+
+  /// Dzień, na który przesunięto pierwotną partię (`null` = nie znaleziono).
+  final DateTime? movedTo;
+
+  /// Partia, która blokowała pierwotny dzień, i jej regeneracja.
+  final BodyMuscle? blockingMuscle;
+  final double blockingPercent;
+
+  static const String headline =
+      'Plan dnia został zmieniony przez Inteligentny Planer.';
+
+  /// Np. „Push został przesunięty na wtorek, ponieważ klatka nadal się
+  /// regeneruje (48%). Dzisiaj zaplanowano Pull."
+  String get details {
+    final target = movedTo == null
+        ? ''
+        : ' na ${weekdayName(movedTo!.weekday).toLowerCase()}';
+    final because = blockingMuscle == null
+        ? ''
+        : ', ponieważ ${blockingMuscle!.label.toLowerCase()} nadal się '
+            'regeneruje (${blockingPercent.round()}%)';
+    return '${plannedArea.label} został przesunięty$target$because. '
+        'Dzisiaj zaplanowano ${actualArea.label}.';
+  }
+}
+
 class TodayTrainingBlock {
   const TodayTrainingBlock({
     required this.order,
@@ -15378,107 +17008,10 @@ String? programIdForArea(TrainingFocusArea? area) {
   }
 }
 
-/// Kafelek „Kontynuuj program" — prowadzi do DNIA WYNIKAJĄCEGO Z PLANU
-/// (a nie do ostatnio klikniętego zestawu) i tam pokazuje jasny start.
-///
-/// Gdy tor pierwszorzędny jest już dziś zrobiony, kafelek prowadzi do toru
-/// DRUGORZĘDNEGO — wcześniej w kółko proponował ten sam, ukończony zestaw.
-class _ContinueProgramTile extends StatelessWidget {
-  const _ContinueProgramTile();
-
-  @override
-  Widget build(BuildContext context) {
-    final store = AppScope.of(context);
-    final theme = Theme.of(context);
-    final scheme = theme.colorScheme;
-    final scheduled = store.todayScheduled;
-    final block = store.nextTrainingBlockToday();
-    final area = block?.area ?? scheduled?.area;
-    final programId = programIdForArea(area);
-
-    final String title;
-    final String subtitle;
-    if (scheduled == null || scheduled.isRest || area == null) {
-      title = 'Dziś dzień wolny';
-      subtitle = 'Rozkład nie przewiduje treningu — możesz odpocząć.';
-    } else if (block == null) {
-      title = 'Dzisiejszy trening zamknięty';
-      subtitle = 'Wszystkie zestawy z rozkładu (${scheduled.label}) wykonane.';
-    } else if (scheduled.isDeload) {
-      title = block.isPrimary
-          ? 'Zacznij zestaw główny (deload)'
-          : 'Zacznij zestaw drugorzędny (deload)';
-      subtitle = '${block.order}/${store.todayTrainingBlocks().length} · '
-          '${block.area.label} · lżejszy tydzień odciążenia';
-    } else {
-      title = block.isPrimary
-          ? 'Zacznij zestaw główny'
-          : 'Przejdź do zestawu drugorzędnego';
-      subtitle = '${block.order}/${store.todayTrainingBlocks().length} · '
-          '${block.area.label}'
-          '${scheduled.moved ? ' · dzień przestawiony pod regenerację' : ''}';
-    }
-
-    final closed = block == null && scheduled != null && !scheduled.isRest;
-    return Material(
-      color: scheme.primary.withValues(alpha: closed ? 0.07 : 0.14),
-      borderRadius: BorderRadius.circular(14),
-      child: InkWell(
-        key: const Key('continue_program_tile'),
-        borderRadius: BorderRadius.circular(14),
-        onTap: closed
-            ? null
-            : () async {
-                if (programId == null) {
-                  openWorkoutProgramCatalog(context);
-                  return;
-                }
-                final plan = await startCatalogProgram(context, programId);
-                if (!context.mounted || plan.days.isEmpty) return;
-                final index =
-                    plan.currentDayIndex.clamp(0, plan.days.length - 1);
-                await Navigator.of(context).push(MaterialPageRoute<void>(
-                  builder: (_) =>
-                      WorkoutDayDetailsPage(planId: plan.id, dayIndex: index),
-                ));
-              },
-        child: Padding(
-          padding: const EdgeInsets.fromLTRB(14, 12, 10, 12),
-          child: Row(
-            children: [
-              Icon(
-                  closed
-                      ? Icons.check_circle_rounded
-                      : (scheduled?.isDeload == true
-                          ? Icons.self_improvement_rounded
-                          : Icons.playlist_play_rounded),
-                  color: scheduled?.isDeload == true && !closed
-                      ? kDeloadColor
-                      : scheme.primary),
-              const SizedBox(width: 12),
-              Expanded(
-                child: Column(
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  children: [
-                    Text(title,
-                        style: theme.textTheme.titleSmall
-                            ?.copyWith(fontWeight: FontWeight.w900)),
-                    const SizedBox(height: 2),
-                    Text(subtitle,
-                        style: theme.textTheme.bodySmall
-                            ?.copyWith(color: scheme.onSurfaceVariant)),
-                  ],
-                ),
-              ),
-              if (!closed)
-                Icon(Icons.chevron_right_rounded, color: scheme.primary),
-            ],
-          ),
-        ),
-      ),
-    );
-  }
-}
+// Kafelek „Zacznij zestaw główny" (_ContinueProgramTile) został usunięty:
+// prowadził dokładnie tam, gdzie kafelki torów dnia w [_TodayBlocksSection],
+// stojące o kilkanaście pikseli wyżej. Logika uruchamiania zestawu żyje
+// w [openTrainingBlock] i jest używana przez te kafelki.
 
 IconData _scheduleAreaIcon(TrainingFocusArea? area) {
   switch (area) {
@@ -15593,9 +17126,12 @@ class TodayPage extends StatelessWidget {
           // dniem otwiera kalendarz miesiąca z dniami treningów → historia;
           // pod spodem tydzień z kropkami (dotknij dzień, kropka = trening) ===
           const TrainingWeekCalendarCard(),
+          // Dlaczego w tygodniu zmieniła się kolejność partii — komunikat stoi
+          // przy kalendarzu, bo to tam zmianę najpierw widać.
+          const PlannerDayChangeNotice(compact: true),
 
           // === Pasek szybkich wejść do aktywności (styl Samsung Health) ===
-          const SizedBox(height: 12),
+          SizedBox(height: uiGap(context, 12)),
           const ActivityIconBar(),
 
           // Inteligentny planer treningu żyje pod ikoną „Trening" powyżej
@@ -17415,6 +18951,12 @@ class ActivityIconBar extends StatelessWidget {
     final store = AppScope.of(context);
     final theme = Theme.of(context);
     final scheme = theme.colorScheme;
+    // Pasek był po prostu za duży: koła 52 px z ikonami 24 px zabierały górę
+    // ekranu „Dzisiaj". Nowa podstawa to 44 px (dokładnie bezpieczny obszar
+    // dotykowy) i skaluje się gęstością interfejsu — kompakt zmniejsza wygląd,
+    // nie celność, bo [uiTouchSize] trzyma podłogę 44 px.
+    final circle = uiTouchSize(context, 44);
+    final iconSize = uiSize(context, 20, min: 18);
 
     Widget item(String iconKey, IconData icon, String label,
         Widget Function() pageBuilder) {
@@ -17442,14 +18984,14 @@ class ActivityIconBar extends StatelessWidget {
                     );
                   },
                   child: SizedBox(
-                    width: 52,
-                    height: 52,
-                    child: Icon(icon, color: scheme.primary, size: 24),
+                    width: circle,
+                    height: circle,
+                    child: Icon(icon, color: scheme.primary, size: iconSize),
                   ),
                 ),
               ),
             ),
-            const SizedBox(height: 4),
+            SizedBox(height: uiGap(context, 4)),
             FittedBox(
               fit: BoxFit.scaleDown,
               child: Text(label,
@@ -18483,11 +20025,16 @@ class SectionHeader extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final theme = Theme.of(context);
+    // W trybie kompaktowym nagłówki sekcji schodzą o stopień w dół typografii
+    // — to one najmocniej rozpychały ekrany, a treść pod nimi jest ważniejsza.
+    final compact = uiDensityOf(context) == 'compact';
     return Row(
       children: [
         Expanded(
             child: Text(title,
-                style: theme.textTheme.titleLarge
+                style: (compact
+                        ? theme.textTheme.titleMedium
+                        : theme.textTheme.titleLarge)
                     ?.copyWith(fontWeight: FontWeight.w900))),
         if (actionLabel != null)
           TextButton(onPressed: onAction, child: Text(actionLabel!)),
@@ -21713,6 +23260,9 @@ class _TrainingPlannerHeroCardState extends State<TrainingPlannerHeroCard> {
                 ],
               ),
             ],
+            // Plan dnia przestawiony przez Planer — powiedziane wprost, zanim
+            // użytkownik zdąży się zdziwić, że dziś jest inna partia.
+            const PlannerDayChangeNotice(),
             // Rozpiska obu torów dnia z kolejnością i statusem.
             if (blocks.isNotEmpty) ...[
               const SizedBox(height: 14),
@@ -21809,11 +23359,12 @@ class _TrainingPlannerHeroCardState extends State<TrainingPlannerHeroCard> {
               ),
             ],
             const SizedBox(height: 14),
-            // Akcje główne. Zamiast startu „w ciemno" prowadzimy do DNIA
-            // Z PLANU — tam start jest jednoznaczny (osobny przycisk START).
+            // Akcje główne. Kafelek „Zacznij zestaw główny" został USUNIĘTY —
+            // dublował kafelki torów dnia ([_TodayBlocksSection]) stojące
+            // wyżej, które prowadzą dokładnie do tych samych zestawów i dodatkowo
+            // pokazują ich zawartość i status. Zostają czynności, których tamte
+            // kafelki nie mają: szczegóły i alternatywa.
             if (planned.isActionable) ...[
-              const _ContinueProgramTile(),
-              const SizedBox(height: 8),
               Row(
                 children: [
                   Expanded(
@@ -22167,6 +23718,59 @@ Future<void> openTrainingBlock(
   await Navigator.of(context).push(MaterialPageRoute<void>(
     builder: (_) => WorkoutDayDetailsPage(planId: plan.id, dayIndex: index),
   ));
+}
+
+/// Informacja, że Inteligentny Planer przestawił dzisiejszy dzień.
+///
+/// Milczy, gdy plan jest zgodny z rotacją — pokazuje się dokładnie wtedy, gdy
+/// „Dzisiejszy trening" i kalendarz niosą inną partię niż ta z ustawień.
+class PlannerDayChangeNotice extends StatelessWidget {
+  const PlannerDayChangeNotice({super.key, this.compact = false});
+
+  /// Wersja jednolinijkowa (np. pod kalendarzem).
+  final bool compact;
+
+  @override
+  Widget build(BuildContext context) {
+    final change = AppScope.of(context).todayPlanChange;
+    if (change == null) return const SizedBox.shrink();
+    final theme = Theme.of(context);
+    final scheme = theme.colorScheme;
+    return Padding(
+      key: const Key('planner_day_change_notice'),
+      padding: EdgeInsets.only(top: uiGap(context, compact ? 8 : 12)),
+      child: Container(
+        padding: EdgeInsets.all(uiGap(context, compact ? 8 : 11)),
+        decoration: BoxDecoration(
+          color: scheme.tertiaryContainer.withValues(alpha: 0.45),
+          borderRadius: BorderRadius.circular(uiCornerRadius(context, 14)),
+          border: Border.all(color: scheme.tertiary.withValues(alpha: 0.45)),
+        ),
+        child: Row(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Icon(Icons.swap_vert_rounded, size: 18, color: scheme.tertiary),
+            const SizedBox(width: 8),
+            Expanded(
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Text(
+                    PlannerDayChange.headline,
+                    style: theme.textTheme.labelLarge?.copyWith(
+                        fontWeight: FontWeight.w900, color: scheme.tertiary),
+                  ),
+                  const SizedBox(height: 2),
+                  Text(change.details,
+                      style: theme.textTheme.bodySmall?.copyWith(height: 1.3)),
+                ],
+              ),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
 }
 
 /// Rozpiska dnia: PEŁNA zawartość toru pierwszorzędnego i drugorzędnego wraz
@@ -23092,12 +24696,14 @@ class _ProgramTile extends StatelessWidget {
           onTap: () => _open(context),
           borderRadius: radius,
           child: Container(
-            padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
+            padding: uiInsets(context,
+                const EdgeInsets.symmetric(horizontal: 12, vertical: 10)),
             decoration: _tileDecoration(theme, accent, radius, useGradients),
             child: Row(
               children: [
-                _tileVisual(plan, accent, 38, 20),
-                const SizedBox(width: 12),
+                _tileVisual(plan, accent, uiSize(context, 38, min: 30),
+                    uiSize(context, 20, min: 16)),
+                SizedBox(width: uiGap(context, 12)),
                 Expanded(
                   child: Column(
                     crossAxisAlignment: CrossAxisAlignment.start,
@@ -23144,14 +24750,18 @@ class _ProgramTile extends StatelessWidget {
         onTap: () => _open(context),
         borderRadius: radius,
         child: Container(
-          padding: EdgeInsets.all(isGrid ? 14 : 16),
+          padding: uiInsets(context, EdgeInsets.all(isGrid ? 14 : 16)),
           decoration: _tileDecoration(theme, accent, radius, useGradients),
           child: Column(
             crossAxisAlignment: CrossAxisAlignment.start,
             children: [
               Row(
                 children: [
-                  _tileVisual(plan, accent, isGrid ? 42 : 52, isGrid ? 22 : 27),
+                  _tileVisual(
+                      plan,
+                      accent,
+                      uiSize(context, isGrid ? 42 : 52, min: 34),
+                      uiSize(context, isGrid ? 22 : 27, min: 18)),
                   const SizedBox(width: 8),
                   Expanded(
                     child: Align(
@@ -23471,7 +25081,8 @@ class _CardioTile extends StatelessWidget {
           onTap: () => startCardioWorkout(context, meta),
           borderRadius: radius,
           child: Container(
-            padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
+            padding: uiInsets(context,
+                const EdgeInsets.symmetric(horizontal: 12, vertical: 10)),
             decoration: decoration,
             child: Row(
               children: [
@@ -23731,7 +25342,8 @@ class _WarmupTile extends StatelessWidget {
               : startWarmupWorkout(context, meta),
           borderRadius: radius,
           child: Container(
-            padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
+            padding: uiInsets(context,
+                const EdgeInsets.symmetric(horizontal: 12, vertical: 10)),
             decoration: decoration,
             child: Row(
               children: [
@@ -24138,7 +25750,16 @@ class _ActiveWorkoutPageState extends State<ActiveWorkoutPage> {
   void initState() {
     super.initState();
     timer = Timer.periodic(const Duration(seconds: 1), (_) {
-      if (mounted) setState(() {});
+      if (!mounted) return;
+      // Bez aktywnej sesji nie ma czego odliczać — tykanie tylko dokładałoby
+      // przebudów pod ekranem podsumowania.
+      if (AppScope.read(context).activeWorkoutSession == null) {
+        timer?.cancel();
+        timer = null;
+        setState(() {});
+        return;
+      }
+      setState(() {});
     });
   }
 
@@ -24361,11 +25982,18 @@ class _ActiveWorkoutPageState extends State<ActiveWorkoutPage> {
     }
     if (session == null || session.currentExercise == null) {
       // Sesja zniknęła (zakończona/odrzucona) — wróć zamiast martwego ekranu.
-      if (!leaving) {
+      //
+      // WARUNEK `isCurrent` jest kluczowy: ten ekran żyje także wtedy, gdy nad
+      // nim stoi podsumowanie treningu. Bez niego `pop()` zdejmowało PODSUMOWANIE
+      // (to ono jest na wierzchu), a użytkownik lądował na martwym ekranie.
+      if (!leaving && (ModalRoute.of(context)?.isCurrent ?? false)) {
         leaving = true;
         WidgetsBinding.instance.addPostFrameCallback((_) {
-          if (mounted && Navigator.of(context).canPop())
+          if (!mounted) return;
+          final route = ModalRoute.of(context);
+          if ((route?.isCurrent ?? false) && Navigator.of(context).canPop()) {
             Navigator.of(context).pop();
+          }
         });
       }
       return const Scaffold(
@@ -25515,14 +27143,14 @@ class _ActiveStrengthSheetContentState
   }
 }
 
-/// Pop-up ze szczegółami ćwiczenia podczas aktywnego treningu (Etap 1).
+/// Pop-up ze szczegółami ćwiczenia: opis wykonania, kroki, partie główne
+/// i pomocnicze, wskazówki, częste błędy, typ i sprzęt oraz ostrzeżenie, gdy
+/// zaangażowana partia jest jeszcze w regeneracji.
 ///
-/// Otwiera się kliknięciem w nazwę/kartę ćwiczenia albo ikonę „i". NIE zatrzymuje
-/// treningu ani timera (odtwarzacz działa dalej pod spodem), daje się szybko
-/// zamknąć i działa w trybie jasnym i ciemnym. Pokazuje opis wykonania, kroki,
-/// partie mięśniowe (główne i pomocnicze), wskazówki, błędy, typ i sprzęt oraz
-/// ostrzeżenie, gdy zaangażowana partia jest jeszcze w regeneracji.
-void showActiveExerciseInfoSheet(BuildContext context, Exercise exercise) {
+/// NIE wymaga aktywnego treningu — otwiera się także z listy ćwiczeń dnia
+/// programu (to on zastąpił osobny kafelek „Instrukcja ćwiczeń"). W trakcie
+/// treningu nie zatrzymuje sesji ani timera (odtwarzacz działa pod spodem).
+void showExerciseInfoSheet(BuildContext context, Exercise exercise) {
   showModalBottomSheet<void>(
     context: context,
     isScrollControlled: true,
@@ -25532,6 +27160,11 @@ void showActiveExerciseInfoSheet(BuildContext context, Exercise exercise) {
         _ActiveExerciseInfoSheet(exerciseId: exercise.id),
   );
 }
+
+/// Dotychczasowa nazwa wywołania z aktywnego treningu — zostaje, żeby nie
+/// przepisywać wszystkich miejsc startu pop-upu.
+void showActiveExerciseInfoSheet(BuildContext context, Exercise exercise) =>
+    showExerciseInfoSheet(context, exercise);
 
 class _ActiveExerciseInfoSheet extends StatelessWidget {
   const _ActiveExerciseInfoSheet({required this.exerciseId});
@@ -25868,6 +27501,12 @@ class _ActiveExercisePlayerPageState extends State<ActiveExercisePlayerPage> {
     final store = AppScope.read(context);
     final session = store.activeWorkoutSession;
     if (session == null) {
+      // Trening zakończony — ekran nie ma już czego odliczać. Zatrzymanie
+      // tykania jest ważne wydajnościowo: bez tego odtwarzacz przebudowywał się
+      // co sekundę POD podsumowaniem, dokładając pracy dokładnie w chwili,
+      // w której użytkownik zamyka trening.
+      _ticker?.cancel();
+      _ticker = null;
       setState(() {});
       return;
     }
@@ -26210,11 +27849,17 @@ class _ActiveExercisePlayerPageState extends State<ActiveExercisePlayerPage> {
     if (session == null || session.currentExercise == null) {
       // Sesja zakończona/odrzucona (np. z widoku szczegółowego) — nie zostawiaj
       // martwego ekranu, wróć do poprzedniej strony.
-      if (!_leaving) {
+      //
+      // Tylko gdy to MY jesteśmy na wierzchu: po zakończeniu treningu nad tym
+      // ekranem stoi podsumowanie, a bezwarunkowy `pop()` zamykał właśnie je.
+      if (!_leaving && (ModalRoute.of(context)?.isCurrent ?? false)) {
         _leaving = true;
         WidgetsBinding.instance.addPostFrameCallback((_) {
-          if (mounted && Navigator.of(context).canPop())
+          if (!mounted) return;
+          final route = ModalRoute.of(context);
+          if ((route?.isCurrent ?? false) && Navigator.of(context).canPop()) {
             Navigator.of(context).pop();
+          }
         });
       }
       return const Scaffold(
@@ -28924,6 +30569,27 @@ class _WorkoutSummaryPageState extends State<WorkoutSummaryPage> {
   bool _aiLoading = false;
   String? _aiError;
 
+  /// Bramka „Gotowe": jedna operacja kończenia na jedno podsumowanie.
+  ///
+  /// PROBLEM, KTÓRY TO ROZWIĄZUJE: przycisk wołał `Navigator.pop()` bez żadnego
+  /// zabezpieczenia. Dwa szybkie kliknięcia zdejmowały DWA ekrany (podsumowanie
+  /// i stronę pod nim), a że strona pod spodem sama planowała `pop()` w
+  /// `addPostFrameCallback` (gdy sesja już nie istnieje), nawigacja potrafiła
+  /// zdjąć jeszcze jeden ekran i zostawić martwy, nieklikalny widok.
+  bool _closing = false;
+
+  Future<void> _handleDone() async {
+    if (_closing) return;
+    setState(() => _closing = true);
+    // Trening jest już ZAPISANY LOKALNIE (zrobił to `finishActiveWorkout`
+    // przed otwarciem tego ekranu), więc zamknięcie nie czeka na nic sieciowego.
+    // Kopia w chmurze idzie w tle i jej brak nie może blokować wyjścia.
+    final navigator = Navigator.of(context);
+    if (navigator.canPop()) {
+      navigator.pop();
+    }
+  }
+
   // Etap 31: ocena treningu, pytanie o ból, cofnięcie ukończenia.
   String? _rating;
   bool _painChecked = false;
@@ -29525,9 +31191,16 @@ class _WorkoutSummaryPageState extends State<WorkoutSummaryPage> {
             ),
             const SizedBox(height: 18),
             FilledButton.icon(
-              onPressed: () => Navigator.of(context).pop(),
-              icon: const Icon(Icons.check_rounded),
-              label: const Text('Gotowe'),
+              key: const Key('workout_summary_done'),
+              // Wyłączony po pierwszym kliknięciu — jedno zamknięcie treningu.
+              onPressed: _closing ? null : _handleDone,
+              icon: _closing
+                  ? const SizedBox(
+                      width: 18,
+                      height: 18,
+                      child: CircularProgressIndicator(strokeWidth: 2))
+                  : const Icon(Icons.check_rounded),
+              label: Text(_closing ? 'Zamykam…' : 'Gotowe'),
             ),
             // Oddech pod ostatnim elementem. Sam obszar systemowego paska
             // nawigacji odsuwa już SafeArea wokół listy — nie dubluj go tutaj
@@ -31854,7 +33527,25 @@ class _MetaPill extends StatelessWidget {
   }
 }
 
-/// Karta pojedynczego dnia programu z numerem, czasem, liczbą ćwiczeń, kcal i statusem.
+/// Czy TEN dzień programu jest dniem, który Planer przestawił pod regenerację.
+///
+/// Dni programu nie mają własnych dat, więc pytanie ma sens tylko dla dnia
+/// BIEŻĄCEGO: to on wypada dzisiaj i to jego rozkład mógł przestawić. Świadomie
+/// nie rzutujemy całych 30 dni na daty — kosztowałoby to setki przeliczeń
+/// rozkładu przy każdym przewinięciu listy, a odpowiedź i tak byłaby zgadywana.
+bool _dayWasMoved(AppStore store, WorkoutPlan plan, int index) {
+  if (!plan.isActive || plan.days.isEmpty) return false;
+  if (index != plan.currentDayIndex) return false;
+  final today = store.todayScheduled;
+  if (today == null || !today.moved) return false;
+  // Przestawienie dotyczy tego programu tylko wtedy, gdy prowadzi on dzisiejszą
+  // partię — inaczej „przestawiony" wisiałoby przy każdym otwartym programie.
+  return store.scheduledPlanForArea(today.area)?.id == plan.id;
+}
+
+/// Karta pojedynczego dnia programu z numerem, czasem, liczbą ćwiczeń, kcal
+/// i statusem. Stany (bieżący / ukończony / dostępny / zablokowany /
+/// przestawiony) mają osobny wygląd oparty na kolorach motywu.
 class _ProgramDayCard extends StatelessWidget {
   const _ProgramDayCard(
       {required this.plan, required this.index, required this.onWarnLocked});
@@ -31884,21 +33575,57 @@ class _ProgramDayCard extends StatelessWidget {
       intensityFactor: store.dayIntensityFactor(plan, day),
     );
 
-    final Color borderColor = isActive
-        ? scheme.primary
-        : scheme.outlineVariant.withValues(alpha: 0.45);
-    final Color bgColor = isActive
-        ? scheme.primaryContainer.withValues(alpha: 0.35)
-        : scheme.surfaceContainerHighest
-            .withValues(alpha: isLocked ? 0.3 : 0.5);
+    // WYRÓŻNIENIE KAFELKA DNIA. Wcześniej dzień dostępny miał to samo tło co
+    // scena pod nim (surfaceContainerHighest przy alfie 0.5) i ledwie widoczny
+    // obrys — kafelek zlewał się z ekranem. Teraz każdy stan ma własną,
+    // rozpoznawalną powierzchnię, obrys i (dla dnia bieżącego) cień.
+    //
+    // Wszystkie kolory pochodzą z MOTYWU (ColorScheme), więc kafelek działa
+    // w trybie jasnym, ciemnym i przy dowolnym kolorze akcentu; gęstość
+    // steruje wysokością, nie czytelnością.
+    final bool isMoved = _dayWasMoved(store, plan, index);
+    final Color borderColor;
+    final Color bgColor;
+    double borderWidth = 1;
+    if (isActive) {
+      borderColor = scheme.primary;
+      bgColor = scheme.primaryContainer.withValues(alpha: 0.55);
+      borderWidth = 1.8;
+    } else if (isCompleted) {
+      borderColor = scheme.primary.withValues(alpha: 0.45);
+      bgColor = scheme.surfaceContainerHigh.withValues(alpha: 0.9);
+    } else if (isLocked) {
+      borderColor = scheme.outlineVariant.withValues(alpha: 0.5);
+      bgColor = scheme.surfaceContainerLow.withValues(alpha: 0.75);
+    } else if (isMoved) {
+      // Dzień przestawiony przez Planer — inny akcent niż „dostępny",
+      // żeby zmiana rozkładu była widoczna także w liście programu.
+      borderColor = scheme.tertiary.withValues(alpha: 0.7);
+      bgColor = scheme.tertiaryContainer.withValues(alpha: 0.35);
+      borderWidth = 1.4;
+    } else {
+      borderColor = scheme.outline.withValues(alpha: 0.55);
+      bgColor = scheme.surfaceContainerHigh.withValues(alpha: 0.95);
+    }
 
     final card = Container(
-      margin: const EdgeInsets.only(bottom: 12),
-      padding: const EdgeInsets.all(14),
+      margin: EdgeInsets.only(bottom: uiGap(context, 12)),
+      padding: uiInsets(context, const EdgeInsets.all(14)),
       decoration: BoxDecoration(
         color: bgColor,
-        borderRadius: BorderRadius.circular(18),
-        border: Border.all(color: borderColor, width: isActive ? 1.6 : 1),
+        borderRadius: BorderRadius.circular(uiCornerRadius(context, 18)),
+        border: Border.all(color: borderColor, width: borderWidth),
+        // Delikatny cień tylko pod dniem BIEŻĄCYM — to on ma wychodzić
+        // z płaszczyzny, reszta listy zostaje spokojna.
+        boxShadow: isActive
+            ? [
+                BoxShadow(
+                  color: scheme.primary.withValues(alpha: 0.22),
+                  blurRadius: 14,
+                  offset: const Offset(0, 4),
+                ),
+              ]
+            : null,
       ),
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.stretch,
@@ -31946,11 +33673,30 @@ class _ProgramDayCard extends StatelessWidget {
                   ),
                 ),
               ),
-              const SizedBox(width: 8),
+              const SizedBox(width: 4),
+              // Ikona sugestii progresji stoi PRZY STATUSIE dnia — tam, gdzie
+              // użytkownik i tak patrzy, żeby sprawdzić, czy dzień jest do
+              // wzięcia. Bez sugestii jest nieaktywna („Brak zmian").
+              if (!isRest && !isLocked)
+                ProgressionSuggestionIconButton(items: day.items),
               _StatusIcon(status: status),
             ],
           ),
-          const SizedBox(height: 12),
+          if (isMoved) ...[
+            SizedBox(height: uiGap(context, 6)),
+            Row(
+              children: [
+                Icon(Icons.swap_vert_rounded, size: 14, color: scheme.tertiary),
+                const SizedBox(width: 6),
+                Expanded(
+                  child: Text('Dzień przestawiony przez Planer',
+                      style: theme.textTheme.labelSmall
+                          ?.copyWith(color: scheme.tertiary)),
+                ),
+              ],
+            ),
+          ],
+          SizedBox(height: uiGap(context, 12)),
           _buildAction(context, store, theme, status, day),
         ],
       ),
@@ -32239,8 +33985,8 @@ Future<Exercise?> pickExerciseFromLibrary(
                       decoration: const InputDecoration(
                           prefixIcon: Icon(Icons.search_rounded),
                           labelText: 'Szukaj: nazwa lub partia mięśniowa'),
-                      onChanged: (value) => setSheetState(
-                          () => query = value.trim()),
+                      onChanged: (value) =>
+                          setSheetState(() => query = value.trim()),
                     ),
                     const SizedBox(height: 10),
                     MuscleFilterChipRow(
@@ -32358,11 +34104,9 @@ String planItemMetaText(
   if (item.reps == 0 && exercise.defaultDurationSec > 0) {
     return '${item.sets} × ${exercise.defaultDurationSec}s';
   }
-  final weightKg =
-      coachWeightKg > 0 ? coachWeightKg : item.suggestedWeightKg;
-  final weight = weightKg > 0
-      ? ' · ${planWeightLabel(weightKg, exercise.entryType)}'
-      : '';
+  final weightKg = coachWeightKg > 0 ? coachWeightKg : item.suggestedWeightKg;
+  final weight =
+      weightKg > 0 ? ' · ${planWeightLabel(weightKg, exercise.entryType)}' : '';
   return '${item.sets} × ${item.reps} powt.$weight';
 }
 
@@ -32493,12 +34237,14 @@ class _WorkoutDayDetailsPageState extends State<WorkoutDayDetailsPage> {
     if (ok == true && mounted) setState(() => _editing = true);
   }
 
-  void _openTechnique(Exercise exercise) {
-    Navigator.of(context).push(
-      MaterialPageRoute<void>(
-          builder: (_) => ExerciseDetailsPage(exerciseId: exercise.id)),
-    );
-  }
+  /// Instrukcja ćwiczenia z listy dnia — pop-up, NIE trzeba startować treningu.
+  ///
+  /// Ten sam arkusz, który pokazuje się podczas treningu: opis wykonania, kroki,
+  /// partie główne i pomocnicze, sprzęt, częste błędy, obraz/animacja
+  /// i ostrzeżenie o regeneracji zaangażowanych partii. Z niego prowadzi też
+  /// przejście do pełnej strony ćwiczenia.
+  void _openTechnique(Exercise exercise) =>
+      showExerciseInfoSheet(context, exercise);
 
   Future<void> _openGuide(WorkoutPlan plan, WorkoutDay day) async {
     final store = AppScope.read(context);
@@ -32600,6 +34346,23 @@ class _WorkoutDayDetailsPageState extends State<WorkoutDayDetailsPage> {
         planDayBalanceWarnings(rawDay, store.customExercises);
 
     return Scaffold(
+      // Strzałka powrotu i menu „⋮" żyją w PRAWDZIWYM AppBarze nad grafiką
+      // nagłówka, a nie jako elementy rysowane w środku Stacka. Dzięki temu
+      // system sam trzyma je pod status barem, nie nachodzą na tytuł programu
+      // ani na siebie przy długiej nazwie i większej czcionce systemowej.
+      extendBodyBehindAppBar: true,
+      appBar: AppBar(
+        backgroundColor: Colors.transparent,
+        elevation: 0,
+        scrolledUnderElevation: 0,
+        foregroundColor: Colors.white,
+        leading: IconButton(
+          tooltip: 'Wstecz',
+          onPressed: () => Navigator.of(context).maybePop(),
+          icon: const Icon(Icons.arrow_back_rounded),
+        ),
+        actions: [_buildMenu(store, plan, day)],
+      ),
       body: ListView(
         padding: EdgeInsets.zero,
         children: [
@@ -32609,19 +34372,17 @@ class _WorkoutDayDetailsPageState extends State<WorkoutDayDetailsPage> {
             estimate: estimate,
             status: status,
             isRest: isRest,
-            onBack: () => Navigator.of(context).maybePop(),
-            menu: _buildMenu(store, plan, day),
+            items: rawDay.items,
           ),
           Padding(
-            padding: const EdgeInsets.fromLTRB(16, 16, 16, 24),
+            padding:
+                uiInsets(context, const EdgeInsets.fromLTRB(16, 16, 16, 24)),
             child: Column(
               crossAxisAlignment: CrossAxisAlignment.stretch,
               children: [
-                _DayGuideCard(
-                  hasExercises: day.items.isNotEmpty,
-                  onOpen: () => _openGuide(plan, day),
-                ),
-                const SizedBox(height: 16),
+                // Osobny kafelek „Przewodnik / Instrukcja ćwiczeń" USUNIĘTY —
+                // instrukcja otwiera się dotknięciem konkretnego ćwiczenia na
+                // liście dnia ([showExerciseInfoSheet]), bez startowania treningu.
                 if (isRest)
                   const _RestDayView()
                 else if (day.items.isEmpty)
@@ -32728,21 +34489,16 @@ class _WorkoutDayDetailsPageState extends State<WorkoutDayDetailsPage> {
                     RecoveryWarningBanner(warnings: recoveryWarnings),
                     const SizedBox(height: 14),
                   ],
-                  if (equipment.isNotEmpty)
-                    _TagSection(
-                      icon: Icons.fitness_center_outlined,
-                      title: 'Sprzęt potrzebny',
-                      labels: equipment.map((type) => type.label).toList(),
+                  // Sprzęt i partie trenowane w JEDNEJ zwijanej linijce
+                  // („Hantle + ławka • Klatka, triceps i barki"). Dwie osobne
+                  // sekcje chipów zajmowały pół ekranu nad listą ćwiczeń;
+                  // informacja została w całości, tylko domyślnie schowana.
+                  if (equipment.isNotEmpty || muscles.isNotEmpty)
+                    _DayDetailsFacts(
+                      equipment: equipment.map((type) => type.label).toList(),
+                      muscles: muscles.map((group) => group.label).toList(),
                     ),
-                  if (muscles.isNotEmpty) ...[
-                    const SizedBox(height: 12),
-                    _TagSection(
-                      icon: Icons.accessibility_new_rounded,
-                      title: 'Partie trenowane',
-                      labels: muscles.map((group) => group.label).toList(),
-                    ),
-                  ],
-                  const SizedBox(height: 18),
+                  SizedBox(height: uiGap(context, 18)),
                   Row(
                     children: [
                       Expanded(
@@ -32770,12 +34526,22 @@ class _WorkoutDayDetailsPageState extends State<WorkoutDayDetailsPage> {
                   if (!_editing) ...[
                     _IntensityStepControl(
                         plan: plan, dayIndex: widget.dayIndex),
-                    const SizedBox(height: 10),
-                    // Kafelek z odnośnikiem: co Trainer zmienił w sugestii
-                    // progresji dla ćwiczeń TEGO zestawu i co zmianę stłumiło.
-                    SetProgressionSuggestionTile(items: rawDay.items),
+                    SizedBox(height: uiGap(context, 10)),
+                    // Sugestie progresji NIE mają już własnej dużej sekcji —
+                    // żyją pod ikoną przy statusie dnia (w nagłówku strony
+                    // i na kafelku dnia w programie).
                     // Limity objętości partii — czy zestaw mieści się w granicach.
-                    VolumeLimitsTile(items: rawDay.items),
+                    // Zakres odniesienia bierze intensywność TEGO dnia (gałka
+                    // programu + dnia), nie jakąś globalną średnią.
+                    VolumeLimitsTile(
+                      items: rawDay.items,
+                      intensity: store.intensityLevelFor(plan, rawDay),
+                    ),
+                    // Dlaczego zestaw ma mniej ćwiczeń, niż pozwala limit.
+                    SetCompletenessNote(
+                      items: day.items,
+                      intensity: store.intensityLevelFor(plan, rawDay),
+                    ),
                     const SizedBox(height: 6),
                     Align(
                       alignment: Alignment.centerLeft,
@@ -32914,8 +34680,12 @@ class _WorkoutDayDetailsPageState extends State<WorkoutDayDetailsPage> {
   }
 }
 
-/// Nagłówek szczegółów dnia: obraz/gradient, powrót, menu, program + poziom,
-/// „Dzień X", czas, kcal, liczba ćwiczeń, status.
+/// Nagłówek szczegółów dnia: obraz/gradient, program + poziom, „Dzień X",
+/// czas, kcal, liczba ćwiczeń, status i ikona sugestii progresji.
+///
+/// Strzałka powrotu i menu „⋮" NIE są już częścią tej grafiki — stoją
+/// w prawdziwym [AppBar] nad nią, więc system trzyma je pod status barem
+/// i nie mogą nałożyć się na tytuł programu ani na siebie.
 class _DayDetailsHeader extends StatelessWidget {
   const _DayDetailsHeader({
     required this.plan,
@@ -32923,8 +34693,7 @@ class _DayDetailsHeader extends StatelessWidget {
     required this.estimate,
     required this.status,
     required this.isRest,
-    required this.onBack,
-    required this.menu,
+    required this.items,
   });
 
   final WorkoutPlan plan;
@@ -32932,8 +34701,9 @@ class _DayDetailsHeader extends StatelessWidget {
   final PlanDayEstimate estimate;
   final WorkoutDayStatus status;
   final bool isRest;
-  final VoidCallback onBack;
-  final Widget menu;
+
+  /// Pozycje dnia — źródło sugestii progresji pod ikoną przy statusie.
+  final List<PlanItem> items;
 
   @override
   Widget build(BuildContext context) {
@@ -32959,23 +34729,6 @@ class _DayDetailsHeader extends StatelessWidget {
                 colors: [
                   Colors.black.withValues(alpha: 0.15),
                   Colors.black.withValues(alpha: 0.74)
-                ],
-              ),
-            ),
-          ),
-          SafeArea(
-            bottom: false,
-            child: Padding(
-              padding: const EdgeInsets.symmetric(horizontal: 4),
-              child: Row(
-                children: [
-                  IconButton(
-                      onPressed: onBack,
-                      icon: const Icon(Icons.arrow_back_rounded,
-                          color: Colors.white),
-                      tooltip: 'Wstecz'),
-                  const Spacer(),
-                  menu,
                 ],
               ),
             ),
@@ -33009,6 +34762,12 @@ class _DayDetailsHeader extends StatelessWidget {
                       ),
                     ),
                     _DayStatusBadge(status: status),
+                    // Sugestie progresji tuż przy statusie — zamiast osobnej,
+                    // dużej sekcji na dole ekranu.
+                    ProgressionSuggestionIconButton(
+                      items: items,
+                      onDark: true,
+                    ),
                   ],
                 ),
                 const SizedBox(height: 4),
@@ -33118,93 +34877,180 @@ class _DayStatusBadge extends StatelessWidget {
   }
 }
 
-/// Sekcja „Przewodnik": avatar trenera + opis + przejście do techniki.
-class _DayGuideCard extends StatelessWidget {
-  const _DayGuideCard({required this.hasExercises, required this.onOpen});
+// Kafelek „Przewodnik / Instrukcja ćwiczeń" (_DayGuideCard) oraz dwie osobne
+// sekcje chipów (_TagSection: „Sprzęt potrzebny", „Partie trenowane") zostały
+// usunięte. Instrukcja otwiera się dotknięciem ćwiczenia na liście dnia,
+// a sprzęt i partie mieszkają w zwijanym wierszu [_DayDetailsFacts].
 
-  final bool hasExercises;
-  final VoidCallback onOpen;
+/// Zwijany wiersz „Szczegóły treningu": sprzęt i partie w jednym podsumowaniu.
+///
+/// Domyślnie widać skrót („Hantle + ławka • Klatka, triceps i barki"),
+/// a dotknięcie rozwija pełne listy. Żadna informacja nie znika — zmienia się
+/// tylko to, ile miejsca zajmuje zanim ktoś o nią poprosi.
+class _DayDetailsFacts extends StatefulWidget {
+  const _DayDetailsFacts({required this.equipment, required this.muscles});
+
+  final List<String> equipment;
+  final List<String> muscles;
 
   @override
-  Widget build(BuildContext context) {
-    final theme = Theme.of(context);
-    return Card(
-      clipBehavior: Clip.antiAlias,
-      child: InkWell(
-        onTap: hasExercises ? onOpen : null,
-        child: Padding(
-          padding: const EdgeInsets.all(14),
-          child: Row(
-            children: [
-              CircleAvatar(
-                radius: 22,
-                backgroundColor: theme.colorScheme.primaryContainer,
-                foregroundColor: theme.colorScheme.onPrimaryContainer,
-                child: const Icon(Icons.sports_rounded),
-              ),
-              const SizedBox(width: 12),
-              Expanded(
-                child: Column(
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  children: [
-                    Text('Przewodnik',
-                        style: theme.textTheme.titleMedium
-                            ?.copyWith(fontWeight: FontWeight.w900)),
-                    const SizedBox(height: 2),
-                    Text(
-                      hasExercises
-                          ? 'Instrukcje ćwiczeń i wideo trenera'
-                          : 'Dodaj ćwiczenia, aby zobaczyć instrukcje',
-                      maxLines: 2,
-                      overflow: TextOverflow.ellipsis,
-                      style: theme.textTheme.bodySmall
-                          ?.copyWith(color: theme.colorScheme.onSurfaceVariant),
-                    ),
-                  ],
-                ),
-              ),
-              if (hasExercises)
-                Icon(Icons.chevron_right_rounded,
-                    color: theme.colorScheme.onSurfaceVariant),
-            ],
-          ),
-        ),
-      ),
-    );
-  }
+  State<_DayDetailsFacts> createState() => _DayDetailsFactsState();
 }
 
-/// Sekcja z chipami (sprzęt / partie trenowane).
-class _TagSection extends StatelessWidget {
-  const _TagSection(
-      {required this.icon, required this.title, required this.labels});
+class _DayDetailsFactsState extends State<_DayDetailsFacts> {
+  bool _open = false;
 
-  final IconData icon;
-  final String title;
-  final List<String> labels;
+  /// „Hantle + ławka • Klatka, triceps i barki" — najważniejsze pozycje,
+  /// reszta jako „+N", żeby skrót został jedną linijką.
+  String _summary(List<String> values, String joiner, int visible) {
+    if (values.isEmpty) return '';
+    final shown = values.take(visible).join(joiner);
+    final rest = values.length - visible;
+    return rest > 0 ? '$shown +$rest' : shown;
+  }
 
   @override
   Widget build(BuildContext context) {
     final theme = Theme.of(context);
+    final scheme = theme.colorScheme;
+    final parts = <String>[
+      if (widget.equipment.isNotEmpty) _summary(widget.equipment, ' + ', 2),
+      if (widget.muscles.isNotEmpty) _summary(widget.muscles, ', ', 3),
+    ];
+
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        InkWell(
+          key: const Key('day_facts_toggle'),
+          borderRadius: BorderRadius.circular(uiCornerRadius(context, 12)),
+          onTap: () => setState(() => _open = !_open),
+          child: Padding(
+            padding: uiInsets(context,
+                const EdgeInsets.symmetric(vertical: 8, horizontal: 4)),
+            child: Row(
+              children: [
+                Icon(Icons.info_outline_rounded,
+                    size: 16, color: scheme.primary),
+                SizedBox(width: uiGap(context, 8)),
+                Expanded(
+                  child: Text(
+                    parts.join(' • '),
+                    maxLines: 2,
+                    overflow: TextOverflow.ellipsis,
+                    style: theme.textTheme.bodySmall?.copyWith(
+                        fontWeight: FontWeight.w700,
+                        color: scheme.onSurfaceVariant),
+                  ),
+                ),
+                Icon(
+                    _open
+                        ? Icons.expand_less_rounded
+                        : Icons.expand_more_rounded,
+                    size: 20,
+                    color: scheme.onSurfaceVariant),
+              ],
+            ),
+          ),
+        ),
+        if (_open) ...[
+          if (widget.equipment.isNotEmpty)
+            _factsGroup(theme, Icons.fitness_center_outlined,
+                'Sprzęt potrzebny', widget.equipment),
+          if (widget.muscles.isNotEmpty) ...[
+            SizedBox(height: uiGap(context, 10)),
+            _factsGroup(theme, Icons.accessibility_new_rounded,
+                'Partie trenowane', widget.muscles),
+          ],
+        ],
+      ],
+    );
+  }
+
+  Widget _factsGroup(
+      ThemeData theme, IconData icon, String title, List<String> labels) {
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
         Row(
           children: [
-            Icon(icon, size: 18, color: theme.colorScheme.primary),
+            Icon(icon, size: 16, color: theme.colorScheme.primary),
             const SizedBox(width: 8),
             Text(title,
-                style: theme.textTheme.titleSmall
+                style: theme.textTheme.labelLarge
                     ?.copyWith(fontWeight: FontWeight.w900)),
           ],
         ),
-        const SizedBox(height: 8),
+        SizedBox(height: uiGap(context, 6)),
         Wrap(
           spacing: 8,
           runSpacing: 8,
           children: [for (final label in labels) MiniTag(text: label)],
         ),
       ],
+    );
+  }
+}
+
+/// Ikona sugestii progresji przy statusie dnia.
+///
+/// Zastępuje dawną, dużą sekcję „Sugestie progresji". Po dotknięciu pokazuje
+/// proponowaną zmianę ciężaru, powtórzeń, serii i wariantu wraz z powodem
+/// i tym, co krok stłumiło. Bez sugestii jest NIEAKTYWNA i mówi „Brak zmian",
+/// żeby nie udawać, że coś się kryje pod spodem.
+class ProgressionSuggestionIconButton extends StatelessWidget {
+  const ProgressionSuggestionIconButton({
+    super.key,
+    required this.items,
+    this.onDark = false,
+  });
+
+  final List<PlanItem> items;
+
+  /// Wersja na ciemnym tle (nagłówek ze zdjęciem programu).
+  final bool onDark;
+
+  @override
+  Widget build(BuildContext context) {
+    final store = AppScope.of(context);
+    final scheme = Theme.of(context).colorScheme;
+
+    final entries = <({String name, CautiousProgressionStep step})>[];
+    final seen = <String>{};
+    for (final item in items) {
+      if (!seen.add(item.exerciseId)) continue;
+      final step = store.cautiousProgressionForExercise(item.exerciseId);
+      if (step == null) continue;
+      entries.add((
+        name: item.exerciseFrom(store.customExercises).name,
+        step: step,
+      ));
+    }
+    final changing = entries.where((e) => e.step.changesAnything).length;
+    final hasData = entries.isNotEmpty;
+
+    final Color color = onDark
+        ? (hasData ? Colors.white : Colors.white54)
+        : (hasData ? scheme.primary : scheme.onSurfaceVariant);
+
+    return Tooltip(
+      message: !hasData
+          ? 'Sugestie progresji — brak danych z historii'
+          : changing == 0
+              ? 'Sugestie progresji — brak zmian na następny raz'
+              : 'Sugestie progresji — $changing '
+                  '${changing == 1 ? 'zmiana' : 'zmiany'} na następny raz',
+      child: IconButton(
+        key: const Key('progression_suggestion_icon'),
+        visualDensity: VisualDensity.compact,
+        onPressed:
+            hasData ? () => showSetProgressionSheet(context, entries) : null,
+        icon: Badge(
+          isLabelVisible: changing > 0,
+          label: Text('$changing'),
+          child: Icon(Icons.auto_graph_rounded, size: 20, color: color),
+        ),
+      ),
     );
   }
 }
@@ -33353,21 +35199,93 @@ class _DayExerciseTile extends StatelessWidget {
       ],
     );
 
+    // DOTKNIĘCIE KAFELKA otwiera instrukcję ćwiczenia — to zastąpiło osobny
+    // kafelek „Instrukcja ćwiczeń" nad listą. Nie wymaga startowania treningu.
     if (compact) {
-      return Container(
-        margin: const EdgeInsets.only(bottom: 8),
-        padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 8),
+      return InkWell(
+        key: Key('day_exercise_tile_${exercise.id}'),
+        borderRadius: BorderRadius.circular(uiCornerRadius(context, 14)),
+        onTap: onTechnique,
+        child: Container(
+          margin: EdgeInsets.only(bottom: uiGap(context, 8)),
+          padding: uiInsets(
+              context, const EdgeInsets.symmetric(horizontal: 10, vertical: 8)),
+          decoration: BoxDecoration(
+            color: mobility
+                ? accentColors.background
+                : scheme.surfaceContainerHighest.withValues(alpha: 0.5),
+            borderRadius: BorderRadius.circular(uiCornerRadius(context, 14)),
+            border: mobility ? Border.all(color: accentColors.border) : null,
+          ),
+          child: Row(
+            children: [
+              _ExerciseListThumb(exercise: exercise, size: 40),
+              const SizedBox(width: 10),
+              Expanded(
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Row(
+                      children: [
+                        Flexible(
+                          child: Text('$position. ${exercise.name}',
+                              maxLines: 1,
+                              overflow: TextOverflow.ellipsis,
+                              style: theme.textTheme.bodyMedium
+                                  ?.copyWith(fontWeight: FontWeight.w800)),
+                        ),
+                        if (mobility) ...[
+                          const SizedBox(width: 4),
+                          const MobilityBadge(size: 13),
+                        ],
+                      ],
+                    ),
+                    Row(
+                      children: [
+                        Icon(typeIcon,
+                            size: 13, color: scheme.onSurfaceVariant),
+                        const SizedBox(width: 4),
+                        Expanded(
+                            child: Text(meta,
+                                maxLines: 1,
+                                overflow: TextOverflow.ellipsis,
+                                style: theme.textTheme.bodySmall?.copyWith(
+                                    color: scheme.onSurfaceVariant))),
+                      ],
+                    ),
+                  ],
+                ),
+              ),
+              menu,
+            ],
+          ),
+        ),
+      );
+    }
+
+    return InkWell(
+      key: Key('day_exercise_tile_${exercise.id}'),
+      borderRadius: BorderRadius.circular(uiCornerRadius(context, 16)),
+      onTap: onTechnique,
+      child: Container(
+        margin: EdgeInsets.only(bottom: uiGap(context, 10)),
+        padding: uiInsets(context, const EdgeInsets.all(12)),
         decoration: BoxDecoration(
           color: mobility
               ? accentColors.background
               : scheme.surfaceContainerHighest.withValues(alpha: 0.5),
-          borderRadius: BorderRadius.circular(14),
-          border: mobility ? Border.all(color: accentColors.border) : null,
+          borderRadius: BorderRadius.circular(uiCornerRadius(context, 16)),
+          border: Border.all(
+            color: mobility
+                ? accentColors.border
+                : scheme.outlineVariant.withValues(alpha: 0.4),
+          ),
         ),
         child: Row(
           children: [
-            _ExerciseListThumb(exercise: exercise, size: 40),
-            const SizedBox(width: 10),
+            _ExerciseListThumb(
+                exercise: exercise, size: uiSize(context, 60, min: 44)),
+            SizedBox(width: uiGap(context, 12)),
             Expanded(
               child: Column(
                 crossAxisAlignment: CrossAxisAlignment.start,
@@ -33376,27 +35294,37 @@ class _DayExerciseTile extends StatelessWidget {
                     children: [
                       Flexible(
                         child: Text('$position. ${exercise.name}',
-                            maxLines: 1,
+                            maxLines: 2,
                             overflow: TextOverflow.ellipsis,
-                            style: theme.textTheme.bodyMedium
+                            style: theme.textTheme.bodyLarge
                                 ?.copyWith(fontWeight: FontWeight.w800)),
                       ),
                       if (mobility) ...[
-                        const SizedBox(width: 4),
-                        const MobilityBadge(size: 13),
+                        const SizedBox(width: 6),
+                        const MobilityBadge(size: 16),
                       ],
                     ],
                   ),
+                  const SizedBox(height: 6),
                   Row(
                     children: [
-                      Icon(typeIcon, size: 13, color: scheme.onSurfaceVariant),
+                      Icon(typeIcon, size: 15, color: scheme.primary),
                       const SizedBox(width: 4),
                       Expanded(
-                          child: Text(meta,
-                              maxLines: 1,
-                              overflow: TextOverflow.ellipsis,
-                              style: theme.textTheme.bodySmall
-                                  ?.copyWith(color: scheme.onSurfaceVariant))),
+                        child: Text(
+                          meta,
+                          maxLines: 1,
+                          overflow: TextOverflow.ellipsis,
+                          style: theme.textTheme.bodySmall?.copyWith(
+                              color: scheme.onSurfaceVariant,
+                              fontWeight: FontWeight.w600),
+                        ),
+                      ),
+                      if (exercise.hasMedia || exercise.hasVideo) ...[
+                        const SizedBox(width: 8),
+                        Icon(Icons.play_circle_outline_rounded,
+                            size: 14, color: scheme.onSurfaceVariant),
+                      ],
                     ],
                   ),
                 ],
@@ -33405,73 +35333,6 @@ class _DayExerciseTile extends StatelessWidget {
             menu,
           ],
         ),
-      );
-    }
-
-    return Container(
-      margin: const EdgeInsets.only(bottom: 10),
-      padding: const EdgeInsets.all(12),
-      decoration: BoxDecoration(
-        color: mobility
-            ? accentColors.background
-            : scheme.surfaceContainerHighest.withValues(alpha: 0.5),
-        borderRadius: BorderRadius.circular(16),
-        border: Border.all(
-          color: mobility
-              ? accentColors.border
-              : scheme.outlineVariant.withValues(alpha: 0.4),
-        ),
-      ),
-      child: Row(
-        children: [
-          _ExerciseListThumb(exercise: exercise, size: 60),
-          const SizedBox(width: 12),
-          Expanded(
-            child: Column(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                Row(
-                  children: [
-                    Flexible(
-                      child: Text('$position. ${exercise.name}',
-                          maxLines: 2,
-                          overflow: TextOverflow.ellipsis,
-                          style: theme.textTheme.bodyLarge
-                              ?.copyWith(fontWeight: FontWeight.w800)),
-                    ),
-                    if (mobility) ...[
-                      const SizedBox(width: 6),
-                      const MobilityBadge(size: 16),
-                    ],
-                  ],
-                ),
-                const SizedBox(height: 6),
-                Row(
-                  children: [
-                    Icon(typeIcon, size: 15, color: scheme.primary),
-                    const SizedBox(width: 4),
-                    Expanded(
-                      child: Text(
-                        meta,
-                        maxLines: 1,
-                        overflow: TextOverflow.ellipsis,
-                        style: theme.textTheme.bodySmall?.copyWith(
-                            color: scheme.onSurfaceVariant,
-                            fontWeight: FontWeight.w600),
-                      ),
-                    ),
-                    if (exercise.hasMedia || exercise.hasVideo) ...[
-                      const SizedBox(width: 8),
-                      Icon(Icons.play_circle_outline_rounded,
-                          size: 14, color: scheme.onSurfaceVariant),
-                    ],
-                  ],
-                ),
-              ],
-            ),
-          ),
-          menu,
-        ],
       ),
     );
   }
@@ -34858,16 +36719,22 @@ class ProgressPage extends StatelessWidget {
           // szukanej danej. Karty budują się dopiero po wejściu w temat.
           slivers: [
             SliverPadding(
-              padding: const EdgeInsets.fromLTRB(16, 0, 16, 24),
+              padding:
+                  uiInsets(context, const EdgeInsets.fromLTRB(16, 0, 16, 24)),
               sliver: SliverGrid(
-                gridDelegate:
-                    const SliverGridDelegateWithFixedCrossAxisCount(
+                gridDelegate: SliverGridDelegateWithFixedCrossAxisCount(
                   crossAxisCount: 2,
-                  mainAxisSpacing: 10,
-                  crossAxisSpacing: 10,
+                  mainAxisSpacing: uiGap(context, 10),
+                  crossAxisSpacing: uiGap(context, 10),
                   // Nieco wyższe niż szerokie — mieszczą tytuł w dwóch
                   // wierszach, liczbę i podpis nawet na wąskich ekranach.
-                  childAspectRatio: 0.92,
+                  // Tryb kompaktowy spłaszcza kafelek, ale nie na tyle, żeby
+                  // ucinał drugi wiersz tytułu.
+                  childAspectRatio: switch (uiDensityOf(context)) {
+                    'compact' => 1.15,
+                    'large' => 0.85,
+                    _ => 0.92,
+                  },
                 ),
                 delegate: SliverChildBuilderDelegate(
                   (context, i) => ProgressTopicGridTile(topic: topics[i]),
@@ -34879,37 +36746,47 @@ class ProgressPage extends StatelessWidget {
           child: Column(
             crossAxisAlignment: CrossAxisAlignment.stretch,
             children: [
-              // Szybki dostęp do danych historycznych (przeniesione z „Więcej").
-              _MoreNavCard(
-                tiles: [
-                  FeatureActionTile(
+              // Wejścia w dane — KOMPAKTOWA siatka dwóch kolumn zamiast trzech
+              // wysokich kafelków plus dwóch dużych kart („Sylwetka" i „Cel
+              // wagowy"). Te dwie zostały PRZENIESIONE do „Pomiaru sylwetki",
+              // bo pokazywały to samo, do czego prowadziły; tutaj ich treść
+              // niesie podpis kafelka, więc nic nie zniknęło z widoku.
+              CompactNavGrid(
+                entries: [
+                  CompactNavEntry(
+                    icon: Icons.straighten_rounded,
+                    title: 'Pomiar sylwetki',
+                    subtitle: _bodySnapshotSubtitle(store),
+                    onTap: () => Navigator.of(context).push(MaterialPageRoute(
+                        builder: (_) => const BodyMeasurementsPage())),
+                  ),
+                  CompactNavEntry(
                     icon: Icons.history_rounded,
                     title: 'Historia treningów',
-                    subtitle: 'Wszystkie zapisane sesje i wpisy',
+                    subtitle: store.logs.isEmpty
+                        ? 'Brak zapisanych wpisów'
+                        : '${store.logs.length} wpisów',
                     onTap: () => openTrainerSubPage(
                         context, const HistoryPage(),
                         title: 'Historia treningów'),
                   ),
-                  FeatureActionTile(
-                    icon: Icons.straighten_rounded,
-                    title: 'Pomiary sylwetki',
-                    subtitle: 'Waga, obwody, historia i wykresy',
-                    onTap: () => Navigator.of(context).push(MaterialPageRoute(
-                        builder: (_) => const BodyMeasurementsPage())),
-                  ),
-                  FeatureActionTile(
+                  CompactNavEntry(
                     icon: Icons.self_improvement_rounded,
-                    title: 'Regeneracja w czasie',
-                    subtitle: 'Mapa partii i stan zmęczenia mięśni',
+                    title: 'Regeneracja',
+                    subtitle: 'Mapa partii i zmęczenie',
                     onTap: () => openMuscleRecoveryPage(context),
+                  ),
+                  CompactNavEntry(
+                    icon: Icons.person_outline_rounded,
+                    title: 'Profil treningowy',
+                    subtitle: 'Cele, poziom, sprzęt',
+                    onTap: () => openTrainerSubPage(
+                        context, const TrainingProfilePage(),
+                        title: 'Profil treningowy'),
                   ),
                 ],
               ),
-              const SizedBox(height: 12),
-              const BodySnapshotCard(),
-              const SizedBox(height: 12),
-              const WeightGoalCard(),
-              const SizedBox(height: 16),
+              SizedBox(height: uiGap(context, 16)),
               ProgressSummaryTiles(
                 weekWorkoutCount: weekWorkoutCount,
                 monthWorkoutCount: monthWorkoutCount,
@@ -35052,8 +36929,7 @@ List<TrainerProgressTopic> trainerProgressTopics({
       hint: 'ciężar × powtórzenia w tym tygodniu',
       card: (_) => SimpleProgressBarChartCard(
         title: 'Objętość tygodniowa',
-        subtitle:
-            'Suma ciężar × powtórzenia z każdego dnia bieżącego tygodnia',
+        subtitle: 'Suma ciężar × powtórzenia z każdego dnia bieżącego tygodnia',
         values: weekVolumeValues,
         labels: weekVolumeLabels,
         suffix: 'kg',
@@ -35077,8 +36953,7 @@ List<TrainerProgressTopic> trainerProgressTopics({
       hint: 'sesji w tym tygodniu',
       card: (_) => SimpleProgressBarChartCard(
         title: 'Liczba treningów',
-        subtitle:
-            'Unikalne sesje treningowe w ostatnich czterech tygodniach',
+        subtitle: 'Unikalne sesje treningowe w ostatnich czterech tygodniach',
         values: workoutCountValues,
         labels: workoutCountLabels,
         suffix: 'tr.',
@@ -35135,8 +37010,7 @@ List<TrainerProgressTopic> trainerProgressTopics({
       hint: 'partii trenowanych w tym miesiącu',
       card: (_) => BasicMuscleFrequencyCard(
           logs: monthLogs, customExercises: store.customExercises),
-      whatItIs:
-          'Które partie w tym miesiącu dostały najwięcej pracy, a które '
+      whatItIs: 'Które partie w tym miesiącu dostały najwięcej pracy, a które '
           'najmniej. Najrzadsze partie to zwykle te, które najbardziej '
           'ograniczają postęp w ćwiczeniach złożonych.',
       tips: const [
@@ -35149,8 +37023,8 @@ List<TrainerProgressTopic> trainerProgressTopics({
       title: 'Mapa mięśni',
       icon: Icons.accessibility_new_rounded,
       hint: 'Co przepracowałeś w tym tygodniu',
-      card: (_) => MuscleMapCard(
-          logs: weekLogs, customExercises: store.customExercises),
+      card: (_) =>
+          MuscleMapCard(logs: weekLogs, customExercises: store.customExercises),
       whatItIs:
           'Sylwetka z zaznaczonym obciążeniem partii w bieżącym tygodniu. '
           'Jasne miejsca to partie pominięte.',
@@ -35166,8 +37040,7 @@ List<TrainerProgressTopic> trainerProgressTopics({
       hint: 'Czy plan nie przechyla się w jedną stronę',
       card: (_) => WeeklyBalanceCard(
           logs: weekLogs, customExercises: store.customExercises),
-      whatItIs:
-          'Porównanie pracy góra–dół i przód–tył w bieżącym tygodniu. '
+      whatItIs: 'Porównanie pracy góra–dół i przód–tył w bieżącym tygodniu. '
           'Nierównowaga jest najczęstszą cichą przyczyną kontuzji i zastoju.',
       tips: const [
         'Objętość pleców powinna być co najmniej równa objętości klatki.',
@@ -35226,8 +37099,7 @@ List<TrainerProgressTopic> trainerProgressTopics({
       icon: Icons.warning_amber_rounded,
       hint: 'Gdzie przesadzasz z pracą',
       card: (_) => VolumeWarningsCard(logs: weekLogs),
-      whatItIs:
-          'Partie, które w tym tygodniu dostały więcej pracy, niż zdążą '
+      whatItIs: 'Partie, które w tym tygodniu dostały więcej pracy, niż zdążą '
           'zregenerować — z limitów objętości ustawionych w aplikacji.',
       tips: const [
         'Ostrzeżenie to podpowiedź, żeby przenieść serie na inną partię, a nie żeby przestać trenować.',
@@ -35240,8 +37112,7 @@ List<TrainerProgressTopic> trainerProgressTopics({
       icon: Icons.trending_flat_rounded,
       hint: 'Ćwiczenia, które stanęły w miejscu',
       card: (_) => StagnationDetectorCard(logs: store.logs),
-      whatItIs:
-          'Ćwiczenia bez postępu ciężaru i objętości od kilku tygodni. '
+      whatItIs: 'Ćwiczenia bez postępu ciężaru i objętości od kilku tygodni. '
           'Wcześnie wyłapana stagnacja kosztuje jedną zmianę w planie — '
           'późno wyłapana kosztuje miesiąc.',
       tips: const [
@@ -35257,8 +37128,7 @@ List<TrainerProgressTopic> trainerProgressTopics({
       hint: 'treningów w tym miesiącu',
       card: (_) => MonthlySummaryCard(
           logs: monthLogs, customExercises: store.customExercises),
-      whatItIs:
-          'Zbiorczy obraz miesiąca: treningi, objętość, serie i partie. '
+      whatItIs: 'Zbiorczy obraz miesiąca: treningi, objętość, serie i partie. '
           'Okno na tyle długie, że nie widać w nim szumu pojedynczych dni.',
       tips: const [
         'Porównuj miesiąc do miesiąca, nie tydzień do tygodnia — mniej nerwów, więcej sygnału.',
@@ -35270,8 +37140,7 @@ List<TrainerProgressTopic> trainerProgressTopics({
       icon: Icons.repeat_rounded,
       hint: 'Historia cykli i deloadów',
       card: (_) => const MesocycleHistoryCard(),
-      whatItIs:
-          'Mezocykl to blok kilku tygodni narastającej pracy zakończony '
+      whatItIs: 'Mezocykl to blok kilku tygodni narastającej pracy zakończony '
           'deloadem. Karta pokazuje, w którym tygodniu bloku jesteś i jak '
           'wyglądały poprzednie.',
       tips: const [
@@ -35280,6 +37149,126 @@ List<TrainerProgressTopic> trainerProgressTopics({
       ],
     ),
   ];
+}
+
+/// Skrót stanu sylwetki do podpisu kafelka („92,4 kg · cel 88 kg").
+/// Dzięki niemu zwinięcie osobnej karty „Sylwetka" nie zabiera informacji.
+String _bodySnapshotSubtitle(AppStore store) {
+  final measurements = store.bodyMeasurements;
+  double weight = 0;
+  for (final measurement in measurements) {
+    if (measurement.weightKg > 0) {
+      weight = measurement.weightKg;
+      break;
+    }
+  }
+  if (weight <= 0) weight = store.settings.bodyWeightKg;
+  final goal = store.settings.targetWeightKg;
+  final parts = <String>[
+    if (weight > 0) '${weight.toStringAsFixed(1)} kg',
+    if (goal > 0) 'cel ${goal.toStringAsFixed(1)} kg',
+  ];
+  return parts.isEmpty ? 'Waga, obwody, zdjęcia' : parts.join(' · ');
+}
+
+/// Jeden wpis kompaktowej siatki nawigacyjnej.
+class CompactNavEntry {
+  const CompactNavEntry({
+    required this.icon,
+    required this.title,
+    required this.subtitle,
+    required this.onTap,
+  });
+
+  final IconData icon;
+  final String title;
+  final String subtitle;
+  final VoidCallback onTap;
+}
+
+/// Kompaktowa siatka wejść (dwie kolumny) zamiast wysokich kafelków listy.
+///
+/// Powstała po to, żeby sekcja przed „Twoimi danymi" nie zajmowała pół ekranu.
+/// Wysokość skaluje się gęstością interfejsu, ale obszar dotykowy nigdy nie
+/// schodzi poniżej bezpiecznego minimum ([uiTouchSize]).
+class CompactNavGrid extends StatelessWidget {
+  const CompactNavGrid({super.key, required this.entries});
+
+  final List<CompactNavEntry> entries;
+
+  @override
+  Widget build(BuildContext context) {
+    final theme = Theme.of(context);
+    final scheme = theme.colorScheme;
+    final spacing = uiGap(context, 10);
+    return LayoutBuilder(
+      builder: (context, constraints) {
+        // Jedna kolumna na bardzo wąskich ekranach — dwie kolumny po 150 px
+        // zaczynają łamać tytuły przy powiększonej czcionce systemowej.
+        final columns = constraints.maxWidth < 340 ? 1 : 2;
+        final width =
+            (constraints.maxWidth - spacing * (columns - 1)) / columns;
+        return Wrap(
+          spacing: spacing,
+          runSpacing: spacing,
+          children: [
+            for (final entry in entries)
+              SizedBox(
+                width: width,
+                child: Material(
+                  color: scheme.surfaceContainerHighest.withValues(alpha: 0.5),
+                  borderRadius:
+                      BorderRadius.circular(uiCornerRadius(context, 14)),
+                  child: InkWell(
+                    borderRadius:
+                        BorderRadius.circular(uiCornerRadius(context, 14)),
+                    onTap: entry.onTap,
+                    child: ConstrainedBox(
+                      constraints:
+                          BoxConstraints(minHeight: uiTouchSize(context, 58)),
+                      child: Padding(
+                        padding: uiInsets(
+                            context, const EdgeInsets.fromLTRB(12, 10, 8, 10)),
+                        child: Row(
+                          children: [
+                            Icon(entry.icon,
+                                size: uiSize(context, 20, min: 18),
+                                color: scheme.primary),
+                            SizedBox(width: uiGap(context, 10)),
+                            Expanded(
+                              child: Column(
+                                mainAxisSize: MainAxisSize.min,
+                                crossAxisAlignment: CrossAxisAlignment.start,
+                                children: [
+                                  Text(
+                                    entry.title,
+                                    maxLines: 1,
+                                    overflow: TextOverflow.ellipsis,
+                                    style: theme.textTheme.labelLarge
+                                        ?.copyWith(fontWeight: FontWeight.w800),
+                                  ),
+                                  Text(
+                                    entry.subtitle,
+                                    maxLines: 1,
+                                    overflow: TextOverflow.ellipsis,
+                                    style: theme.textTheme.labelSmall?.copyWith(
+                                        color: scheme.onSurfaceVariant),
+                                  ),
+                                ],
+                              ),
+                            ),
+                          ],
+                        ),
+                      ),
+                    ),
+                  ),
+                ),
+              ),
+          ],
+        );
+      },
+    );
+  }
 }
 
 /// Kafelek tematu w siatce zakładki „Postęp".
@@ -35450,10 +37439,19 @@ class TrainerProgressTopicPage extends StatelessWidget {
   }
 }
 
-/// Kafelek „Sylwetka" na Postępie: waga z trendem, ostatnia analiza AI
-/// (tłuszcz/mięśnie), docelowy typ sylwetki — wejście do pomiarów i analizy.
+/// Migawka sylwetki: waga z trendem, ostatnia analiza AI (tłuszcz/mięśnie)
+/// i docelowy typ sylwetki.
+///
+/// PRZENIESIONA: dawniej stała jako osobny kafelek „Sylwetka" na Postępie i
+/// prowadziła do „Pomiaru sylwetki", który pokazywał to samo. Teraz jest
+/// NAGŁÓWKIEM tamtego ekranu — jedno miejsce dla pomiarów, celów, analizy
+/// i zdjęć, bez kafelka-przekierowania.
 class BodySnapshotCard extends StatelessWidget {
-  const BodySnapshotCard({super.key});
+  const BodySnapshotCard({super.key, this.onTap});
+
+  /// Akcja po dotknięciu. `null` = karta informacyjna (jest już na docelowym
+  /// ekranie i nie ma dokąd prowadzić).
+  final VoidCallback? onTap;
 
   @override
   Widget build(BuildContext context) {
@@ -35486,10 +37484,9 @@ class BodySnapshotCard extends StatelessWidget {
       key: const Key('body_snapshot_card'),
       clipBehavior: Clip.antiAlias,
       child: InkWell(
-        onTap: () => Navigator.of(context).push(
-            MaterialPageRoute(builder: (_) => const BodyMeasurementsPage())),
+        onTap: onTap,
         child: Padding(
-          padding: const EdgeInsets.all(16),
+          padding: uiInsets(context, const EdgeInsets.all(16)),
           child: Column(
             crossAxisAlignment: CrossAxisAlignment.stretch,
             children: [
@@ -35502,7 +37499,7 @@ class BodySnapshotCard extends StatelessWidget {
                       child: Text('Sylwetka',
                           style: theme.textTheme.titleMedium
                               ?.copyWith(fontWeight: FontWeight.w900))),
-                  const Icon(Icons.chevron_right_rounded),
+                  if (onTap != null) const Icon(Icons.chevron_right_rounded),
                 ],
               ),
               const SizedBox(height: 10),
@@ -36220,25 +38217,38 @@ class BodyMeasurementsPage extends StatelessWidget {
     final store = AppScope.of(context);
     final measurements = [...store.bodyMeasurements]
       ..sort((left, right) => right.date.compareTo(left.date));
+    final gap = uiGap(context, 12);
+    // JEDEN centralny ekran sylwetki: migawka, cel wagowy, cel sylwetkowy,
+    // zdjęcia i porównania, analiza AI z historią, waga i obwody, wykresy.
+    // Dawny osobny kafelek „Sylwetka" oraz karta „Cel wagowy" z Postępu
+    // zostały tu PRZENIESIONE, a nie usunięte — obie korzystają z tych samych
+    // pól danych co wcześniej (`settings.targetWeightKg`, `bodyMeasurements`).
     return PageFrame(
-      title: 'Pomiary sylwetki',
-      subtitle: 'Zdjęcia progresu, analiza sylwetki AI, waga i obwody',
+      title: 'Pomiar sylwetki',
+      subtitle:
+          'Waga, cel wagowy, obwody, zdjęcia progresu i analiza sylwetki AI',
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.stretch,
         children: [
-          // Czołówka strony: cała funkcja analizy sylwetki (zdjęcia
-          // przód/bok/tył, cel, analiza AI i jej historia) na początku.
+          // 1. Stan teraz: waga z trendem, skład ciała, docelowa sylwetka.
+          const BodySnapshotCard(),
+          SizedBox(height: gap),
+          // 2. Cel wagowy razem z aktualną wagą i tempem zmiany.
+          const WeightGoalCard(),
+          SizedBox(height: gap),
+          // 3. Zdjęcia progresu i analiza sylwetki AI.
           ProgressPhotosCard(store: store),
-          const SizedBox(height: 12),
+          SizedBox(height: gap),
           if (store.bodyAnalyses.isNotEmpty) ...[
             BodyAnalysisHistoryCard(analyses: store.bodyAnalyses),
-            const SizedBox(height: 12),
+            SizedBox(height: gap),
           ],
+          // 4. Pomiary: waga i obwody + historia i wykresy.
           BodyMeasurementFormCard(store: store),
-          const SizedBox(height: 12),
+          SizedBox(height: gap),
           if (measurements.isNotEmpty) ...[
             BodyMeasurementChartsCard(measurements: measurements),
-            const SizedBox(height: 12),
+            SizedBox(height: gap),
           ],
           BodyMeasurementHistoryCard(measurements: measurements),
         ],
@@ -39048,7 +41058,7 @@ class _AnalysisTrendCard extends StatelessWidget {
             ],
             const SizedBox(height: 8),
             Text(
-              'Wykresy masy, talii i obwodów znajdziesz na stronie „Pomiary sylwetki".',
+              'Wykresy masy, talii i obwodów znajdziesz na stronie „Pomiar sylwetki".',
               style: theme.textTheme.labelSmall
                   ?.copyWith(color: theme.colorScheme.onSurfaceVariant),
             ),
@@ -41200,12 +43210,12 @@ class _MoreNavCard extends StatelessWidget {
   Widget build(BuildContext context) {
     return Card(
       child: Padding(
-        padding: const EdgeInsets.all(10),
+        padding: uiInsets(context, const EdgeInsets.all(10)),
         child: Column(
           children: [
             for (var i = 0; i < tiles.length; i++) ...[
               tiles[i],
-              if (i != tiles.length - 1) const SizedBox(height: 6),
+              if (i != tiles.length - 1) SizedBox(height: uiGap(context, 6)),
             ],
           ],
         ),
@@ -41769,16 +43779,28 @@ class AppearanceCard extends StatelessWidget {
               },
               onChanged: (v) => _save(settings.copyWith(cardStyle: v)),
             ),
-            _sectionLabel(context, Icons.density_medium_rounded, 'Gęstość UI'),
+            _sectionLabel(context, Icons.density_medium_rounded,
+                'Rozmiar kafelków i odstępów'),
             _segmented(
               context,
-              value: settings.uiDensity,
+              value: normalizeUiDensity(settings.uiDensity),
               options: const {
-                'compact': 'Kompaktowy',
-                'normal': 'Normalny',
-                'large': 'Duży'
+                'compact': 'Kompaktowe',
+                'normal': 'Standardowe',
+                'large': 'Duże'
               },
               onChanged: (v) => _save(settings.copyWith(uiDensity: v)),
+            ),
+            Padding(
+              padding: const EdgeInsets.fromLTRB(4, 2, 4, 6),
+              child: Text(
+                'Działa w całej aplikacji: ekran główny, planer, programy, '
+                'historia, profil, ćwiczenia, postęp i pasek aktywności. '
+                'Tryb kompaktowy zmniejsza odstępy i wysokość kafelków, ale '
+                'nie zmniejsza obszarów dotykowych.',
+                style: Theme.of(context).textTheme.labelSmall?.copyWith(
+                    color: Theme.of(context).colorScheme.onSurfaceVariant),
+              ),
             ),
           ],
         ),
@@ -41999,11 +44021,18 @@ class MorePage extends StatelessWidget {
               FeatureActionTile(
                 icon: Icons.person_outline_rounded,
                 title: 'Profil treningowy i cele',
-                subtitle:
-                    'Waga, wzrost, wiek, płeć, poziom, cel, tryb i sprzęt',
+                subtitle: 'Awatar, pseudonim, waga, poziom, cel, tryb i sprzęt',
                 onTap: () => openTrainerSubPage(
                     context, const TrainingProfilePage(),
                     title: 'Profil treningowy'),
+              ),
+              FeatureActionTile(
+                icon: Icons.playlist_add_check_rounded,
+                title: 'Uzupełnij profil',
+                subtitle:
+                    'Kreator krok po kroku: dane, cel, sprzęt, ograniczenia',
+                onTap: () => Navigator.of(context).push(MaterialPageRoute<void>(
+                    builder: (_) => const ProfileSetupWizardPage())),
               ),
               FeatureActionTile(
                 icon: Icons.cloud_sync_outlined,
@@ -42079,8 +44108,9 @@ class MorePage extends StatelessWidget {
               ),
               FeatureActionTile(
                 icon: Icons.straighten_rounded,
-                title: 'Pomiary sylwetki',
-                subtitle: 'Waga, obwody, historia i wykresy',
+                title: 'Pomiar sylwetki',
+                subtitle:
+                    'Waga, cel wagowy, obwody, zdjęcia i analiza sylwetki',
                 onTap: () => Navigator.of(context).push(MaterialPageRoute(
                     builder: (_) => const BodyMeasurementsPage())),
               ),
@@ -42459,19 +44489,483 @@ class TrainingProfilePage extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final store = AppScope.of(context);
+    final gap = uiGap(context, 12);
     return ListView(
-      padding: const EdgeInsets.fromLTRB(16, 12, 16, 24),
+      padding: uiInsets(context, const EdgeInsets.fromLTRB(16, 12, 16, 24)),
       children: [
+        // Kim jest użytkownik: awatar, pseudonim, „O mnie", staż i osiągnięcia.
+        const UserProfileCard(),
+        SizedBox(height: gap),
         // Najpierw STAN, potem formularz — jednym rzutem oka widać, co jest
         // ustawione, bez przewijania kilkunastu pól.
         const _ProfileSummaryCard(),
-        const SizedBox(height: 12),
+        SizedBox(height: gap),
         SettingsCard(settings: store.settings, onSave: store.updateSettings),
-        const SizedBox(height: 12),
+        SizedBox(height: gap),
         // Po zmianie poziomu trzeba przeliczyć aktywny program — inaczej
         // zostaje zbudowany na starym poziomie.
         const ProgramLevelCard(),
       ],
+    );
+  }
+}
+
+/// Karta profilu użytkownika: awatar, pseudonim, „O mnie", data startu,
+/// aktualny cel, ulubione aktywności, seria dni, osiągnięcia i statystyki.
+///
+/// Profil jest PRYWATNY — nie ma tu żadnej funkcji społecznościowej ani
+/// publikowania. Przełącznik prywatności decyduje wyłącznie o tym, czy
+/// statystyki trafiają do kontekstu przekazywanego asystentowi AI.
+class UserProfileCard extends StatelessWidget {
+  const UserProfileCard({super.key});
+
+  /// Najdłuższa seria dni z treningiem (z historii wpisów).
+  static int _bestStreak(List<WorkoutLog> logs) {
+    final days = <String>{
+      for (final log in logs)
+        '${log.date.year}-${log.date.month}-${log.date.day}',
+    };
+    if (days.isEmpty) return 0;
+    final dates = <DateTime>[
+      for (final key in days)
+        DateTime(
+          int.parse(key.split('-')[0]),
+          int.parse(key.split('-')[1]),
+          int.parse(key.split('-')[2]),
+        ),
+    ]..sort();
+    var best = 1;
+    var current = 1;
+    for (var i = 1; i < dates.length; i++) {
+      final diff = dates[i].difference(dates[i - 1]).inDays;
+      current = diff == 1 ? current + 1 : 1;
+      if (current > best) best = current;
+    }
+    return best;
+  }
+
+  /// Aktualna seria dni treningowych (licząc wstecz od dziś albo wczoraj).
+  static int _currentStreak(List<WorkoutLog> logs) {
+    final days = <String>{
+      for (final log in logs)
+        '${log.date.year}-${log.date.month}-${log.date.day}',
+    };
+    if (days.isEmpty) return 0;
+    String key(DateTime d) => '${d.year}-${d.month}-${d.day}';
+    final now = DateTime.now();
+    var cursor = DateTime(now.year, now.month, now.day);
+    if (!days.contains(key(cursor))) {
+      cursor = cursor.subtract(const Duration(days: 1));
+      if (!days.contains(key(cursor))) return 0;
+    }
+    var streak = 0;
+    while (days.contains(key(cursor))) {
+      streak++;
+      cursor = cursor.subtract(const Duration(days: 1));
+    }
+    return streak;
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final store = AppScope.of(context);
+    final theme = Theme.of(context);
+    final scheme = theme.colorScheme;
+    final settings = store.settings;
+    final logs = store.logs;
+    final sessions =
+        logs.map((log) => log.sessionId).where((id) => id.isNotEmpty).toSet();
+    final currentStreak = _currentStreak(logs);
+    final bestStreak = _bestStreak(logs);
+    final start = settings.trainingStartDate;
+    final daysTraining =
+        start == null ? 0 : DateTime.now().difference(start).inDays;
+    final goal = SilhouetteGoal.fromId(settings.targetSilhouette);
+
+    return Card(
+      key: const Key('user_profile_card'),
+      child: Padding(
+        padding: uiInsets(context, const EdgeInsets.all(16)),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.stretch,
+          children: [
+            Row(
+              children: [
+                TrainerProfileAvatar(
+                  size: uiTouchSize(context, 64),
+                  onTap: () => showProfileAvatarSheet(context),
+                ),
+                SizedBox(width: uiGap(context, 14)),
+                Expanded(
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Text(
+                        settings.displayName.trim().isEmpty
+                            ? 'Twój profil'
+                            : settings.displayName.trim(),
+                        maxLines: 1,
+                        overflow: TextOverflow.ellipsis,
+                        style: theme.textTheme.titleLarge
+                            ?.copyWith(fontWeight: FontWeight.w900),
+                      ),
+                      Text(
+                        settings.aboutMe.trim().isEmpty
+                            ? 'Dodaj pseudonim, zdjęcie i krótki opis'
+                            : settings.aboutMe.trim(),
+                        maxLines: 2,
+                        overflow: TextOverflow.ellipsis,
+                        style: theme.textTheme.bodySmall
+                            ?.copyWith(color: scheme.onSurfaceVariant),
+                      ),
+                    ],
+                  ),
+                ),
+                IconButton(
+                  key: const Key('edit_user_profile'),
+                  tooltip: 'Edytuj profil',
+                  onPressed: () => showUserProfileEditor(context),
+                  icon: const Icon(Icons.edit_outlined),
+                ),
+              ],
+            ),
+            SizedBox(height: uiGap(context, 12)),
+            Wrap(
+              spacing: 6,
+              runSpacing: 6,
+              children: [
+                MiniTag(
+                    text: currentStreak > 0
+                        ? 'Seria: $currentStreak dni'
+                        : 'Seria: brak'),
+                if (bestStreak > 0) MiniTag(text: 'Rekord serii: $bestStreak'),
+                MiniTag(text: 'Treningi: ${sessions.length}'),
+                if (daysTraining > 0)
+                  MiniTag(text: 'Trenujesz od $daysTraining dni'),
+                if (goal != null) MiniTag(text: 'Cel: ${goal.label}'),
+                MiniTag(
+                    text: 'Prowadzenie: '
+                        '${GuidanceMode.fromKey(settings.guidanceMode).label}'),
+              ],
+            ),
+            if (settings.favoriteActivities.isNotEmpty) ...[
+              SizedBox(height: uiGap(context, 10)),
+              Text('Ulubione aktywności',
+                  style: theme.textTheme.labelLarge
+                      ?.copyWith(fontWeight: FontWeight.w900)),
+              SizedBox(height: uiGap(context, 6)),
+              Wrap(
+                spacing: 6,
+                runSpacing: 6,
+                children: [
+                  for (final activity in settings.favoriteActivities)
+                    MiniTag(text: activity),
+                ],
+              ),
+            ],
+            SizedBox(height: uiGap(context, 10)),
+            SwitchListTile(
+              key: const Key('profile_stats_private'),
+              contentPadding: EdgeInsets.zero,
+              value: settings.profileStatsPrivate,
+              title: const Text('Statystyki profilu prywatne'),
+              subtitle: const Text(
+                  'Nie przekazuj serii, stażu i osiągnięć do asystenta AI'),
+              onChanged: (value) => store.updateSettings(
+                  settings.copyWith(profileStatsPrivate: value)),
+            ),
+            if (!settings.onboardingCompleted ||
+                settings.displayName.trim().isEmpty)
+              OutlinedButton.icon(
+                key: const Key('complete_profile_button'),
+                onPressed: () => Navigator.of(context).push(
+                  MaterialPageRoute<void>(
+                      builder: (_) => const ProfileSetupWizardPage()),
+                ),
+                icon: const Icon(Icons.playlist_add_check_rounded),
+                label: const Text('Uzupełnij profil'),
+              ),
+          ],
+        ),
+      ),
+    );
+  }
+}
+
+/// Wybór awatara: zdjęcie z galerii, aparat, gotowa ikona albo inicjały.
+///
+/// Zdjęcie jest KOPIOWANE do katalogu dokumentów aplikacji — ścieżka z pickera
+/// wskazuje cache systemowy, który bywa czyszczony i awatar by znikał.
+/// Poprzedni plik awatara usuwamy, żeby nie zostawiać śmieci na urządzeniu.
+Future<void> showProfileAvatarSheet(BuildContext context) async {
+  final store = AppScope.read(context);
+
+  Future<void> pick(ImageSource source) async {
+    final XFile? picked = await ImagePicker()
+        .pickImage(source: source, maxWidth: 900, imageQuality: 88);
+    if (picked == null) return;
+    final previous = store.settings.avatarPath;
+    try {
+      final dir = await getApplicationDocumentsDirectory();
+      final ext = picked.path.contains('.')
+          ? picked.path.split('.').last.toLowerCase()
+          : 'jpg';
+      final dest =
+          '${dir.path}/trainer_avatar_${DateTime.now().millisecondsSinceEpoch}.$ext';
+      await File(picked.path).copy(dest);
+      await store.updateSettings(
+          store.settings.copyWith(avatarPath: dest, avatarIconKey: ''));
+      if (previous.isNotEmpty && previous != dest) {
+        try {
+          final old = File(previous);
+          if (old.existsSync()) await old.delete();
+        } catch (_) {}
+      }
+    } catch (error) {
+      debugPrint('[Profil] Kopiowanie awatara nieudane: $error');
+      await store.updateSettings(
+          store.settings.copyWith(avatarPath: picked.path, avatarIconKey: ''));
+    }
+  }
+
+  await showModalBottomSheet<void>(
+    context: context,
+    showDragHandle: true,
+    useSafeArea: true,
+    builder: (sheetContext) => SafeArea(
+      child: ListView(
+        shrinkWrap: true,
+        padding: const EdgeInsets.fromLTRB(16, 4, 16, 20),
+        children: [
+          Text('Zdjęcie profilowe',
+              style: Theme.of(sheetContext)
+                  .textTheme
+                  .titleMedium
+                  ?.copyWith(fontWeight: FontWeight.w900)),
+          const SizedBox(height: 8),
+          ListTile(
+            key: const Key('avatar_from_gallery'),
+            leading: const Icon(Icons.photo_library_outlined),
+            title: const Text('Wybierz z galerii'),
+            onTap: () {
+              Navigator.pop(sheetContext);
+              pick(ImageSource.gallery);
+            },
+          ),
+          ListTile(
+            key: const Key('avatar_from_camera'),
+            leading: const Icon(Icons.photo_camera_outlined),
+            title: const Text('Zrób zdjęcie'),
+            onTap: () {
+              Navigator.pop(sheetContext);
+              pick(ImageSource.camera);
+            },
+          ),
+          const Divider(height: 24),
+          Text('Albo wybierz ikonę',
+              style: Theme.of(sheetContext)
+                  .textTheme
+                  .labelLarge
+                  ?.copyWith(fontWeight: FontWeight.w900)),
+          const SizedBox(height: 8),
+          Wrap(
+            spacing: 10,
+            runSpacing: 10,
+            children: [
+              for (final entry in kTrainerAvatarIcons.entries)
+                IconButton.filledTonal(
+                  key: Key('avatar_icon_${entry.key}'),
+                  onPressed: () {
+                    store.updateSettings(store.settings
+                        .copyWith(avatarIconKey: entry.key, avatarPath: ''));
+                    Navigator.pop(sheetContext);
+                  },
+                  icon: Icon(entry.value),
+                ),
+            ],
+          ),
+          const SizedBox(height: 12),
+          TextButton.icon(
+            key: const Key('avatar_reset'),
+            onPressed: () {
+              store.updateSettings(
+                  store.settings.copyWith(avatarPath: '', avatarIconKey: ''));
+              Navigator.pop(sheetContext);
+            },
+            icon: const Icon(Icons.person_outline_rounded),
+            label: const Text('Zostaw inicjały'),
+          ),
+        ],
+      ),
+    ),
+  );
+}
+
+/// Edycja pseudonimu, opisu, daty startu i ulubionych aktywności.
+Future<void> showUserProfileEditor(BuildContext context) async {
+  final store = AppScope.read(context);
+  final settings = store.settings;
+  final name = TextEditingController(text: settings.displayName);
+  final about = TextEditingController(text: settings.aboutMe);
+  var start = settings.trainingStartDate;
+  final favorites = {...settings.favoriteActivities};
+
+  final saved = await showModalBottomSheet<bool>(
+    context: context,
+    showDragHandle: true,
+    isScrollControlled: true,
+    useSafeArea: true,
+    builder: (sheetContext) => StatefulBuilder(
+      builder: (sheetContext, setSheetState) => Padding(
+        padding: EdgeInsets.only(
+            bottom: MediaQuery.of(sheetContext).viewInsets.bottom),
+        child: SafeArea(
+          child: ListView(
+            shrinkWrap: true,
+            padding: const EdgeInsets.fromLTRB(16, 4, 16, 20),
+            children: [
+              Text('Twój profil',
+                  style: Theme.of(sheetContext)
+                      .textTheme
+                      .titleMedium
+                      ?.copyWith(fontWeight: FontWeight.w900)),
+              const SizedBox(height: 12),
+              TextField(
+                key: const Key('profile_name_field'),
+                controller: name,
+                textCapitalization: TextCapitalization.words,
+                decoration:
+                    const InputDecoration(labelText: 'Imię lub pseudonim'),
+              ),
+              const SizedBox(height: 10),
+              TextField(
+                key: const Key('profile_about_field'),
+                controller: about,
+                minLines: 2,
+                maxLines: 4,
+                decoration: const InputDecoration(labelText: 'O mnie'),
+              ),
+              const SizedBox(height: 10),
+              ListTile(
+                contentPadding: EdgeInsets.zero,
+                leading: const Icon(Icons.event_rounded),
+                title: const Text('Trenuję od'),
+                subtitle: Text(start == null
+                    ? 'Nie podano'
+                    : trainerHistoryFullDate(start!)),
+                trailing: const Icon(Icons.edit_calendar_outlined),
+                onTap: () async {
+                  final picked = await showDatePicker(
+                    context: sheetContext,
+                    initialDate: start ?? DateTime.now(),
+                    firstDate: DateTime(1980),
+                    lastDate: DateTime.now(),
+                    helpText: 'Data rozpoczęcia treningów',
+                  );
+                  if (picked != null) setSheetState(() => start = picked);
+                },
+              ),
+              const SizedBox(height: 6),
+              Text('Ulubione aktywności',
+                  style: Theme.of(sheetContext)
+                      .textTheme
+                      .labelLarge
+                      ?.copyWith(fontWeight: FontWeight.w900)),
+              const SizedBox(height: 6),
+              Wrap(
+                spacing: 8,
+                runSpacing: 8,
+                children: [
+                  for (final activity in kFavoriteActivitySuggestions)
+                    FilterChip(
+                      label: Text(activity),
+                      selected: favorites.contains(activity),
+                      onSelected: (on) => setSheetState(() {
+                        if (on) {
+                          favorites.add(activity);
+                        } else {
+                          favorites.remove(activity);
+                        }
+                      }),
+                    ),
+                ],
+              ),
+              const SizedBox(height: 16),
+              FilledButton.icon(
+                key: const Key('save_user_profile'),
+                onPressed: () => Navigator.pop(sheetContext, true),
+                icon: const Icon(Icons.check_rounded),
+                label: const Text('Zapisz'),
+              ),
+            ],
+          ),
+        ),
+      ),
+    ),
+  );
+
+  if (saved == true) {
+    await store.updateSettings(store.settings.copyWith(
+      displayName: name.text.trim(),
+      aboutMe: about.text.trim(),
+      trainingStartDate: start,
+      favoriteActivities: favorites.toList(),
+    ));
+  }
+  name.dispose();
+  about.dispose();
+}
+
+/// Awatar profilu: zdjęcie z galerii/aparatu, gotowa ikona albo inicjały.
+class TrainerProfileAvatar extends StatelessWidget {
+  const TrainerProfileAvatar({super.key, this.size = 48, this.onTap});
+
+  final double size;
+  final VoidCallback? onTap;
+
+  @override
+  Widget build(BuildContext context) {
+    final settings = AppScope.of(context).settings;
+    final scheme = Theme.of(context).colorScheme;
+    final path = settings.avatarPath.trim();
+    final iconKey = settings.avatarIconKey.trim();
+    final name = settings.displayName.trim();
+
+    Widget content;
+    if (path.isNotEmpty && File(path).existsSync()) {
+      content = ClipOval(
+        child: Image.file(File(path),
+            width: size, height: size, fit: BoxFit.cover, cacheWidth: 256),
+      );
+    } else if (kTrainerAvatarIcons.containsKey(iconKey)) {
+      content = Icon(kTrainerAvatarIcons[iconKey],
+          size: size * 0.5, color: scheme.onPrimaryContainer);
+    } else {
+      content = Text(
+        name.isEmpty ? '?' : name.substring(0, 1).toUpperCase(),
+        style: TextStyle(
+          fontSize: size * 0.4,
+          fontWeight: FontWeight.w900,
+          color: scheme.onPrimaryContainer,
+        ),
+      );
+    }
+
+    return InkWell(
+      onTap: onTap,
+      customBorder: const CircleBorder(),
+      child: Container(
+        key: const Key('trainer_profile_avatar'),
+        width: size,
+        height: size,
+        alignment: Alignment.center,
+        decoration: BoxDecoration(
+          shape: BoxShape.circle,
+          color: scheme.primaryContainer,
+          border: Border.all(color: scheme.primary.withValues(alpha: 0.4)),
+        ),
+        child: content,
+      ),
     );
   }
 }
@@ -44094,23 +46588,26 @@ class FeatureActionTile extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final theme = Theme.of(context);
+    final radius = uiCornerRadius(context, 20);
     return InkWell(
-      borderRadius: BorderRadius.circular(20),
+      borderRadius: BorderRadius.circular(radius),
       onTap: onTap,
       child: Container(
-        padding: const EdgeInsets.all(14),
+        padding: uiInsets(context, const EdgeInsets.all(14)),
         decoration: BoxDecoration(
-          borderRadius: BorderRadius.circular(20),
-          color: theme.colorScheme.surfaceContainerHighest.withOpacity(0.45),
+          borderRadius: BorderRadius.circular(radius),
+          color:
+              theme.colorScheme.surfaceContainerHighest.withValues(alpha: 0.45),
         ),
         child: Row(
           children: [
             CircleAvatar(
+              radius: uiSize(context, 20, min: 16),
               backgroundColor: theme.colorScheme.primaryContainer,
               foregroundColor: theme.colorScheme.onPrimaryContainer,
-              child: Icon(icon),
+              child: Icon(icon, size: uiSize(context, 22, min: 18)),
             ),
-            const SizedBox(width: 10),
+            SizedBox(width: uiGap(context, 10)),
             Expanded(
               child: Column(
                 crossAxisAlignment: CrossAxisAlignment.start,
@@ -49520,47 +52017,94 @@ class VolumeLimitsSettingsPage extends StatelessWidget {
 
 /// Kafelek z odnośnikiem: czy zestaw mieści się w limitach objętości partii.
 class VolumeLimitsTile extends StatelessWidget {
-  const VolumeLimitsTile({super.key, required this.items});
+  const VolumeLimitsTile({super.key, required this.items, this.intensity});
 
   final List<PlanItem> items;
+
+  /// Intensywność, względem której oceniamy objętość (domyślnie ta z gałki
+  /// aktywnego dnia). Zakres zalecany zależy od niej wprost.
+  final WorkoutIntensityLevel? intensity;
 
   @override
   Widget build(BuildContext context) {
     final store = AppScope.of(context);
     final theme = Theme.of(context);
     final scheme = theme.colorScheme;
+    final level = intensity ?? store.activeIntensityLevel;
     final report = analyzeWorkoutVolume(
       items: items,
       resolve: (id) => ExerciseRepo.byId(id, store.customExercises),
       level: store.settings.level,
       config: store.volumeLimits,
+      intensity: level,
     );
     if (report.counts.isEmpty) return const SizedBox.shrink();
+    final band = store.volumeBandFor(items, intensity: level);
 
-    final ok = report.isValid;
-    final color = ok ? scheme.primary : Colors.orange;
+    // Trzy stany zamiast dwóch: w limicie ▸ nieznacznie poza ▸ znacznie poza.
+    // Nieznaczne odchylenie to normalna praca i nie ma powodu straszyć nim
+    // użytkownika kolorem ostrzegawczym.
+    final Color color;
+    final IconData icon;
+    if (band.status.isWithin && report.isValid) {
+      color = scheme.primary;
+      icon = Icons.verified_rounded;
+    } else if (band.status.isSevere) {
+      color = scheme.error;
+      icon = Icons.warning_amber_rounded;
+    } else {
+      color = Colors.orange;
+      icon = Icons.rule_rounded;
+    }
+
+    final subtitle = band.hasData
+        ? '${band.currentLabel} · ${band.recommendedLabel}'
+        : (report.isValid
+            ? 'Ćwiczenia, serie i powtórzenia w granicach'
+            : report.issues.first.message);
+
     return Card(
       key: const Key('volume_limits_tile'),
       clipBehavior: Clip.antiAlias,
       child: ListTile(
         dense: true,
-        leading: Icon(ok ? Icons.verified_rounded : Icons.rule_rounded,
-            color: color),
+        leading: Icon(icon, color: color),
         title: Text(
-          ok ? 'Objętość zestawu w limitach' : 'Objętość zestawu poza limitami',
+          band.status.isWithin && report.isValid
+              ? 'Objętość zestawu w limitach'
+              : band.status.label,
           style: theme.textTheme.titleSmall
               ?.copyWith(fontWeight: FontWeight.w900, color: color),
         ),
-        subtitle: Text(
-          ok
-              ? '${report.counts.length} ${report.counts.length == 1 ? 'partia' : 'partie'} · ćwiczenia, serie i powtórzenia w granicach'
-              : report.issues.first.message,
-          maxLines: 2,
-          overflow: TextOverflow.ellipsis,
-          style: theme.textTheme.bodySmall,
+        subtitle: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Text(subtitle,
+                maxLines: 2,
+                overflow: TextOverflow.ellipsis,
+                style: theme.textTheme.bodySmall),
+            if (band.deviationLabel.isNotEmpty)
+              Text(
+                band.deviationLabel,
+                key: const Key('volume_band_deviation'),
+                maxLines: 2,
+                overflow: TextOverflow.ellipsis,
+                style: theme.textTheme.bodySmall
+                    ?.copyWith(color: color, fontWeight: FontWeight.w700),
+              ),
+            // Znaczne przekroczenie to realne ryzyko dla regeneracji — mówimy
+            // o tym wprost, ale nadal NIE blokujemy zmiany.
+            if (band.status == VolumeBandStatus.farAbove)
+              Text(
+                'Taka objętość może wydłużyć regenerację trenowanych partii.',
+                key: const Key('volume_band_recovery_warning'),
+                style: theme.textTheme.labelSmall?.copyWith(color: color),
+              ),
+          ],
         ),
+        isThreeLine: band.deviationLabel.isNotEmpty,
         trailing: const Icon(Icons.chevron_right_rounded),
-        onTap: () => showVolumeLimitsSheet(context, report),
+        onTap: () => showVolumeLimitsSheet(context, report, band: band),
       ),
     );
   }
@@ -49569,8 +52113,9 @@ class VolumeLimitsTile extends StatelessWidget {
 /// Szczegóły limitów objętości: ile zestaw daje partii i jakie są granice.
 Future<void> showVolumeLimitsSheet(
   BuildContext context,
-  WorkoutVolumeReport report,
-) {
+  WorkoutVolumeReport report, {
+  WorkoutVolumeBand? band,
+}) {
   return showModalBottomSheet<void>(
     context: context,
     showDragHandle: true,
@@ -49591,10 +52136,49 @@ Future<void> showVolumeLimitsSheet(
             Text(
               'Dla każdej partii pilnujemy trzech granic: ile RÓŻNYCH ćwiczeń ma '
               'zestaw, ile serii przypada na ćwiczenie i w jakim zakresie '
-              'powtórzeń pracujesz.',
+              'powtórzeń pracujesz. Zakres zależy od wybranej INTENSYWNOŚCI — '
+              'lekki dzień jest węższy, bardzo wysoki szerszy.',
               style: theme.textTheme.bodySmall
                   ?.copyWith(color: scheme.onSurfaceVariant),
             ),
+            if (band != null && band.hasData) ...[
+              const SizedBox(height: 12),
+              Container(
+                padding: const EdgeInsets.all(12),
+                decoration: BoxDecoration(
+                  color: scheme.surfaceContainerHighest.withValues(alpha: 0.5),
+                  borderRadius: BorderRadius.circular(14),
+                ),
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Text(band.status.label,
+                        style: theme.textTheme.titleSmall
+                            ?.copyWith(fontWeight: FontWeight.w900)),
+                    const SizedBox(height: 4),
+                    Text(band.currentLabel, style: theme.textTheme.bodySmall),
+                    Text(band.recommendedLabel,
+                        style: theme.textTheme.bodySmall
+                            ?.copyWith(color: scheme.onSurfaceVariant)),
+                    Text(
+                      'Ćwiczenia w zestawie: ${band.exerciseCount} '
+                      '(zalecane ${band.exerciseMin}–${band.exerciseMax})',
+                      style: theme.textTheme.bodySmall
+                          ?.copyWith(color: scheme.onSurfaceVariant),
+                    ),
+                    if (band.deviationLabel.isNotEmpty) ...[
+                      const SizedBox(height: 6),
+                      Text(band.deviationLabel,
+                          style: theme.textTheme.bodySmall?.copyWith(
+                              fontWeight: FontWeight.w700,
+                              color: band.status.isSevere
+                                  ? scheme.error
+                                  : Colors.orange)),
+                    ],
+                  ],
+                ),
+              ),
+            ],
             const SizedBox(height: 14),
             for (final count in report.counts.values) ...[
               Text(count.group.label,
@@ -49625,10 +52209,10 @@ Future<void> showVolumeLimitsSheet(
             ],
             const SizedBox(height: 12),
             Text(
-              'Podkręcanie i zbijanie intensywności (gałka programu oraz dnia) '
-              'celowo działa PONAD tymi limitami — one opisują budowę zestawu, '
-              'a nie jego ciężar. Prognozy czasu i kalorii uwzględniają korektę '
-              'intensywności osobno.',
+              'Wybrana intensywność PRZESUWA te granice (ile ćwiczeń, serii, '
+              'jakie powtórzenia i jak długie przerwy). Ręczne podbicie albo '
+              'zbicie zestawu nadal działa PONAD nimi — nic nie jest blokowane, '
+              'ale odchylenie od zakresu jest tu widoczne.',
               style: theme.textTheme.labelSmall
                   ?.copyWith(color: scheme.onSurfaceVariant),
             ),
