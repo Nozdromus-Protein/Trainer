@@ -72,10 +72,17 @@ enum TrainingFocusArea {
       BodyMuscle.triceps,
       BodyMuscle.serratusAnterior,
     ],
-    // DEFINIUJE push tylko klatka i przedni bark. Triceps PRACUJE w pchaniu,
-    // ale nie definiuje dnia — bez tego trening ramion (triceps) fałszywie
-    // uznawał dzień push/klatki za niegotowy i rozkład go przestawiał.
-    [BodyMuscle.chest, BodyMuscle.frontShoulders],
+    // DEFINIUJE push WYŁĄCZNIE klatka.
+    //
+    // Przedni bark był tu wcześniej razem z klatką i to on powodował kolizję
+    // z dodatkiem „Barki" w tym samym dniu: wyciskanie nad głowę ma przedni
+    // bark jako partię GŁÓWNĄ, więc zrobienie samych barków oznaczało blok
+    // Push jako wykonany i kasowało pierwszorzędny zestaw dnia. W drugą stronę
+    // działo się to samo — dzień klatki potrafił zdjąć z planu barki.
+    //
+    // Ta sama zasada, co przy tricepsie: partia, która w pchaniu PRACUJE, nie
+    // może go DEFINIOWAĆ. Push jest zrobiony wtedy, gdy zrobiona jest klatka.
+    [BodyMuscle.chest],
   ),
   pull(
     'Pull (ciągnięcie)',

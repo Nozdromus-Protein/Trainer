@@ -107,6 +107,18 @@ enum BodyMuscle {
       'transversus abdominis'
     ])) return BodyMuscle.transverseAbdominis;
     if (has(['klatk', 'chest', 'pierś', 'piers'])) return BodyMuscle.chest;
+    // BARKI PRZED SKOŚNYMI. „barki boczne" (boczny akton naramiennego) zawiera
+    // podciąg „boczn", więc bez tej kolejności unoszenie bokiem lądowało
+    // w mięśniach skośnych brzucha — a przez to w limitach, statystykach
+    // i regeneracji jako core zamiast barków. Ten sam rodzaj pułapki co łydki
+    // przed brzuchem niżej.
+    //
+    // Cały bark rozstrzygamy TUTAJ (przód / tył), żeby nie było dwóch miejsc
+    // decydujących o tej samej partii.
+    if (has(['bark', 'naramien', 'shoulder', 'delt', 'aktony'])) {
+      return has(['tył', 'tyl', 'rear']) ? BodyMuscle.rearShoulders
+          : BodyMuscle.frontShoulders;
+    }
     if (has(['skoś', 'skos', 'oblique', 'boczn'])) return BodyMuscle.obliques;
     if (has(['brzuch', 'core', 'abs', 'prosty brzuc', 'poprzeczn']))
       return BodyMuscle.abs;
@@ -137,16 +149,7 @@ enum BodyMuscle {
       'rownoleg'
     ])) return BodyMuscle.upperBack;
     if (has(['plec', 'back'])) return BodyMuscle.lats;
-    if (has([
-      'bark tył',
-      'bark tyl',
-      'tylne aktony',
-      'rear delt',
-      'tył bark',
-      'tyl bark'
-    ])) return BodyMuscle.rearShoulders;
-    if (has(['bark', 'naramien', 'shoulder', 'delt', 'aktony']))
-      return BodyMuscle.frontShoulders;
+    // (Bark rozstrzygnięty wyżej — przed skośnymi brzucha.)
     if (has(['zginacz bioder', 'hip flexor', 'biodr']))
       return BodyMuscle.hipFlexors;
     if (has([

@@ -1922,6 +1922,8 @@ class AppStore extends ChangeNotifier {
     _plannedWorkoutCacheKey = '';
     _programDayDatesCache.clear();
     _programDayDatesCacheKey = '';
+    _recoveryBeforeTodayCache = null;
+    _recoveryBeforeTodayKey = '';
   }
 
   /// KANONICZNY rozstrzygnięty rozkład (cache). To on jest źródłem prawdy dla
@@ -1981,19 +1983,41 @@ class AppStore extends ChangeNotifier {
     final base = buildSchedule(trainingScheduleConfig, start, days);
     if (base.isEmpty) return base;
     final recovery = muscleRecoveryMap(reference);
+    // Regeneracja W CHWILI ROZPOCZĘCIA DZISIEJSZEGO DNIA — bez treningów
+    // zapisanych dzisiaj.
+    //
+    // PROBLEM, KTÓRY TO ROZWIĄZUJE: rozstrzygnięcie dnia liczyło się z bieżącej
+    // regeneracji, więc PIERWSZY zapisany dziś zestaw zmieniał dane wejściowe
+    // i cały dzień mógł się przestawić „pod nosem". Ratunkiem była blokada dnia
+    // (`isScheduleDayLocked`) — ale ona wypychała dzień z przestawiania
+    // w OGÓLE, przez co dzień wcześniej przełożony pod regenerację WRACAŁ do
+    // pierwotnej rotacji. Dokładnie to zgłoszono: Planer przeniósł Push na
+    // jutro i dał dziś Pull, a po zrobieniu barków kalendarz znów pokazywał
+    // Push, i to jako wykonany.
+    //
+    // Liczenie dnia z regeneracji SPRZED jego własnych treningów zdejmuje oba
+    // problemy naraz: wynik jest ten sam rano i wieczorem (bo wejście się nie
+    // zmienia), a świeżo zmęczona partia nie przeplanowuje własnego dnia.
+    final startOfDayRecovery = _recoveryBeforeToday(reference);
+    final today = DateTime(reference.year, reference.month, reference.day);
+    Map<BodyMuscle, MuscleRecoveryState> recoveryFor(DateTime date) {
+      final d = DateTime(date.year, date.month, date.day);
+      return d.isAfter(today) ? recovery : startOfDayRecovery;
+    }
+
     double readiness(TrainingFocusArea area, DateTime date) =>
-        scheduleReadiness(area, date, reference, recovery);
+        scheduleReadiness(area, date, reference, recoveryFor(date));
     // 1. Regeneracja PRZESTAWIA dni (rotacja partii/bloków w tygodniu).
     //    Dodatek dnia oceniamy z pominięciem partii, które i tak obciąża dziś
     //    blok główny — inaczej „barki po klatce" kasowały same siebie —
     //    i średnią zamiast najsłabszej partii, bo dodatek to mały blok.
-    //    Dni już wykonane (i minione) są nietykalne: zrobiony trening nie jest
-    //    planem do poprawienia.
+    //    Dni MINIONE są nietykalne (to już historia); dzisiejszy pozostaje
+    //    rozstrzygalny, ale ze stabilnego wejścia sprzed swoich treningów.
     final resolved = resolveScheduleWithRecovery(
       base,
       readiness,
       readinessIgnoring: (area, date, ignore) => scheduleReadiness(
-          area, date, reference, recovery,
+          area, date, reference, recoveryFor(date),
           ignoreMuscles: ignore, bestMuscle: true),
       isLocked: (day) => isScheduleDayLocked(day, reference),
     );
@@ -2014,20 +2038,60 @@ class AppStore extends ChangeNotifier {
     );
   }
 
-  /// Czy dzień rozkładu jest ZAMKNIĘTY — miniony albo z wykonanymi zestawami.
+  /// Czy dzień rozkładu jest ZAMKNIĘTY — to znaczy MINIONY.
   ///
-  /// Zamkniętego dnia regeneracja już nie przestawia i nie odchudza: świeżo
-  /// wytrenowana partia ma z definicji niską gotowość, więc bez tej blokady
-  /// rozkład podmieniał zrobiony dzień klatki na „nogi".
+  /// Dzień dzisiejszy celowo NIE jest blokowany, nawet gdy ma już zapisane
+  /// zestawy. Blokowanie go wypychało dzień z przestawiania w ogóle, więc dzień
+  /// wcześniej przełożony pod regenerację wracał do pierwotnej rotacji zaraz po
+  /// pierwszym zapisanym ćwiczeniu. Stabilność dnia zapewnia teraz co innego:
+  /// jego rozstrzygnięcie liczy się z regeneracji SPRZED jego własnych
+  /// treningów ([_recoveryBeforeToday]), więc wejście się w ciągu dnia nie
+  /// zmienia i wynik jest ten sam rano i wieczorem.
   bool isScheduleDayLocked(ScheduledDay day, [DateTime? now]) {
     final reference = now ?? DateTime.now();
     final today = DateTime(reference.year, reference.month, reference.day);
     final date = DateTime(day.date.year, day.date.month, day.date.day);
-    if (date.isBefore(today)) return true;
-    // Wystarczy JEDEN zapisany zestaw: dzień jest już w trakcie realizacji,
-    // więc nie wolno podmieniać mu partii pod nosem. Po pierwszym zestawie
-    // trenowana partia i tak ma niską gotowość — to nie powód do przeplanowania.
-    return logsForDay(date).isNotEmpty;
+    return date.isBefore(today);
+  }
+
+  // Regeneracja sprzed dzisiejszych treningów — cache jak zwykła mapa.
+  Map<BodyMuscle, MuscleRecoveryState>? _recoveryBeforeTodayCache;
+  String _recoveryBeforeTodayKey = '';
+
+  /// Mapa regeneracji liczona BEZ treningów zapisanych dzisiaj.
+  ///
+  /// To wejście rozstrzygania dnia: dzięki niemu zestaw zrobiony dziś nie
+  /// przeplanowuje dnia, w którym został zrobiony — ani nie cofa przestawienia,
+  /// które Planer ustalił rano.
+  Map<BodyMuscle, MuscleRecoveryState> _recoveryBeforeToday([DateTime? now]) {
+    final reference = now ?? DateTime.now();
+    final today = DateTime(reference.year, reference.month, reference.day);
+    final minuteBucket = reference.millisecondsSinceEpoch ~/ 60000;
+    final key = '${logs.length}_${logs.isEmpty ? '' : logs.first.id}'
+        '_${customExercises.length}_$minuteBucket'
+        '_${activityEntries.length}'
+        '_${settings.bodyWeightKg}_${settings.age}_${settings.sex}'
+        '_${settings.level}_${settings.trainingWeekdays.length}';
+    final cached = _recoveryBeforeTodayCache;
+    if (cached != null && key == _recoveryBeforeTodayKey) return cached;
+
+    final earlier = [
+      for (final log in logs)
+        if (log.date.isBefore(today)) log,
+    ];
+    // Brak wcześniejszej historii = wszystkie partie świeże; nie ma sensu
+    // uruchamiać całego kalkulatora dla pustej listy.
+    final computed = earlier.isEmpty
+        ? const <BodyMuscle, MuscleRecoveryState>{}
+        : RecoveryCalculator(profile: settings.toRecoveryProfile()).compute(
+            logs: earlier,
+            resolveExercise: (id) => ExerciseRepo.byId(id, customExercises),
+            activities: activityEntries,
+            now: reference,
+          );
+    _recoveryBeforeTodayCache = computed;
+    _recoveryBeforeTodayKey = key;
+    return computed;
   }
 
   /// Czy WSZYSTKIE zestawy tego dnia rozkładu zostały wykonane (tor
