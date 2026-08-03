@@ -1005,6 +1005,7 @@ class WorkoutVolumeBand {
     required this.exerciseCount,
     required this.exerciseMin,
     required this.exerciseMax,
+    this.leadingGroup,
   });
 
   /// Serie ROBOCZE w całym zestawie (bez rozgrzewki i rozciągania).
@@ -1014,10 +1015,18 @@ class WorkoutVolumeBand {
   final VolumeBandStatus status;
   final WorkoutIntensityLevel intensity;
 
-  /// Liczba pozycji roboczych i zalecany zakres (do komunikatu „6 z 8").
+  /// Ćwiczenia PARTII WIODĄCEJ i jej minimum (do komunikatu „6 z 8").
+  /// Świadomie nie liczymy tu wszystkich pozycji dnia — minimum dotyczy partii,
+  /// którą dzień trenuje, a nie tej, która pracuje przy okazji.
   final int exerciseCount;
   final int exerciseMin;
+
+  /// Ile pozycji roboczych dzień może w sumie pomieścić.
   final int exerciseMax;
+
+  /// Partia, wokół której zbudowany jest dzień (`null` = pusty zestaw).
+  /// To jej dotyczą [exerciseCount] i [exerciseMin].
+  final MuscleGroup? leadingGroup;
 
   static const WorkoutVolumeBand empty = WorkoutVolumeBand(
     workingSets: 0,
@@ -1028,6 +1037,7 @@ class WorkoutVolumeBand {
     exerciseCount: 0,
     exerciseMin: 0,
     exerciseMax: 0,
+    leadingGroup: null,
   );
 
   bool get hasData => recommendedMax > 0;
@@ -1097,9 +1107,16 @@ class WorkoutVolumeBand {
 
 /// Liczy objętość zestawu i porównuje ją z zakresem zalecanym dla [intensity].
 ///
-/// Zakres powstaje z limitów WSZYSTKICH partii obecnych w zestawie: dolna
-/// granica to suma minimów, górna — suma maksimów. Dzięki temu dzień na dwie
-/// partie ma naturalnie szersze pasmo niż dzień na jedną.
+/// DOLNA granica pochodzi WYŁĄCZNIE z partii WIODĄCEJ dnia, górna — z sumy
+/// maksimów wszystkich obecnych partii.
+///
+/// PROBLEM, KTÓRY TO ROZWIĄZUJE: sumowanie minimów wszystkich partii dawało
+/// fałszywe ostrzeżenia. Dzień pchania obciąża klatkę, triceps i barki, więc
+/// dolna granica wychodziła jako „3 ćwiczenia klatki + 2 tricepsa + 3 barków",
+/// czyli 24+ serii roboczych — i porządny dzień na 15 serii lądował jako
+/// „znacznie poniżej limitu". Minimum ma sens dla partii, którą dzień TRENUJE;
+/// triceps i barki dostają w nim pracę przy okazji i nie muszą mieć własnego
+/// kompletu ruchów.
 WorkoutVolumeBand describeWorkoutVolumeBand({
   required List<PlanItem> items,
   required Exercise Function(String id) resolve,
@@ -1111,10 +1128,12 @@ WorkoutVolumeBand describeWorkoutVolumeBand({
   final groups = <MuscleGroup, int>{};
   final exerciseIds = <MuscleGroup, Set<String>>{};
   var workingSets = 0;
+  MuscleGroup? firstGroup;
   for (final item in items) {
     final exercise = resolve(item.exerciseId);
     if (!isWorkingVolumeItem(item, exercise)) continue;
     final group = primaryMuscleGroupOf(exercise);
+    firstGroup ??= group;
     final sets = item.sets < 1 ? 1 : item.sets;
     groups[group] = (groups[group] ?? 0) + sets;
     (exerciseIds[group] ??= <String>{}).add(item.exerciseId);
@@ -1122,19 +1141,41 @@ WorkoutVolumeBand describeWorkoutVolumeBand({
   }
   if (groups.isEmpty) return WorkoutVolumeBand.empty;
 
-  var min = 0;
-  var max = 0;
-  var exerciseMin = 0;
-  var exerciseMax = 0;
-  var exerciseCount = 0;
+  // Partia WIODĄCA: najwięcej różnych ćwiczeń, przy remisie — więcej serii,
+  // a gdy i to remis, partia pierwszej (najcięższej) pozycji dnia.
+  var leading = firstGroup!;
   for (final group in groups.keys) {
+    final count = exerciseIds[group]?.length ?? 0;
+    final bestCount = exerciseIds[leading]?.length ?? 0;
+    if (count > bestCount ||
+        (count == bestCount && (groups[group] ?? 0) > (groups[leading] ?? 0))) {
+      leading = group;
+    }
+  }
+
+  final leadingLimits = volumeLimitsFor(leading,
+      level: level, goal: goal, config: config, intensity: intensity);
+  final exerciseMin = leadingLimits.exercises.min;
+  final exerciseCount = exerciseIds[leading]?.length ?? 0;
+
+  // Pasmo dnia = PEŁNY zakres partii wiodącej + rozsądny wkład partii
+  // pomocniczych. Sumowanie pełnych zakresów wszystkich partii dawało pasma
+  // typu „9–135 serii" — liczbę, która nikomu nic nie mówi, bo nikt nie robi
+  // kompletu ruchów na klatkę, triceps i barki w jednym dniu.
+  //
+  // Partia pomocnicza wnosi: do DOLNEJ granicy jedną serię (skoro jest
+  // w zestawie, ma się w nim liczyć), do GÓRNEJ — minimalny komplet ruchów
+  // przy pełnej liczbie serii (tyle pracy dodatkowej dzień jeszcze zniesie).
+  var min = leadingLimits.minWorkingSets;
+  var max = leadingLimits.maxWorkingSets;
+  var exerciseMax = leadingLimits.exercises.max;
+  for (final group in groups.keys) {
+    if (group == leading) continue;
     final limits = volumeLimitsFor(group,
         level: level, goal: goal, config: config, intensity: intensity);
-    min += limits.minWorkingSets;
-    max += limits.maxWorkingSets;
-    exerciseMin += limits.exercises.min;
-    exerciseMax += limits.exercises.max;
-    exerciseCount += exerciseIds[group]?.length ?? 0;
+    min += limits.sets.min;
+    max += limits.exercises.min * limits.sets.max;
+    exerciseMax += limits.exercises.min;
   }
 
   // Próg „nieznacznie": 15% szerokości pasma (co najmniej 2 serie robocze),
@@ -1163,5 +1204,6 @@ WorkoutVolumeBand describeWorkoutVolumeBand({
     exerciseCount: exerciseCount,
     exerciseMin: exerciseMin,
     exerciseMax: exerciseMax,
+    leadingGroup: leading,
   );
 }

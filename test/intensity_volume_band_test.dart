@@ -152,6 +152,38 @@ void main() {
               'względem zalecanego zakresu');
     });
 
+    test('dzień pchania NIE jest fałszywie „poniżej limitu" przez triceps '
+        'i barki', () {
+      // Regresja z wizualnej QA: dolna granica sumowała minima WSZYSTKICH
+      // partii dnia (klatka + triceps + barki), więc porządny dzień pchania
+      // na 15 serii roboczych wychodził jako „znacznie poniżej limitu (55%)".
+      // Minimum dotyczy partii, którą dzień TRENUJE, nie tej, która pracuje
+      // przy okazji.
+      final items = [
+        _item('bench_press', sets: 3),
+        _item('incline_bench_press', sets: 3),
+        _item('db_bench_press', sets: 3),
+        _item('triceps_extension', sets: 3),
+        _item('lateral_raise', sets: 3),
+      ];
+      final band = describeWorkoutVolumeBand(items: items, resolve: _resolve);
+      final chest = volumeLimitsFor(MuscleGroup.chest);
+      expect(band.status, isNot(VolumeBandStatus.farBelow),
+          reason: 'dzień pchania na 15 serii to normalny trening');
+      expect(band.leadingGroup, MuscleGroup.chest);
+      // Dolna granica = pełne minimum partii wiodącej + po jednej serii za
+      // każdą partię pomocniczą; NIE suma pełnych minimów wszystkich partii.
+      expect(band.recommendedMin, greaterThanOrEqualTo(chest.minWorkingSets));
+      expect(band.recommendedMin, lessThan(chest.minWorkingSets * 2),
+          reason: 'partie pomocnicze nie mogą wnosić pełnego kompletu ruchów');
+      expect(band.recommendedMax, greaterThan(band.recommendedMin));
+      expect(band.recommendedMax, lessThan(100),
+          reason: 'zakres ma być czytelny, a nie „9–135 serii"');
+      // Liczba ćwiczeń w komunikacie też dotyczy partii wiodącej.
+      expect(band.exerciseCount, 3);
+      expect(band.exerciseMin, volumeLimitsFor(MuscleGroup.chest).exercises.min);
+    });
+
     test('pusty zestaw nie udaje danych', () {
       final band =
           describeWorkoutVolumeBand(items: const [], resolve: _resolve);

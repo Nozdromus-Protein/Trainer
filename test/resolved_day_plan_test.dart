@@ -1,6 +1,7 @@
 import 'package:flutter_test/flutter_test.dart';
 import 'package:licznik_treningu/features/trainer/application/training_schedule.dart';
 import 'package:licznik_treningu/features/trainer/application/weekly_training_planner.dart';
+import 'package:licznik_treningu/features/trainer/application/workout_programs_catalog.dart';
 import 'package:licznik_treningu/features/trainer/domain/trainer_models.dart';
 import 'package:licznik_treningu/main.dart';
 import 'package:shared_preferences/shared_preferences.dart';
@@ -194,6 +195,83 @@ void main() {
       final schedule = store.trainingScheduleFor(from: far, days: 7);
       expect(schedule, hasLength(7));
       expect(schedule.first.date.year, far.year);
+    });
+  });
+
+  group('Rzutowanie dni programu na daty', () {
+    test('kolejne dni programu dostają kolejne daty z rozkładu', () async {
+      final store = await _store();
+      final weekday = DateTime.now().weekday;
+      await store.setWeekdayPlan(
+          weekday,
+          const TrainingDayPlan(
+              primary: TrainingFocusArea.legs,
+              secondary: TrainingFocusArea.forearms));
+      await store.addWorkoutPlan(buildWorkoutProgram(
+        'program_legs',
+        resolveExercise: (id) => ExerciseRepo.byId(id, store.customExercises),
+      ).copyWith(isActive: true));
+
+      final plan = store.plans.firstWhere((p) => p.id.startsWith('program_legs'));
+      final dates = store.programDayDates(plan);
+      expect(dates, isNotEmpty,
+          reason: 'aktywny program musi mieć rzutowanie na daty');
+
+      // Indeksy idą od bieżącego dnia programu w górę, daty rosną.
+      final indexes = dates.keys.toList()..sort();
+      expect(indexes.first, plan.currentDayIndex);
+      for (var i = 1; i < indexes.length; i++) {
+        expect(indexes[i], indexes[i - 1] + 1);
+        expect(dates[indexes[i]]!.isAfter(dates[indexes[i - 1]]!), isTrue);
+      }
+      // Żadna data nie jest z przeszłości.
+      final now = DateTime.now();
+      final today = DateTime(now.year, now.month, now.day);
+      for (final date in dates.values) {
+        expect(date.isBefore(today), isFalse);
+      }
+    });
+
+    test('rzutowanie jest cache-owane (ten sam obiekt między odczytami)',
+        () async {
+      final store = await _store();
+      await store.addWorkoutPlan(buildWorkoutProgram(
+        'program_legs',
+        resolveExercise: (id) => ExerciseRepo.byId(id, store.customExercises),
+      ).copyWith(isActive: true));
+      final plan = store.plans.firstWhere((p) => p.id.startsWith('program_legs'));
+      expect(identical(store.programDayDates(plan), store.programDayDates(plan)),
+          isTrue);
+    });
+
+    test('plan nieaktywny nie zajmuje dni rozkładu', () async {
+      final store = await _store();
+      await store.addWorkoutPlan(buildWorkoutProgram(
+        'program_legs',
+        resolveExercise: (id) => ExerciseRepo.byId(id, store.customExercises),
+      ).copyWith(isActive: true));
+      await store.addWorkoutPlan(buildWorkoutProgram(
+        'program_core',
+        resolveExercise: (id) => ExerciseRepo.byId(id, store.customExercises),
+      ));
+      final legs = store.plans.firstWhere((p) => p.id.startsWith('program_legs'));
+      final core = store.plans.firstWhere((p) => p.id.startsWith('program_core'));
+      final legsDates = store.programDayDates(legs);
+      final coreDates = store.programDayDates(core);
+      // Dwa różne programy nie mogą dostać tej samej daty na ten sam dzień.
+      for (final entry in legsDates.entries) {
+        if (coreDates.containsKey(entry.key)) {
+          expect(coreDates[entry.key], isNot(entry.value));
+        }
+      }
+    });
+
+    test('pusty plan zwraca puste rzutowanie', () async {
+      final store = await _store();
+      const empty = WorkoutPlan(
+          id: 'empty', name: 'Pusty', note: '', goal: '', days: []);
+      expect(store.programDayDates(empty), isEmpty);
+      expect(store.programDayDate(empty, 0), isNull);
     });
   });
 }
