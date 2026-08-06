@@ -104,6 +104,37 @@ Na klatkę polecam dziś:
       expect(findExerciseMentions('', library_: library), isEmpty);
     });
 
+    test('rdzeń słowa łapie polską odmianę', () {
+      // Bez tego „pompki" w prozie nie trafiały w „Pompka" z bazy.
+      expect(stemPolish('pompki'), stemPolish('pompka'));
+      expect(stemPolish('przysiady'), stemPolish('przysiad'));
+      expect(stemPolish('hantlami'), stemPolish('hantli'));
+      // Krótkie słowa zostają nietknięte, żeby się nie zlewały.
+      expect(stemPolish('bieg'), 'bieg');
+      expect(stemPolish('nogi'), 'nogi');
+    });
+
+    test('proza z odmienionymi nazwami daje karty', () {
+      const reply =
+          'Zrób pompki, potem dorzuć przysiady i zakończ deską.';
+      final mentions = findExerciseMentions(reply, library_: library);
+      expect(mentions.map((m) => m.exercise?.id),
+          containsAll(['pushup', 'squat', 'plank']));
+    });
+
+    test('dłuższa nazwa nadal wygrywa mimo dopasowania po rdzeniach', () {
+      const reply = 'W planie masz przysiady bułgarskie na koniec.';
+      // Pojedyncza wzmianka w prozie przechodzi tylko wtedy, gdy pytanie
+      // dotyczyło ćwiczeń — inaczej próg pewności ją odrzuca.
+      final mentions = findExerciseMentions(reply,
+          library_: library, assumeExerciseContext: true);
+      expect(mentions, hasLength(1));
+      expect(mentions.single.exercise?.id, 'bulgarian');
+
+      // Bez tego kontekstu jedna wzmianka nadal nie tworzy karty.
+      expect(findExerciseMentions(reply, library_: library), isEmpty);
+    });
+
     test('buduje pełne karty z werdyktem regeneracji', () {
       const reply = '- Pompki\n- Deska';
       final cards = extractExerciseSuggestionsFromText(
@@ -144,6 +175,26 @@ Na klatkę polecam dziś:
             planNames: names, fallbackName: 'Push'),
         'Push',
       );
+    });
+
+    test('rozpoznaje szersze sformułowania pytań o ćwiczenia', () {
+      for (final question in [
+        'Jakie ćwiczenia na klatkę?',
+        'Co mogę robić na barki?',
+        'Daj mi ćwiczenie na brzuch',
+        'Zaproponuj coś na plecy',
+        'Co trenować dzisiaj?',
+        'Co mogę zrobić bez drążka?',
+      ]) {
+        expect(questionAsksForExercises(question), isTrue, reason: question);
+      }
+      for (final question in [
+        'Czy robię progres?',
+        'Ile mam dziś kroków?',
+        'Czy zwiększyć ciężar?',
+      ]) {
+        expect(questionAsksForExercises(question), isFalse, reason: question);
+      }
     });
 
     test('zwykłe pytania nie uruchamiają analizy', () {

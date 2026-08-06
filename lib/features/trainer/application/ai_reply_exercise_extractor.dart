@@ -27,6 +27,32 @@ import 'exercise_search.dart';
 /// Maksymalna liczba kart wyciągniętych z jednej odpowiedzi.
 const int kMaxExtractedExerciseCards = 8;
 
+
+/// Końcówki fleksyjne ucinane przy dopasowaniu (tekst jest już bez diakrytyków).
+/// Od najdłuższej — „hantlami" ma stracić „ami", nie samo „i".
+const List<String> _kInflectionEndings = [
+  'ami', 'ach', 'owi', 'ow', 'ie', 'ia', 'om', 'em', 'y', 'i', 'e', 'a', 'u', 'o',
+];
+
+/// Bardzo prosty rdzeń słowa. Bez tego „pompki" w odpowiedzi AI nie trafiały
+/// w „Pompka" z bazy, a „przysiady" w „Przysiad" — czyli w prozie nie
+/// powstawała żadna karta.
+///
+/// Celowo zachowawczy: rdzeń nigdy nie schodzi poniżej 4 znaków, więc krótkie
+/// słowa zostają nietknięte i nie zlewają się ze sobą.
+String stemPolish(String token) {
+  if (token.length <= 4) return token;
+  for (final ending in _kInflectionEndings) {
+    if (!token.endsWith(ending)) continue;
+    final stem = token.substring(0, token.length - ending.length);
+    if (stem.length >= 4) return stem;
+  }
+  return token;
+}
+
+List<String> _stems(List<String> tokens) =>
+    [for (final token in tokens) stemPolish(token)];
+
 /// Znalezione w tekście ćwiczenie.
 class ExtractedExerciseMention {
   const ExtractedExerciseMention({
@@ -77,7 +103,12 @@ List<ExtractedExerciseMention> findExerciseMentions(
       exercise: exercise,
     ));
   }
-  entries.sort((a, b) => b.needle.length.compareTo(a.needle.length));
+  // Najwięcej słów najpierw: „Przysiad bułgarski" ma wygrać z „Przysiad".
+  entries.sort((a, b) {
+    final byTokens = b.tokens.length.compareTo(a.tokens.length);
+    if (byTokens != 0) return byTokens;
+    return b.needle.length.compareTo(a.needle.length);
+  });
 
   final lines = trimmed.split(RegExp(r'[\r\n]+'));
   final found = <String, ExtractedExerciseMention>{};
@@ -115,17 +146,20 @@ List<ExtractedExerciseMention> findExerciseMentions(
       if (line.isEmpty || consumedLines.contains(line)) continue;
       final normalizedLine = _normalize(line);
       if (normalizedLine.isEmpty) continue;
-      // Maska zajętych fragmentów — bez niej „Przysiad bułgarski" dawałby
-      // dodatkowo kartę „Przysiad" z tego samego kawałka tekstu.
-      final consumed = List<bool>.filled(normalizedLine.length, false);
+      // Dopasowanie po RDZENIACH słów — proza odmienia nazwy („zrób pompki",
+      // „dorzuć przysiady"), więc szukanie dokładnej frazy z bazy nic nie dawało.
+      final lineStems = _stems(normalizedLine.split(' ')).toSet();
+      // Rdzenie zużyte przez dłuższą nazwę: bez tego „Przysiad bułgarski"
+      // dokładałby jeszcze kartę „Przysiad" z tego samego fragmentu.
+      final usedStems = <String>{};
 
       for (final entry in entries) {
         if (found.length >= limit) break;
-        final at = _indexOfWholePhrase(normalizedLine, entry.needle, consumed);
-        if (at < 0) continue;
-        for (var i = at; i < at + entry.needle.length; i++) {
-          consumed[i] = true;
-        }
+        if (entry.tokens.isEmpty) continue;
+        final entryStems = _stems(entry.tokens);
+        if (!entryStems.every(lineStems.contains)) continue;
+        if (entryStems.any(usedStems.contains)) continue;
+        usedStems.addAll(entryStems);
         if (found.containsKey(entry.exercise.id)) continue;
         found[entry.exercise.id] = ExtractedExerciseMention(
           name: entry.exercise.name,
@@ -177,10 +211,11 @@ Exercise? matchExerciseByName(
   //    „wyciskanie" pasowałoby do połowy bazy.
   Exercise? best;
   var bestScore = 0;
+  final probeStems = _stems(tokens);
   for (final entry in entries) {
-    final other = entry.tokens;
-    final shorter = tokens.length <= other.length ? tokens : other;
-    final longer = tokens.length <= other.length ? other : tokens;
+    final other = _stems(entry.tokens);
+    final shorter = probeStems.length <= other.length ? probeStems : other;
+    final longer = probeStems.length <= other.length ? other : probeStems;
     if (shorter.length < 2) continue;
     if (!shorter.every(longer.contains)) continue;
     // Im więcej wspólnych słów i im mniejsza różnica długości, tym lepiej.
@@ -269,19 +304,31 @@ bool questionAsksForExercises(String question) {
   const asks = [
     'jakie cwiczenia',
     'jakie cwiczenie',
+    'jakies cwicz',
     'cwiczenia na',
     'cwiczenie na',
+    'cwiczen na',
     'co moge zrobic',
+    'co moge robic',
     'co mozna zrobic',
-    'zaproponuj cwicz',
+    'co robic na',
+    'zaproponuj',
+    'zaproponujesz',
     'pokaz cwicz',
     'daj cwicz',
+    'daj mi cwicz',
+    'polec',
+    'propozycj',
+    'trening na',
     'co trenowac',
     'co dzis trenowac',
     'czym zastapic',
     'zamiennik',
     'alternatywa dla',
     'co zamiast',
+    'bez drazka',
+    'bez sprzetu',
+    'w domu',
   ];
   return asks.any(q.contains);
 }
@@ -433,25 +480,3 @@ bool _looksLikeExerciseName(String name) {
   return true;
 }
 
-/// Indeks [needle] w [haystack] jako pełnych słów, pomijając fragmenty już
-/// zajęte przez dłuższą nazwę. −1 = brak dopasowania.
-int _indexOfWholePhrase(String haystack, String needle, List<bool> consumed) {
-  var from = 0;
-  while (from <= haystack.length - needle.length) {
-    final at = haystack.indexOf(needle, from);
-    if (at < 0) return -1;
-    final endsAt = at + needle.length;
-    final startOk = at == 0 || haystack[at - 1] == ' ';
-    final endOk = endsAt == haystack.length || haystack[endsAt] == ' ';
-    var free = true;
-    for (var i = at; i < endsAt; i++) {
-      if (consumed[i]) {
-        free = false;
-        break;
-      }
-    }
-    if (startOk && endOk && free) return at;
-    from = at + 1;
-  }
-  return -1;
-}

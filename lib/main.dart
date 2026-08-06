@@ -1535,7 +1535,11 @@ class AppStore extends ChangeNotifier {
       try {
         settings = AppSettings.fromJson(
             Map<String, dynamic>.from(jsonDecode(rawSettings)));
-      } catch (_) {}
+      } catch (error) {
+        // Uszkodzony zapis NIE znika po cichu — bez tego wpisu
+        // użytkownik traciłby dane bez śladu w logach.
+        debugPrint('[Trainer] Nie udało się wczytać: ustawienia aplikacji. $error');
+      }
     }
 
     // Deload: zakotwicz cykl RAZ na „dziś", żeby harmonogram nie przesuwał się
@@ -1594,7 +1598,11 @@ class AppStore extends ChangeNotifier {
         bodyGoalProfile = UserBodyGoalProfile.fromJson(
           Map<String, dynamic>.from(jsonDecode(rawGoalProfile)),
         );
-      } catch (_) {}
+      } catch (error) {
+        // Uszkodzony zapis NIE znika po cichu — bez tego wpisu
+        // użytkownik traciłby dane bez śladu w logach.
+        debugPrint('[Trainer] Nie udało się wczytać: profil celu sylwetkowego. $error');
+      }
     }
     if (bodyGoalProfile == null &&
         settings.targetSilhouette.trim().isNotEmpty) {
@@ -1619,7 +1627,11 @@ class AppStore extends ChangeNotifier {
                 .whereType<Map>()
                 .map((e) => GoalPhase.fromJson(Map<String, dynamic>.from(e))));
         }
-      } catch (_) {}
+      } catch (error) {
+        // Uszkodzony zapis NIE znika po cichu — bez tego wpisu
+        // użytkownik traciłby dane bez śladu w logach.
+        debugPrint('[Trainer] Nie udało się wczytać: etapy celu. $error');
+      }
     }
     // Pierwszy etap historii — otwarty od momentu migracji/konfiguracji.
     if (bodyGoalProfile != null && goalPhases.isEmpty) {
@@ -1646,7 +1658,11 @@ class AppStore extends ChangeNotifier {
             ..addAll(decoded.map(
                 (key, value) => MapEntry(key.toString(), value.toString())));
         }
-      } catch (_) {}
+      } catch (error) {
+        // Uszkodzony zapis NIE znika po cichu — bez tego wpisu
+        // użytkownik traciłby dane bez śladu w logach.
+        debugPrint('[Trainer] Nie udało się wczytać: szkice zdjęć postępu. $error');
+      }
     }
 
     final rawWarmupCompletions = prefs.getString(_warmupCompletionsKey);
@@ -1660,7 +1676,11 @@ class AppStore extends ChangeNotifier {
             if (at != null) warmupCompletions[key.toString()] = at;
           });
         }
-      } catch (_) {}
+      } catch (error) {
+        // Uszkodzony zapis NIE znika po cichu — bez tego wpisu
+        // użytkownik traciłby dane bez śladu w logach.
+        debugPrint('[Trainer] Nie udało się wczytać: ukończone rozgrzewki. $error');
+      }
     }
 
     final rawVolumeLimits = prefs.getString(_volumeLimitsKey);
@@ -1671,7 +1691,11 @@ class AppStore extends ChangeNotifier {
           volumeLimits =
               VolumeLimitsConfig.fromJson(Map<String, dynamic>.from(decoded));
         }
-      } catch (_) {}
+      } catch (error) {
+        // Uszkodzony zapis NIE znika po cichu — bez tego wpisu
+        // użytkownik traciłby dane bez śladu w logach.
+        debugPrint('[Trainer] Nie udało się wczytać: limity objętości. $error');
+      }
     }
 
     final rawIconSeen = prefs.getString(_activityIconSeenKey);
@@ -1687,7 +1711,11 @@ class AppStore extends ChangeNotifier {
             }
           });
         }
-      } catch (_) {}
+      } catch (error) {
+        // Uszkodzony zapis NIE znika po cichu — bez tego wpisu
+        // użytkownik traciłby dane bez śladu w logach.
+        debugPrint('[Trainer] Nie udało się wczytać: odhaczone nowości ikon. $error');
+      }
     }
 
     final rawAnalyses = prefs.getString(_workoutAiAnalysesKey);
@@ -1704,7 +1732,11 @@ class AppStore extends ChangeNotifier {
                       Map<String, dynamic>.from(v as Map)))),
             );
         }
-      } catch (_) {}
+      } catch (error) {
+        // Uszkodzony zapis NIE znika po cichu — bez tego wpisu
+        // użytkownik traciłby dane bez śladu w logach.
+        debugPrint('[Trainer] Nie udało się wczytać: analizy AI treningów. $error');
+      }
     }
 
     final rawBackupAt = prefs.getString(_backupAtKey);
@@ -1722,7 +1754,11 @@ class AppStore extends ChangeNotifier {
             ..addAll(decoded.whereType<Map>().map(
                 (e) => AiChatMessage.fromJson(Map<String, dynamic>.from(e))));
         }
-      } catch (_) {}
+      } catch (error) {
+        // Uszkodzony zapis NIE znika po cichu — bez tego wpisu
+        // użytkownik traciłby dane bez śladu w logach.
+        debugPrint('[Trainer] Nie udało się wczytać: historia czatu AI. $error');
+      }
     }
 
     step(0.74, 'Odświeżam most do Licznika Kalorii…');
