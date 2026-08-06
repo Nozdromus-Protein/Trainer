@@ -1,4 +1,7 @@
+import 'plan_authoring.dart';
 import 'program_variant.dart';
+
+export 'plan_authoring.dart';
 
 /// Maksymalna ręczna korekta intensywności w krokach (±6) — jedno źródło
 /// prawdy dla planu, dnia i logiki w `deload_cycle.dart`.
@@ -44,6 +47,8 @@ class WorkoutPlan {
     this.variantHistory = const <ProgramVariantChange>[],
     this.media,
     this.intensitySteps = 0,
+    this.origin = const PlanOrigin(),
+    this.versions = const <PlanVersionSnapshot>[],
   });
 
   final String id;
@@ -81,6 +86,15 @@ class WorkoutPlan {
   /// Nakładka NAD automatyczną rampą cyklu; 0 = zestawy jak zaprojektowane.
   final int intensitySteps;
 
+  /// Metadane pochodzenia zestawu (ręczny / z pomocą AI / wygenerowany przez
+  /// AI / program systemowy) + ulubione, archiwum, ostatnie użycie, ślad
+  /// rozmowy z AI. Starsze zapisy dostają [PlanCreationMode.legacy].
+  final PlanOrigin origin;
+
+  /// Historia wersji zestawu (migawki sprzed większych zmian AI).
+  /// Pusta lista = zestaw nigdy nie był wersjonowany.
+  final List<PlanVersionSnapshot> versions;
+
   WorkoutPlan copyWith({
     String? id,
     String? name,
@@ -97,6 +111,8 @@ class WorkoutPlan {
     ProgramMedia? media,
     bool clearMedia = false,
     int? intensitySteps,
+    PlanOrigin? origin,
+    List<PlanVersionSnapshot>? versions,
   }) {
     return WorkoutPlan(
       id: id ?? this.id,
@@ -113,6 +129,8 @@ class WorkoutPlan {
       variantHistory: variantHistory ?? this.variantHistory,
       media: clearMedia ? null : (media ?? this.media),
       intensitySteps: intensitySteps ?? this.intensitySteps,
+      origin: origin ?? this.origin,
+      versions: versions ?? this.versions,
     );
   }
 
@@ -184,6 +202,9 @@ class WorkoutPlan {
           ],
         if (media != null) 'media': media!.toJson(),
         if (intensitySteps != 0) 'intensitySteps': intensitySteps,
+        'origin': origin.toJson(),
+        if (versions.isNotEmpty)
+          'versions': [for (final snapshot in versions) snapshot.toJson()],
       };
 
   factory WorkoutPlan.fromJson(Map<String, dynamic> json) => WorkoutPlan(
@@ -219,7 +240,29 @@ class WorkoutPlan {
             : null,
         intensitySteps: ((json['intensitySteps'] as num?)?.toInt() ?? 0)
             .clamp(-kMaxIntensitySteps, kMaxIntensitySteps),
+        // Brak pola `origin` = zapis sprzed tego etapu. Oznaczamy go jako
+        // `legacy`, a nie zgadujemy trybu — dopiero migracja w warstwie
+        // aplikacji (znająca katalog programów) rozstrzyga, czym ten zestaw
+        // jest. Dzięki temu żaden istniejący zestaw nie dostaje losowego typu.
+        origin: json['origin'] is Map
+            ? PlanOrigin.fromJson(
+                Map<String, dynamic>.from(json['origin'] as Map),
+              )
+            : PlanOrigin.legacy(),
+        versions: _versionList(json['versions']),
       );
+}
+
+List<PlanVersionSnapshot> _versionList(Object? value) {
+  if (value is! List) return const <PlanVersionSnapshot>[];
+  final result = <PlanVersionSnapshot>[];
+  for (final raw in value) {
+    if (raw is! Map) continue;
+    final snapshot =
+        PlanVersionSnapshot.fromJson(Map<String, dynamic>.from(raw));
+    if (snapshot != null) result.add(snapshot);
+  }
+  return result;
 }
 
 String? _nullableText(Object? value) {

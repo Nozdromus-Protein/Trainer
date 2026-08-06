@@ -9,6 +9,9 @@ part of 'main.dart';
 
 const List<String> _kQuickQuestions = [
   'Co trenować dzisiaj?',
+  'Jakie ćwiczenia mogę zrobić na klatkę?',
+  'Jakie ćwiczenia będą dobre dzisiaj?',
+  'Jakie ćwiczenia mogę wykonać hantlami?',
   'Które mięśnie są najbardziej przeciążone?',
   'Czy mój tydzień treningowy jest dobrze ułożony?',
   'Czy robię progres?',
@@ -350,6 +353,13 @@ class _ChatBubble extends StatelessWidget {
                           color: textColor, fontSize: 14, height: 1.45)),
                   AiAttachmentBadges(
                       attachments: message.attachments, textColor: textColor),
+                  // Karty ćwiczeń z odpowiedzi strukturalnej. Zwykła wiadomość
+                  // tekstowa (structured == null) wygląda dokładnie jak dotąd.
+                  if (message.structured != null)
+                    AiExerciseSuggestionsBlock(
+                      reply: message.structured!,
+                      messageId: message.messageId,
+                    ),
                 ],
               ),
             ),

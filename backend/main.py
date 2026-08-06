@@ -1401,10 +1401,37 @@ Zwróć WYŁĄCZNIE poprawny JSON, bez markdown i bez komentarzy.
 
 Format:
 {{
-  "reply": "odpowiedź trenera po polsku, zwięzła i konkretna"
+  "reply": "odpowiedź trenera po polsku, zwięzła i konkretna",
+  "exerciseSuggestions": [
+    {{
+      "name": "nazwa ćwiczenia po polsku",
+      "exerciseId": "id z listy exercise_catalog, jeśli to ćwiczenie tam jest (inaczej pomiń pole)",
+      "description": "jedno zdanie o ruchu",
+      "primaryMuscles": ["partia główna"],
+      "secondaryMuscles": ["partie pomocnicze"],
+      "equipment": "potrzebny sprzęt",
+      "difficulty": "Początkujący | Średniozaawansowany | Zaawansowany",
+      "reasonRecommended": "dlaczego akurat to ćwiczenie dla tego użytkownika",
+      "recoveryCompatibility": "good | moderate | poor | unknown",
+      "confidence": 0.0
+    }}
+  ],
+  "warnings": ["krótkie ostrzeżenia, np. o niskiej regeneracji partii"],
+  "reasoningSummary": "jedno zdanie: na czym oparłeś dobór",
+  "confidence": 0.0
 }}
 
 Zasady:
+- Pole "reply" jest ZAWSZE wymagane. Pozostałe pola są opcjonalne — pomiń je,
+  gdy nie pasują do pytania.
+- ZAWSZE, gdy wymieniasz konkretne ćwiczenia (pytania typu „jakie ćwiczenia na
+  klatkę", „co mogę zrobić hantlami", „co trenować dzisiaj"), wypełnij pole
+  "exerciseSuggestions" — aplikacja pokazuje z niego klikalne karty, z których
+  użytkownik dodaje ćwiczenie do bazy albo do zestawu.
+- Ćwiczenia dobieraj NAJPIERW z listy "exercise_catalog" (jeśli została podana)
+  i podawaj wtedy dokładne "exerciseId". Ćwiczenie spoza katalogu dodaj tylko
+  wtedy, gdy naprawdę nic z katalogu nie pasuje — wówczas opisz je pełnymi polami.
+- Nazwy w "reply" i w "exerciseSuggestions" muszą być takie same.
 - Bądź konkretny: jeśli pytanie dotyczy ciężaru, powtórzeń, odpoczynku albo techniki, daj jasną wskazówkę.
 - Odpowiadaj na podstawie danych z sekcji "Dane z aplikacji Trainer": regeneracja
   mięśni (muscle_recovery), treningi z 7 dni (last_7_days), aktywność
@@ -1418,6 +1445,69 @@ Zasady:
 - Jeżeli danych brakuje w kontekście, powiedz wprost, jakich danych brakuje
   (np. brak zgód Health Connect, brak treningów), zamiast zgadywać.
 """
+
+
+def sanitize_exercise_suggestions(raw, limit: int = 8):
+    """Czyści listę sugestii ćwiczeń z modelu.
+
+    Odrzuca wpisy bez nazwy i przycina listę — dzięki temu do aplikacji nigdy
+    nie trafia karta, której nie da się wyświetlić. Zwraca pustą listę, gdy
+    model nie podał niczego sensownego.
+    """
+    if not isinstance(raw, list):
+        return []
+    cleaned = []
+    seen = set()
+    for item in raw:
+        if not isinstance(item, dict):
+            # Sama nazwa też jest użyteczną kartą.
+            name = str(item or "").strip()
+            if not name:
+                continue
+            item = {"name": name}
+        name = str(item.get("name") or item.get("exercise") or "").strip()
+        if not name:
+            continue
+        key = name.lower()
+        if key in seen:
+            continue
+        seen.add(key)
+
+        def text(field):
+            return str(item.get(field) or "").strip()
+
+        def string_list(field):
+            value = item.get(field)
+            if isinstance(value, list):
+                return [str(v).strip() for v in value if str(v).strip()][:4]
+            single = str(value or "").strip()
+            return [single] if single else []
+
+        entry = {"name": name}
+        for field in (
+            "exerciseId",
+            "description",
+            "equipment",
+            "difficulty",
+            "entryType",
+            "loadType",
+            "reasonRecommended",
+            "recoveryCompatibility",
+        ):
+            value = text(field)
+            if value:
+                entry[field] = value
+        for field in ("primaryMuscles", "secondaryMuscles"):
+            value = string_list(field)
+            if value:
+                entry[field] = value
+        confidence = item.get("confidence")
+        if isinstance(confidence, (int, float)):
+            entry["confidence"] = confidence
+        cleaned.append(entry)
+        if len(cleaned) >= limit:
+            break
+    return cleaned
 
 
 @app.post("/chat")
@@ -1441,12 +1531,36 @@ async def trainer_chat(req: TrainerChatRequest):
             or raw.get("answer")
             or "Nie udało się przygotować odpowiedzi."
         )
-        return {
+        # Dane strukturalne (karty ćwiczeń w czacie). Przepuszczamy je TYLKO
+        # gdy mają sensowny kształt — aplikacja i tak ma własny parser
+        # z fallbackiem do samego tekstu, więc nic się nie psuje, gdy model
+        # zignoruje format.
+        payload = {
             "reply": reply,
             "aiProvider": raw.get("aiProvider"),
             "aiModel": raw.get("aiModel"),
             "fallbackFrom": raw.get("fallbackFrom", ""),
         }
+        suggestions = sanitize_exercise_suggestions(raw.get("exerciseSuggestions"))
+        if suggestions:
+            payload["exerciseSuggestions"] = suggestions
+        set_suggestion = raw.get("setSuggestion")
+        if isinstance(set_suggestion, dict) and set_suggestion.get("days"):
+            payload["setSuggestion"] = set_suggestion
+        warnings = [
+            str(item).strip()
+            for item in (raw.get("warnings") or [])
+            if str(item).strip()
+        ]
+        if warnings:
+            payload["warnings"] = warnings[:5]
+        summary = str(raw.get("reasoningSummary") or "").strip()
+        if summary:
+            payload["reasoningSummary"] = summary
+        confidence = raw.get("confidence")
+        if isinstance(confidence, (int, float)):
+            payload["confidence"] = confidence
+        return payload
     except Exception as error:
         error_text = str(error)
         print("BLAD TRAINER CHAT:", error_text)

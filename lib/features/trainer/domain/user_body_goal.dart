@@ -16,6 +16,7 @@ library;
 import 'dart:math';
 
 import 'body_composition.dart';
+import 'trainer_enums.dart';
 
 // ============================================================================
 // 1. Docelowa sylwetka
@@ -447,6 +448,34 @@ class UserBodyGoalProfile {
     if (min == null && max == null) return null;
     if (min != null && max != null) return (min + max) / 2;
     return min ?? max;
+  }
+
+  /// Priorytety sylwetkowe przetłumaczone na partie mięśniowe.
+  ///
+  /// Używane przy budowie i analizie zestawów („czy zestaw w ogóle rusza to,
+  /// co dla mnie ważne?"). Priorytety bez jednoznacznej partii (symetria,
+  /// proporcje, cel niestandardowy) są celowo pomijane — nie zgadujemy.
+  List<MuscleGroup> get priorityMuscleGroups {
+    final result = <MuscleGroup>[];
+    for (final priority in physiquePriorities) {
+      final group = switch (priority) {
+        PhysiquePriority.biggerShoulders => MuscleGroup.shoulders,
+        PhysiquePriority.widerBack => MuscleGroup.back,
+        PhysiquePriority.biggerChest => MuscleGroup.chest,
+        PhysiquePriority.biggerArms => MuscleGroup.biceps,
+        PhysiquePriority.strongerForearms => MuscleGroup.forearms,
+        PhysiquePriority.biggerLegs => MuscleGroup.quadriceps,
+        PhysiquePriority.strongerGlutes => MuscleGroup.glutes,
+        PhysiquePriority.visibleAbs => MuscleGroup.core,
+        PhysiquePriority.narrowerWaist => MuscleGroup.core,
+        PhysiquePriority.upperLowerBalance => null,
+        PhysiquePriority.symmetry => null,
+        PhysiquePriority.sideProfile => null,
+        PhysiquePriority.custom => null,
+      };
+      if (group != null && !result.contains(group)) result.add(group);
+    }
+    return result;
   }
 
   /// Efektywna strategia do obliczeń — „automatyczna" liczy się jak

@@ -18,7 +18,13 @@ import 'package:video_player/video_player.dart';
 
 import 'features/trainer/application/daily_adjustment_calculator.dart';
 import 'features/trainer/application/equipment_program_filter.dart';
+import 'features/trainer/application/ai_reply_exercise_extractor.dart';
+import 'features/trainer/application/exercise_duplicate_detector.dart';
 import 'features/trainer/application/exercise_library_filter.dart';
+import 'features/trainer/application/plan_ai_advisor.dart';
+import 'features/trainer/application/plan_blueprint.dart';
+import 'features/trainer/application/plan_quality_analyzer.dart';
+import 'features/trainer/application/plan_substitution.dart';
 import 'features/trainer/application/session_pace.dart';
 import 'features/trainer/application/training_coach.dart';
 import 'features/trainer/application/training_schedule.dart';
@@ -33,6 +39,7 @@ import 'features/trainer/data/trainer_calorie_adapter.dart';
 import 'features/trainer/data/trainer_health_connect_service.dart';
 import 'features/trainer/data/trainer_local_repository.dart';
 import 'features/trainer/data/trainer_route_service.dart';
+import 'features/trainer/domain/ai_structured_reply.dart';
 import 'features/trainer/domain/deload_cycle.dart';
 import 'features/trainer/domain/exercise_intensity.dart';
 import 'features/trainer/domain/program_exercises.dart';
@@ -44,6 +51,11 @@ part 'ai_trainer_page.dart';
 // Kolejne kroki rozbijania monolitu main.dart — te same reguły co wyżej:
 // `part of`, więc zakres biblioteki i widoczność prywatnych pól bez zmian.
 part 'features/trainer/presentation/ui_density.dart';
+part 'features/trainer/presentation/plan_creator.dart';
+part 'features/trainer/presentation/my_plans_page.dart';
+part 'features/trainer/presentation/ai_exercise_cards.dart';
+part 'features/trainer/presentation/plan_ai_analysis_page.dart';
+part 'features/trainer/presentation/plan_substitution_sheet.dart';
 part 'features/trainer/presentation/profile_setup_wizard.dart';
 part 'features/trainer/presentation/user_profile.dart';
 
@@ -1428,6 +1440,19 @@ class AppStore extends ChangeNotifier {
   /// Bump wersji wymusza jednorazową przebudowę zapisanych programów.
   static const _plansHeavyDaysMigrationKey = 'plans_heavy_days_migration_v1';
 
+  /// Podmiany zaplanowanych zestawów na własne: klucz obszaru rozkładu
+  /// ([TrainingFocusArea.name]) → identyfikator zestawu użytkownika.
+  static const _planSubstitutionsKey = 'plan_area_substitutions_v1';
+
+  /// Migracja metadanych pochodzenia zestawów ([PlanOrigin]).
+  /// Starsze zapisy nie mają pola `origin` — nadajemy im tryb na podstawie
+  /// REALNEGO źródła (katalog programów vs zestaw własny), nie losowo.
+  static const _plansOriginMigrationKey = 'plans_origin_migration_v1';
+
+  /// Własne zestawy podstawione pod obszary rozkładu (brzuch za brzuch).
+  /// Klucz: [TrainingFocusArea.name], wartość: id zestawu użytkownika.
+  final Map<String, String> planAreaSubstitutions = {};
+
   /// Ukończone programy rozgrzewkowe: id rozgrzewki → moment ukończenia.
   /// Bramka ciężkiego dnia honoruje wpis tylko przez [kWarmupFreshness].
   final Map<String, DateTime> warmupCompletions = {};
@@ -1722,7 +1747,14 @@ class AppStore extends ChangeNotifier {
           if (plans[index].isActive) index,
       ];
       if (activeIndexes.length != 1) {
-        final activeIndex = activeIndexes.isEmpty ? 0 : activeIndexes.first;
+        // Naprawa niezmiennika „dokładnie jeden aktywny zestaw". Zestaw
+        // ZARCHIWIZOWANY nie może przez nią wrócić do gry — wybieramy
+        // pierwszy nieschowany, a archiwum bierzemy dopiero w ostateczności.
+        var activeIndex = activeIndexes.isEmpty ? -1 : activeIndexes.first;
+        if (activeIndex < 0) {
+          activeIndex = plans.indexWhere((plan) => !plan.origin.isArchived);
+        }
+        if (activeIndex < 0) activeIndex = 0;
         for (var index = 0; index < plans.length; index++) {
           plans[index] = plans[index].copyWith(isActive: index == activeIndex);
         }
@@ -1762,6 +1794,34 @@ class AppStore extends ChangeNotifier {
       await prefs.setBool(_plansHeavyDaysMigrationKey, true);
     }
 
+    // Metadane pochodzenia zestawów. Migracja NIE dotyka treści planu —
+    // dokłada wyłącznie brakujący `origin`. Zestawy z katalogu dostają
+    // `systemProgram`, reszta `manual` (bo tak realnie powstały: ręcznie albo
+    // przez stary generator lokalny). Postęp, warianty i historia bez zmian.
+    if (migrateLegacyPlanOrigins()) {
+      await savePlans();
+    }
+    await prefs.setBool(_plansOriginMigrationKey, true);
+
+    // Podmiany zestawów pod obszary rozkładu. Wpisy wskazujące na usunięty
+    // zestaw sprzątamy od razu — inaczej dzień treningowy trafiałby w pustkę.
+    final rawSubstitutions = prefs.getString(_planSubstitutionsKey);
+    if (rawSubstitutions != null && rawSubstitutions.isNotEmpty) {
+      try {
+        final decoded = jsonDecode(rawSubstitutions);
+        if (decoded is Map) {
+          decoded.forEach((key, value) {
+            final planId = value?.toString() ?? '';
+            if (planId.isEmpty) return;
+            if (!plans.any((plan) => plan.id == planId)) return;
+            planAreaSubstitutions[key.toString()] = planId;
+          });
+        }
+      } catch (error) {
+        debugPrint('[Zestawy] Nieczytelne podmiany zestawów: $error');
+      }
+    }
+
     // Rozgrzewka pamięci: dotykamy ciężkich, leniwie inicjalizowanych zbiorów,
     // żeby ich budowa NIE wypadła na pierwsze wejście w zakładkę (to właśnie
     // ścinało klatki przy otwieraniu „Ćwiczeń" i „Treningu"). Statyczne pola
@@ -1773,6 +1833,381 @@ class AppStore extends ChangeNotifier {
     step(0.96, 'Przygotowuję programy treningowe…');
     warmedProgramCount = kWorkoutProgramCatalog.length;
     step(1, 'Gotowe');
+  }
+
+  // ===== Tworzenie własnych zestawów (ręcznie / z AI / w pełni przez AI) =====
+
+  /// Blueprint wstępnie wypełniony danymi z profilu użytkownika. Kreator
+  /// startuje z sensownych wartości, ale użytkownik może zmienić każdą.
+  PlanBlueprint defaultPlanBlueprint(PlanCreationMode mode) {
+    final purpose = _purposeFromProfile();
+    return PlanBlueprint(
+      purpose: purpose,
+      daysPerWeek: settings.trainingWeekdays.isEmpty
+          ? 3
+          : settings.trainingWeekdays.length.clamp(1, 7),
+      weekdays: List<int>.from(settings.trainingWeekdays)..sort(),
+      flexibleSchedule: settings.trainingWeekdays.isEmpty,
+      minutesPerSession: settings.preferredWorkoutMinutes > 0
+          ? settings.preferredWorkoutMinutes
+          : 45,
+      equipment: settings.equipmentProfile,
+      limitations: settings.limitationProfile,
+      intensity: WorkoutIntensityLevel.fromSteps(activeEffectiveIntensitySteps),
+      level: normalizeTrainingLevel(settings.level),
+      // Priorytetów NIE wstawiamy z profilu sylwetki. „Większe ramiona" jako
+      // cel wyglądu to co innego niż „ten zestaw ma trenować tylko biceps" —
+      // wybór partii dla konkretnego zestawu należy do użytkownika.
+      // Podpowiedź z profilu pokazuje kreator (patrz [goalPriorityHint]).
+      creationMode: mode,
+    );
+  }
+
+  /// Partie zasugerowane przez profil celu — kreator pokazuje je jako
+  /// podpowiedź „jednym kliknięciem", nie zaznacza ich za użytkownika.
+  List<MuscleGroup> get goalPriorityHint =>
+      bodyGoalProfile?.priorityMuscleGroups ?? const <MuscleGroup>[];
+
+  PlanPurpose _purposeFromProfile() {
+    final strategy =
+        '${settings.trainingMode} ${settings.goal}'.toLowerCase();
+    if (strategy.contains('sił') || strategy.contains('sil')) {
+      return PlanPurpose.strength;
+    }
+    if (strategy.contains('masa') || strategy.contains('hipert')) {
+      return PlanPurpose.muscle;
+    }
+    if (strategy.contains('redu') || strategy.contains('spal')) {
+      return PlanPurpose.fatLoss;
+    }
+    if (strategy.contains('kond') || strategy.contains('wydol')) {
+      return PlanPurpose.conditioning;
+    }
+    return PlanPurpose.recomposition;
+  }
+
+  /// Buduje (bez zapisu!) zestaw z blueprintu — podgląd przed zatwierdzeniem.
+  BuiltPlan previewPlanFromBlueprint(PlanBlueprint blueprint) {
+    return buildPlanFromBlueprint(
+      blueprint,
+      library_: ExerciseRepo.combined(customExercises),
+      planId: 'plan_${idNow()}',
+      createdByUserId: trainerAccountService.user?.uid ?? '',
+      volumeLimits: volumeLimits,
+    );
+  }
+
+  /// Zapisuje zestaw utworzony w kreatorze. Nie rusza żadnego istniejącego
+  /// zestawu — dokłada nowy i (gdy to pierwszy) czyni go aktywnym.
+  Future<WorkoutPlan> createPlanFromBlueprint(
+    PlanBlueprint blueprint, {
+    WorkoutPlan? prebuilt,
+    bool activate = false,
+  }) async {
+    // AI dobiera ćwiczenia tylko wtedy, gdy tryb na to pozwala: w pełni AI
+    // zawsze, „ręcznie z pomocą AI" wyłącznie po zaznaczeniu odpowiedniego
+    // zakresu. Tryb ręczny nigdy.
+    final aiFillsExercises = blueprint.creationMode ==
+            PlanCreationMode.fullyAiGenerated ||
+        (blueprint.creationMode == PlanCreationMode.manualWithAi &&
+            blueprint.aiScopes
+                .contains(AiAssistanceScope.fillMissingExercises));
+    final plan = prebuilt ??
+        (aiFillsExercises
+            ? previewPlanFromBlueprint(blueprint).plan
+            : buildEmptyManualPlan(
+                blueprint,
+                planId: 'plan_${idNow()}',
+                createdByUserId: trainerAccountService.user?.uid ?? '',
+              ));
+    final withActivation = plan.copyWith(isActive: activate);
+    await addWorkoutPlan(withActivation);
+    return withActivation;
+  }
+
+  /// Tworzy spersonalizowany wariant zestawu bazowego. ORYGINAŁ zostaje
+  /// nietknięty — to osobny zestaw z własnym identyfikatorem i pustym postępem.
+  Future<WorkoutPlan> createPersonalizedVariant(
+    WorkoutPlan base, {
+    required String name,
+    required List<WorkoutDay> days,
+    Set<AiAssistanceScope> scopes = const <AiAssistanceScope>{},
+    String reason = '',
+    PlanAnalysisMode mode = PlanAnalysisMode.permanent,
+  }) async {
+    final now = DateTime.now();
+    final variant = base.copyWith(
+      id: 'plan_${idNow()}',
+      name: name,
+      days: days,
+      isActive: false,
+      // Nowy wariant startuje bez postępu — nie „dziedziczy" ukończonych dni
+      // po zestawie bazowym, bo to byłby fałszywy postęp.
+      completedDays: const <int>{},
+      versions: const <PlanVersionSnapshot>[],
+      origin: PlanOrigin(
+        creationMode: PlanCreationMode.manualWithAi,
+        aiAssistanceScopes: scopes,
+        sourceType: PlanSourceType.aiAnalysis,
+        createdAt: now,
+        updatedAt: now,
+        createdByUserId: trainerAccountService.user?.uid ?? '',
+        basePlanId: base.id,
+        basePlanName: base.name,
+        analyzedAt: now,
+        analysisProfileSummary: reason,
+        aiEngine: 'Trener AI',
+        version: 1,
+      ),
+    );
+    await addWorkoutPlan(variant);
+    return variant;
+  }
+
+  /// Zastępuje treść istniejącego zestawu wynikiem analizy — z zachowaniem
+  /// postępu i po zapisaniu poprzedniej wersji (da się cofnąć).
+  Future<void> applyAnalysisToPlan(
+    String planId,
+    List<WorkoutDay> days, {
+    required String versionLabel,
+    String reason = '',
+    Set<AiAssistanceScope> scopes = const <AiAssistanceScope>{},
+  }) async {
+    final index = plans.indexWhere((plan) => plan.id == planId);
+    if (index < 0) return;
+    await savePlanVersion(planId, label: versionLabel, reason: reason);
+    final current = plans[plans.indexWhere((plan) => plan.id == planId)];
+    plans[plans.indexWhere((plan) => plan.id == planId)] = current.copyWith(
+      days: days,
+      origin: current.origin.copyWith(
+        // Zestaw dotknięty przez AI przestaje być „czysto ręczny", ale program
+        // systemowy zostaje programem — zmienia się tylko ślad analizy.
+        creationMode: current.origin.isSystemProgram
+            ? current.origin.creationMode
+            : PlanCreationMode.manualWithAi,
+        aiAssistanceScopes: {
+          ...current.origin.aiAssistanceScopes,
+          ...scopes,
+        },
+        analyzedAt: DateTime.now(),
+        analysisProfileSummary: reason,
+        aiEngine: 'Trener AI',
+        updatedAt: DateTime.now(),
+      ),
+    );
+    await savePlans();
+    notifyListeners();
+  }
+
+  /// Pełna analiza zestawu na realnych danych aplikacji.
+  PlanAnalysisResult analyzePlan(
+    WorkoutPlan plan, {
+    PlanAnalysisMode mode = PlanAnalysisMode.permanent,
+    Set<AiAssistanceScope> scopes = const <AiAssistanceScope>{},
+    Set<String> lockedExerciseIds = const <String>{},
+    DateTime? now,
+  }) {
+    final reference = now ?? DateTime.now();
+    final hasHistory = logs.any((log) => log.planId == plan.id) ||
+        plan.completedDays.isNotEmpty;
+    return analyzePlanForUser(
+      plan,
+      resolve: (id) => ExerciseRepo.byId(id, customExercises),
+      library_: ExerciseRepo.combined(customExercises),
+      mode: mode,
+      scopes: scopes,
+      lockedExerciseIds: lockedExerciseIds,
+      equipment: settings.equipmentProfile,
+      limitations: settings.limitationProfile,
+      level: normalizeTrainingLevel(settings.level),
+      goal: settings.trainingMode.trim().isNotEmpty
+          ? settings.trainingMode
+          : settings.goal,
+      intensity: WorkoutIntensityLevel.fromSteps(plan.intensitySteps),
+      volumeLimits: volumeLimits,
+      // Tryb „na dzisiaj" patrzy na regenerację; stałe dopasowanie ocenia
+      // konstrukcję zestawu, żeby chwilowe zmęczenie nie przebudowywało planu.
+      recovery: mode == PlanAnalysisMode.today
+          ? muscleRecoveryMap(reference)
+          : const <BodyMuscle, MuscleRecoveryState>{},
+      availableMinutes: settings.preferredWorkoutMinutes,
+      priorityMuscles: bodyGoalProfile?.priorityMuscleGroups ??
+          const <MuscleGroup>[],
+      hasHistory: hasHistory,
+      // Rozpoczęty program: propozycje dotyczą WYŁĄCZNIE dni jeszcze
+      // niewykonanych — ukończone dni i ich wyniki są nietykalne.
+      fromDayIndex:
+          plan.completedDays.isEmpty ? 0 : plan.currentDayIndex,
+    );
+  }
+
+  /// Ocena jakości zestawu (bez propozycji) — używana w podglądzie kreatora.
+  PlanQualityReport planQuality(WorkoutPlan plan) => analyzePlanQuality(
+        plan,
+        resolve: (id) => ExerciseRepo.byId(id, customExercises),
+        equipment: settings.equipmentProfile,
+        limitations: settings.limitationProfile,
+        level: normalizeTrainingLevel(settings.level),
+        goal: settings.trainingMode.trim().isNotEmpty
+            ? settings.trainingMode
+            : settings.goal,
+        intensity: WorkoutIntensityLevel.fromSteps(plan.intensitySteps),
+        volumeLimits: volumeLimits,
+        availableMinutes: settings.preferredWorkoutMinutes,
+        priorityMuscles:
+            bodyGoalProfile?.priorityMuscleGroups ?? const <MuscleGroup>[],
+        hasHistory: logs.any((log) => log.planId == plan.id),
+      );
+
+  /// Uzupełnia metadane pochodzenia w zestawach zapisanych przed tym etapem.
+  ///
+  /// Zasada bezpieczeństwa: zmieniamy WYŁĄCZNIE zestawy z
+  /// [PlanCreationMode.legacy] (czyli takie, które w ogóle nie miały pola
+  /// `origin`). Zestaw, który już ma świadomie nadany tryb, nigdy nie jest
+  /// przestawiany. Treść dni, postęp i historia pozostają nietknięte.
+  bool migrateLegacyPlanOrigins() {
+    var changed = false;
+    for (var index = 0; index < plans.length; index++) {
+      final plan = plans[index];
+      if (plan.origin.creationMode != PlanCreationMode.legacy) continue;
+      final isCatalog = catalogProgramIdForPlan(plan.id) != null ||
+          isCatalogProgramPlan(plan);
+      plans[index] = plan.copyWith(
+        origin: plan.origin.copyWith(
+          creationMode: isCatalog
+              ? PlanCreationMode.systemProgram
+              : PlanCreationMode.manual,
+          sourceType:
+              isCatalog ? PlanSourceType.catalog : PlanSourceType.manual,
+          // Brak realnej daty utworzenia — nie wymyślamy jej, zostaje null.
+          version: 1,
+        ),
+      );
+      changed = true;
+    }
+    return changed;
+  }
+
+  // ===== Metadane zestawu: ulubione, archiwum, ostatnie użycie, wersje =====
+
+  Future<void> setPlanFavorite(String planId, bool value) async {
+    final index = plans.indexWhere((plan) => plan.id == planId);
+    if (index < 0) return;
+    plans[index] = plans[index].copyWith(
+      origin: plans[index].origin.copyWith(
+            isFavorite: value,
+            updatedAt: DateTime.now(),
+          ),
+    );
+    await savePlans();
+    notifyListeners();
+  }
+
+  Future<void> setPlanArchived(String planId, bool value) async {
+    final index = plans.indexWhere((plan) => plan.id == planId);
+    if (index < 0) return;
+    // Zarchiwizowany zestaw nie może zostać aktywny — inaczej znika z listy,
+    // ale dalej rządzi dniem treningowym.
+    final updated = plans[index].copyWith(
+      isActive: value ? false : plans[index].isActive,
+      origin: plans[index].origin.copyWith(
+            isArchived: value,
+            updatedAt: DateTime.now(),
+          ),
+    );
+    plans[index] = updated;
+    if (value && !plans.any((plan) => plan.isActive)) {
+      final replacement =
+          plans.indexWhere((plan) => !plan.origin.isArchived);
+      if (replacement >= 0) {
+        plans[replacement] = plans[replacement].copyWith(isActive: true);
+      }
+    }
+    await savePlans();
+    notifyListeners();
+  }
+
+  /// Odnotowuje, że zestaw był używany (kategoria „Ostatnio używane").
+  Future<void> markPlanUsed(String planId, {DateTime? at}) async {
+    final index = plans.indexWhere((plan) => plan.id == planId);
+    if (index < 0) return;
+    plans[index] = plans[index].copyWith(
+      origin: plans[index].origin.copyWith(lastUsedAt: at ?? DateTime.now()),
+    );
+    await savePlans();
+    notifyListeners();
+  }
+
+  /// Zapisuje migawkę zestawu przed większą zmianą i podbija numer wersji.
+  ///
+  /// Migawka trzyma pełny JSON planu, więc [restorePlanVersion] odtwarza układ
+  /// dni co do ćwiczenia. Ukończone dni NIE są przywracane z migawki — postęp
+  /// zawsze pozostaje bieżący (spec: ochrona danych).
+  Future<WorkoutPlan?> savePlanVersion(
+    String planId, {
+    required String label,
+    String reason = '',
+    int keep = 10,
+  }) async {
+    final index = plans.indexWhere((plan) => plan.id == planId);
+    if (index < 0) return null;
+    final plan = plans[index];
+    final snapshot = PlanVersionSnapshot(
+      version: plan.origin.version,
+      label: label,
+      createdAt: DateTime.now(),
+      planJson: plan.toJson(),
+      reason: reason,
+    );
+    final history = [...plan.versions, snapshot];
+    final updated = plan.copyWith(
+      versions:
+          history.length > keep ? history.sublist(history.length - keep) : history,
+      origin: plan.origin.copyWith(
+        version: plan.origin.version + 1,
+        updatedAt: DateTime.now(),
+      ),
+    );
+    plans[index] = updated;
+    await savePlans();
+    notifyListeners();
+    return updated;
+  }
+
+  /// Przywraca zapisaną wersję zestawu (treść dni), zachowując postęp,
+  /// aktywność, okładkę i całą historię wersji.
+  Future<bool> restorePlanVersion(String planId, int version) async {
+    final index = plans.indexWhere((plan) => plan.id == planId);
+    if (index < 0) return false;
+    final plan = plans[index];
+    final matches = plan.versions.where((entry) => entry.version == version);
+    if (matches.isEmpty) return false;
+    WorkoutPlan restored;
+    try {
+      restored = WorkoutPlan.fromJson(matches.first.planJson);
+    } catch (error) {
+      debugPrint('[Zestawy] Nie udało się odczytać wersji $version: $error');
+      return false;
+    }
+    // Najpierw zapisujemy stan bieżący jako wersję — cofnięcie też da się cofnąć.
+    await savePlanVersion(
+      planId,
+      label: 'Przed przywróceniem wersji $version',
+      reason: 'Automatyczna migawka przed cofnięciem zmian.',
+    );
+    final current = plans[plans.indexWhere((plan) => plan.id == planId)];
+    plans[plans.indexWhere((plan) => plan.id == planId)] = current.copyWith(
+      days: restored.days,
+      name: restored.name,
+      note: restored.note,
+      goal: restored.goal,
+      level: restored.level,
+      // Postęp, aktywność, media i historia wersji NIE pochodzą z migawki.
+      origin: current.origin.copyWith(updatedAt: DateTime.now()),
+    );
+    await savePlans();
+    notifyListeners();
+    return true;
   }
 
   /// Czy plan zawiera dni inne niż ciężkie (techniczne / mobilność / odpoczynek).
@@ -2208,13 +2643,136 @@ class AppStore extends ChangeNotifier {
   /// dokładnie ta podmiana, która rozjeżdżała rozkład („zestaw, który ostatnio
   /// przeglądałem" zamiast tego z rotacji).
   WorkoutPlan? scheduledPlanForArea(TrainingFocusArea? area) {
+    // Podmiana użytkownika ma pierwszeństwo przed programem katalogowym —
+    // to świadoma decyzja „mój zestaw brzucha zamiast bazowego".
+    final substituted = substitutedPlanForArea(area);
+    if (substituted != null) return substituted;
     final matching = planForArea(area);
     if (matching != null) return matching;
     final active = activeWorkoutPlan;
     if (active == null || catalogProgramIdForPlan(active.id) != null) {
       return null;
     }
+    // Aktywny plan WŁASNY zostaje planem dnia tylko wtedy, gdy w ogóle zawiera
+    // pracę na zaplanowaną partię. Plan rozpisujący cały tydzień (Full Body,
+    // PPL) przechodzi zawsze; zestaw WĄSKI — np. sam brzuch — nie może wskoczyć
+    // na dzień nóg tylko dlatego, że jest jedynym własnym zestawem.
+    // Bez pokrycia zwracamy null i dzień składa Planer z pasujących ćwiczeń.
+    if (!planCoversArea(active, area)) return null;
     return active;
+  }
+
+  /// Czy [plan] trenuje którąkolwiek partię DEFINIUJĄCĄ obszar [area]
+  /// (w roli partii głównej ćwiczenia).
+  bool planCoversArea(WorkoutPlan plan, TrainingFocusArea? area) {
+    if (area == null) return true;
+    final signature = area.signatureMuscles.toSet();
+    if (signature.isEmpty) return true;
+    final load = planPrimaryMuscleLoad(
+      plan,
+      resolve: (id) => ExerciseRepo.byId(id, customExercises),
+    );
+    // Pusty zestaw nie „pokrywa" niczego, ale też nie ma czym zaszkodzić —
+    // zostawiamy go dotychczasowej ścieżce (dzień i tak wyjdzie pusty).
+    if (load.isEmpty) return true;
+    return load.keys.any(signature.contains);
+  }
+
+  // ── Podmiana zaplanowanego zestawu na własny ──────────────────────────────
+
+  /// Zestaw użytkownika podstawiony pod dany obszar rozkładu, o ile nadal
+  /// istnieje i nie jest w archiwum. `null` = brak podmiany.
+  WorkoutPlan? substitutedPlanForArea(TrainingFocusArea? area) {
+    if (area == null) return null;
+    final planId = planAreaSubstitutions[area.name];
+    if (planId == null || planId.isEmpty) return null;
+    for (final plan in plans) {
+      if (plan.id != planId) continue;
+      // Zarchiwizowany albo pusty zestaw nie może rządzić dniem treningowym.
+      if (plan.origin.isArchived) return null;
+      if (plan.days.every((day) => day.items.isEmpty)) return null;
+      return plan;
+    }
+    return null;
+  }
+
+  /// Ocena, czy [plan] może zastąpić zaplanowany dzień obszaru [area].
+  ///
+  /// Liczona na realnych danych: partie główne ćwiczeń, sprzęt, ograniczenia
+  /// i dzisiejsza regeneracja. Nic nie zapisuje.
+  PlanSubstitutionVerdict evaluateSubstitution(
+    WorkoutPlan plan,
+    TrainingFocusArea area, {
+    DateTime? now,
+  }) {
+    final others = <BodyMuscle>{};
+    for (final other in TrainingFocusArea.values) {
+      if (other == area) continue;
+      others.addAll(other.signatureMuscles);
+    }
+    return evaluatePlanSubstitution(
+      plan: plan,
+      areaSignature: area.signatureMuscles.toSet(),
+      resolve: (id) => ExerciseRepo.byId(id, customExercises),
+      // Partie definiujące dzisiejszy obszar nie mogą jednocześnie liczyć się
+      // jako „obce" (np. barki bywają w sygnaturze kilku obszarów).
+      otherAreaSignatures:
+          others.difference(area.signatureMuscles.toSet()),
+      equipment: settings.equipmentProfile,
+      limitations: settings.limitationProfile,
+      recovery: muscleRecoveryMap(now ?? DateTime.now()),
+    );
+  }
+
+  /// Zestawy użytkownika, które NADAJĄ SIĘ do podmiany pod dany obszar,
+  /// posortowane od najlepiej pasujących.
+  List<({WorkoutPlan plan, PlanSubstitutionVerdict verdict})>
+      substitutionCandidatesForArea(TrainingFocusArea area, {DateTime? now}) {
+    final result = <({WorkoutPlan plan, PlanSubstitutionVerdict verdict})>[];
+    for (final plan in plans) {
+      // Programy katalogowe i archiwum nie są kandydatami — chodzi o WŁASNE
+      // zestawy użytkownika.
+      if (plan.origin.isSystemProgram || plan.origin.isArchived) continue;
+      if (catalogProgramIdForPlan(plan.id) != null) continue;
+      if (plan.days.every((day) => day.items.isEmpty)) continue;
+      final verdict = evaluateSubstitution(plan, area, now: now);
+      if (!verdict.canSubstitute) continue;
+      result.add((plan: plan, verdict: verdict));
+    }
+    result.sort((a, b) {
+      final fit = a.verdict.fit.index.compareTo(b.verdict.fit.index);
+      if (fit != 0) return fit;
+      return b.verdict.focusRatio.compareTo(a.verdict.focusRatio);
+    });
+    return result;
+  }
+
+  /// Podstawia własny zestaw pod obszar rozkładu. Nie rusza ani zestawu
+  /// bazowego, ani historii — zmienia tylko to, co dziś proponuje plan.
+  Future<void> setPlanForArea(TrainingFocusArea area, String planId) async {
+    planAreaSubstitutions[area.name] = planId;
+    await _savePlanSubstitutions();
+    invalidatePlannerCaches();
+    await markPlanUsed(planId);
+    notifyListeners();
+  }
+
+  /// Przywraca zestaw bazowy dla obszaru.
+  Future<void> clearPlanForArea(TrainingFocusArea area) async {
+    planAreaSubstitutions.remove(area.name);
+    await _savePlanSubstitutions();
+    invalidatePlannerCaches();
+    notifyListeners();
+  }
+
+  Future<void> _savePlanSubstitutions() async {
+    final prefs = await SharedPreferences.getInstance();
+    if (planAreaSubstitutions.isEmpty) {
+      await prefs.remove(_planSubstitutionsKey);
+      return;
+    }
+    await prefs.setString(
+        _planSubstitutionsKey, jsonEncode(planAreaSubstitutions));
   }
 
   /// Plan, z którego bierze się DZISIEJSZY trening (wg rozkładu).
@@ -2719,6 +3277,12 @@ class AppStore extends ChangeNotifier {
     plans.removeWhere((plan) => plan.id == planId);
     if (removedWasActive && plans.isNotEmpty) {
       plans[0] = plans[0].copyWith(isActive: true);
+    }
+    // Usunięty zestaw nie może zostać podstawiony pod dzień rozkładu.
+    if (planAreaSubstitutions.values.contains(planId)) {
+      planAreaSubstitutions.removeWhere((_, value) => value == planId);
+      await _savePlanSubstitutions();
+      invalidatePlannerCaches();
     }
     await savePlans();
     notifyListeners();
@@ -5188,6 +5752,9 @@ class AppStore extends ChangeNotifier {
       }).toList(),
     );
     await saveActiveWorkoutSession();
+    // Znacznik „ostatnio używane" dla listy zestawów. Nie dotyka treści planu
+    // ani postępu — to wyłącznie metadana sortowania.
+    await markPlanUsed(plan.id, at: startedAt);
     notifyListeners();
     return true;
   }
@@ -7605,7 +8172,34 @@ class AppStore extends ChangeNotifier {
             'korekta kcal/wody dla Licznika Kalorii, planer tygodnia). '
             'Jeżeli użytkownik dołączył załączniki (pole "attachments": zdjęcia '
             'i pliki tekstowe), odnieś się do nich wprost. '
-            'Jeżeli danych brakuje, powiedz wprost, jakich danych brakuje, zamiast zgadywać.',
+            'Jeżeli danych brakuje, powiedz wprost, jakich danych brakuje, zamiast zgadywać. '
+            'Jeżeli wymieniasz konkretne ćwiczenia, dodaj do odpowiedzi pole '
+            '"exerciseSuggestions": lista obiektów z polami name, exerciseId '
+            '(jeśli znasz je z kontekstu), description, primaryMuscles, '
+            'secondaryMuscles, equipment, difficulty, reasonRecommended, '
+            'recoveryCompatibility (good/moderate/poor/unknown), confidence.',
+        // Deklarujemy oczekiwany kształt odpowiedzi. Backend, który go nie zna,
+        // po prostu zignoruje pole i odpowie tekstem — parser to obsłuży.
+        'response_format': {
+          'message': 'string',
+          'exerciseSuggestions': 'array',
+          'setSuggestion': 'object',
+          'warnings': 'array',
+          'reasoningSummary': 'string',
+          'confidence': 'number',
+        },
+        // Lista ćwiczeń, które AI może wskazać po identyfikatorze zamiast
+        // wymyślać nowe. Ograniczona do rozsądnej wielkości ładunku.
+        'exercise_catalog': [
+          for (final exercise
+              in ExerciseRepo.combined(customExercises).take(240))
+            {
+              'id': exercise.id,
+              'name': exercise.name,
+              'muscles': exercise.muscles.take(3).toList(),
+              'equipment': exercise.equipment,
+            },
+        ],
         if (attachments.isNotEmpty)
           'attachments': attachments.map((item) => item.toApiJson()).toList(),
         'active_plan': activePlan == null
@@ -7639,11 +8233,38 @@ class AppStore extends ChangeNotifier {
       // Backend przełącza się na GPT, gdy Gemini wyczerpie limit. Cicha zmiana
       // silnika (i stylu odpowiedzi) byłaby myląca, więc mówimy o niej wprost.
       final fallbackFrom = result['fallbackFrom']?.toString() ?? '';
+      // Dane strukturalne (karty ćwiczeń). Parser jest tolerancyjny: gdy
+      // backend zwróci sam tekst, dostajemy wiadomość bez kart i czat działa
+      // dokładnie jak wcześniej.
+      final structured =
+          TrainerAiStructuredReply.parse(result, fallbackMessage: reply);
       final content = fallbackFrom == 'gemini'
-          ? '$reply\n\n(Odpowiedział GPT — Gemini nie miał już wolnego limitu.)'
-          : reply;
+          ? '${structured.message}\n\n(Odpowiedział GPT — Gemini nie miał już '
+              'wolnego limitu.)'
+          : structured.message;
+      // Backend może zwrócić SAM tekst (starsza wersja albo model zignorował
+      // format). Wtedy karty wyciągamy z treści odpowiedzi — po nazwach
+      // ćwiczeń, które realnie istnieją w bazie aplikacji.
+      var enriched = enrichAiSuggestions(
+        structured.exerciseSuggestions.isEmpty
+            ? structured.copyWith(
+                exerciseSuggestions: exerciseCardsFromReplyText(
+                  structured.message,
+                  question: question,
+                ),
+              )
+            : structured,
+      );
+      // „Przeanalizuj mój zestaw Push" → w odpowiedzi pojawia się przycisk
+      // otwierający pełną analizę. Sam czat nadal nic nie zmienia.
+      enriched = withPlanAnalysisHint(enriched, question);
       aiChatHistory.add(AiChatMessage(
-          role: 'assistant', content: content, timestamp: DateTime.now()));
+        role: 'assistant',
+        content: content,
+        timestamp: DateTime.now(),
+        messageId: 'msg_${idNow()}',
+        structured: enriched.hasStructuredData ? enriched : null,
+      ));
     } catch (e) {
       // Backend niedostępny → spróbuj odpowiedzieć lokalnie na podstawie
       // realnych danych aplikacji (regeneracja, planer, kcal, kroki).
@@ -7655,18 +8276,30 @@ class AppStore extends ChangeNotifier {
         adjustmentToday: dailyAdjustmentForDay(now),
         healthToday: healthConnectSnapshotForDay(now),
       );
-      if (local != null) {
+      // Pytania o listę ćwiczeń obsługujemy lokalnie KARTAMI — offline dostaje
+      // te same interaktywne propozycje co online, tylko z własnej bazy.
+      // Prośba o analizę zestawu też działa bez sieci (analiza jest lokalna).
+      var localCards = localExerciseSuggestions(question, now: now);
+      final offlineHint = withPlanAnalysisHint(
+        localCards ?? TrainerAiStructuredReply(message: local ?? ''),
+        question,
+      );
+      if (offlineHint.planAnalysisPlanId.isNotEmpty) localCards = offlineHint;
+      if (local != null || localCards != null) {
         // Powód podajemy wprost — inaczej brak sieci wygląda identycznie jak
         // backend bez wdrożonego endpointu.
         final attachmentNote = attachments.isEmpty
             ? ''
             : '\nZałączniki (${attachments.length}) nie zostały przeczytane — '
                 'odpowiedź lokalna ich nie widzi.';
+        final body = local ?? localCards!.message;
         aiChatHistory.add(AiChatMessage(
           role: 'assistant',
-          content: '$local\n\n(Odpowiedź lokalna na podstawie danych aplikacji '
+          content: '$body\n\n(Odpowiedź lokalna na podstawie danych aplikacji '
               '— ${friendlyAiErrorMessage(e)})$attachmentNote',
           timestamp: DateTime.now(),
+          messageId: 'msg_${idNow()}',
+          structured: localCards,
         ));
       } else {
         aiChatHistory.add(AiChatMessage(
@@ -7681,6 +8314,344 @@ class AppStore extends ChangeNotifier {
     }
   }
 
+  /// Zamienia sugestię AI na pełne ćwiczenie do PODGLĄDU przed zapisem.
+  /// Nic nie zapisuje — użytkownik może jeszcze wszystko poprawić.
+  Exercise exerciseDraftFromSuggestion(
+    AiExerciseSuggestion suggestion, {
+    String conversationMessageId = '',
+  }) {
+    final muscles = suggestion.allMuscles.isEmpty
+        ? <String>['całe ciało']
+        : suggestion.allMuscles;
+    return Exercise(
+      id: 'ai_${_slugifyExerciseName(suggestion.name)}_${idNow()}',
+      name: suggestion.name.trim(),
+      category: muscles.first,
+      muscles: muscles,
+      equipment: suggestion.equipment.trim().isEmpty
+          ? 'brak danych'
+          : suggestion.equipment.trim(),
+      level: suggestion.difficulty.trim().isEmpty
+          ? normalizeTrainingLevel(settings.level)
+          : normalizeTrainingLevel(suggestion.difficulty),
+      illustrationType: 'generic',
+      description: suggestion.description.trim(),
+      tips: const <String>[],
+      commonMistakes: const <String>[],
+      defaultSets: suggestion.suggestedSets > 0 ? suggestion.suggestedSets : 3,
+      defaultReps: suggestion.suggestedReps > 0 ? suggestion.suggestedReps : 10,
+      defaultDurationSec: suggestion.suggestedDurationSec,
+      met: 4.5,
+      imageUrl: suggestion.imageUrl.trim().isEmpty
+          ? null
+          : suggestion.imageUrl.trim(),
+      // Ślad pochodzenia: ćwiczenie powstało z rozmowy z Trenerem AI.
+      source: conversationMessageId.isEmpty
+          ? 'ai_chat'
+          : 'ai_chat:$conversationMessageId',
+    );
+  }
+
+  /// Szuka duplikatów ćwiczenia w bazie (nazwa, synonimy, wzorzec, sprzęt).
+  List<ExerciseDuplicateMatch> findDuplicatesForSuggestion(
+    AiExerciseSuggestion suggestion,
+  ) =>
+      findExerciseDuplicates(
+        name: suggestion.name,
+        library_: ExerciseRepo.combined(customExercises),
+        exerciseId: suggestion.exerciseId,
+        equipment: suggestion.equipment,
+        muscles: suggestion.allMuscles,
+      );
+
+  /// Dokłada ćwiczenie do dnia zestawu, dobierając parametry automatycznym
+  /// systemem prowadzenia (serie/powtórzenia/ciężar/przerwa z historii).
+  ///
+  /// Zwraca `false`, gdy ćwiczenie już w tym dniu jest — dwukrotne kliknięcie
+  /// „Dodaj" nie tworzy duplikatu.
+  Future<bool> addExerciseToPlanDay({
+    required String planId,
+    required int dayIndex,
+    required String exerciseId,
+  }) async {
+    final planIndex = plans.indexWhere((plan) => plan.id == planId);
+    if (planIndex < 0) return false;
+    final plan = plans[planIndex];
+    if (dayIndex < 0 || dayIndex >= plan.days.length) return false;
+    final day = plan.days[dayIndex];
+    if (day.items.any((item) => item.exerciseId == exerciseId)) return false;
+
+    final def = ExerciseRepo.byId(exerciseId, customExercises);
+    final item = recommendedPlanItemFor(def);
+    await updatePlanDayItems(planId, dayIndex, [...day.items, item]);
+    return true;
+  }
+
+  /// Parametry pozycji planu dobrane automatycznie: limity objętości + cel
+  /// + historia tego ćwiczenia (albo bezpieczna kalibracja, gdy historii brak).
+  PlanItem recommendedPlanItemFor(Exercise exercise) {
+    final group = primaryMuscleGroupOf(exercise);
+    final goal = settings.trainingMode.trim().isNotEmpty
+        ? settings.trainingMode
+        : settings.goal;
+    final limits = volumeLimitsFor(
+      group,
+      level: normalizeTrainingLevel(settings.level),
+      goal: goal,
+      config: volumeLimits,
+      intensity: WorkoutIntensityLevel.fromSteps(activeEffectiveIntensitySteps),
+    );
+    final baseSets =
+        ((limits.sets.min + limits.sets.max) / 2).round().clamp(1, 8);
+    final baseReps =
+        ((limits.reps.min + limits.reps.max) / 2).round().clamp(1, 40);
+
+    final recovery = muscleRecoveryMap();
+    final worst = worstRecoveryForExercise(exercise, recovery);
+    final recommendation = recommendSet(
+      exercise: exercise,
+      plannedSets: baseSets,
+      plannedReps: baseReps,
+      plannedWeightKg: 0,
+      plannedDurationSec: exercise.defaultDurationSec,
+      plannedRestSeconds: 0,
+      ctx: coachContext(),
+      history: coachHistoryForExercise(exercise.id),
+      recoveryPercent: worst?.$2 ?? 100,
+    );
+    return PlanItem(
+      exerciseId: exercise.id,
+      sets: recommendation.sets,
+      reps: recommendation.reps,
+      durationSec: recommendation.durationSec,
+      note: '',
+      suggestedWeightKg: recommendation.weightKg,
+      restSeconds: recommendation.restSeconds,
+    );
+  }
+
+  /// Dokleja do odpowiedzi wskazanie zestawu do analizy, gdy użytkownik o nią
+  /// poprosił w rozmowie. Zwraca odpowiedź bez zmian, gdy prośby nie było.
+  TrainerAiStructuredReply withPlanAnalysisHint(
+    TrainerAiStructuredReply reply,
+    String question,
+  ) {
+    final visible =
+        plans.where((plan) => !plan.origin.isArchived).toList();
+    if (visible.isEmpty) return reply;
+    final name = detectPlanAnalysisRequest(
+      question,
+      planNames: [for (final plan in visible) plan.name],
+      fallbackName: activeWorkoutPlan?.name ?? '',
+    );
+    if (name.isEmpty) return reply;
+    final matches = visible.where((plan) => plan.name == name);
+    if (matches.isEmpty) return reply;
+    return reply.copyWith(
+      planAnalysisPlanId: matches.first.id,
+      planAnalysisPlanName: matches.first.name,
+    );
+  }
+
+  /// Wyciąga karty ćwiczeń z TEKSTU odpowiedzi AI.
+  ///
+  /// Ścieżka awaryjna dla backendu, który nie zwraca jeszcze pola
+  /// `exerciseSuggestions`: rozpoznaje w treści nazwy ćwiczeń z bazy
+  /// aplikacji i buduje z nich karty. Nic nie zapisuje.
+  List<AiExerciseSuggestion> exerciseCardsFromReplyText(
+    String text, {
+    String question = '',
+    DateTime? now,
+  }) {
+    final recovery = muscleRecoveryMap(now ?? DateTime.now());
+    return extractExerciseSuggestionsFromText(
+      text,
+      library_: ExerciseRepo.combined(customExercises),
+      // Gdy pytanie wprost dotyczyło ćwiczeń, obniżamy próg ostrożności —
+      // wiadomo, po co przyszła ta odpowiedź.
+      assumeExerciseContext: questionAsksForExercises(question),
+      recoveryVerdict: (exercise) {
+        final verdict = exerciseRecoveryVerdict(exercise, recovery);
+        final percent = verdict.percent;
+        return (
+          label: verdict.label,
+          compatibility: percent == null
+              ? AiRecoveryCompatibility.unknown
+              : percent >= 75
+                  ? AiRecoveryCompatibility.good
+                  : percent >= 55
+                      ? AiRecoveryCompatibility.moderate
+                      : AiRecoveryCompatibility.poor,
+        );
+      },
+    );
+  }
+
+  /// Uzupełnia sugestie ćwiczeń z AI o REALNE dane aplikacji.
+  ///
+  /// AI podaje nazwę (czasem identyfikator) — dopiero tutaj dokładamy to, co
+  /// wiemy sami: czy ćwiczenie jest w bazie, jaki ma sprzęt/partie oraz jak
+  /// wygląda jego zgodność z dzisiejszą regeneracją. Nic nie jest zapisywane.
+  TrainerAiStructuredReply enrichAiSuggestions(
+    TrainerAiStructuredReply reply, {
+    DateTime? now,
+  }) {
+    if (reply.exerciseSuggestions.isEmpty) return reply;
+    final library = ExerciseRepo.combined(customExercises);
+    final recovery = muscleRecoveryMap(now ?? DateTime.now());
+    final enriched = <AiExerciseSuggestion>[];
+
+    for (final suggestion in reply.exerciseSuggestions) {
+      Exercise? match;
+      if (suggestion.exerciseId.trim().isNotEmpty) {
+        match = ExerciseRepo.byIdOrNull(
+            suggestion.exerciseId.trim(), customExercises);
+      }
+      if (match == null) {
+        // Bez identyfikatora szukamy po nazwie — mocne dopasowanie oznacza
+        // „to jest już w bazie", wariant tylko podpowiadamy w oknie dodawania.
+        final duplicates = findExerciseDuplicates(
+          name: suggestion.name,
+          library_: library,
+          equipment: suggestion.equipment,
+          muscles: suggestion.allMuscles,
+          limit: 1,
+        );
+        if (duplicates.isNotEmpty &&
+            duplicates.first.strength != DuplicateMatchStrength.variant) {
+          match = duplicates.first.exercise;
+        }
+      }
+
+      if (match == null) {
+        // Ćwiczenia spoza bazy zostawiamy tak, jak podała je AI — braki pól
+        // obsługuje karta (nie pokazuje pustych sekcji).
+        enriched.add(suggestion.copyWith(alreadyInDatabase: false));
+        continue;
+      }
+
+      final verdict = exerciseRecoveryVerdict(match, recovery);
+      enriched.add(suggestion.copyWith(
+        exerciseId: match.id,
+        name: match.name,
+        alreadyInDatabase: true,
+        description: suggestion.description.trim().isEmpty
+            ? match.description
+            : suggestion.description,
+        primaryMuscles: suggestion.primaryMuscles.isEmpty
+            ? match.muscles.take(1).toList()
+            : suggestion.primaryMuscles,
+        secondaryMuscles: suggestion.secondaryMuscles.isEmpty
+            ? match.supportingMuscles
+            : suggestion.secondaryMuscles,
+        equipment: suggestion.equipment.trim().isEmpty
+            ? match.equipment
+            : suggestion.equipment,
+        difficulty: suggestion.difficulty.trim().isEmpty
+            ? match.level
+            : suggestion.difficulty,
+        entryType: suggestion.entryType.trim().isEmpty
+            ? match.entryType.label
+            : suggestion.entryType,
+        recoveryCompatibility: verdict.percent == null
+            ? AiRecoveryCompatibility.unknown
+            : verdict.percent! >= 75
+                ? AiRecoveryCompatibility.good
+                : verdict.percent! >= 55
+                    ? AiRecoveryCompatibility.moderate
+                    : AiRecoveryCompatibility.poor,
+        recoveryNote: verdict.label,
+      ));
+    }
+    return reply.copyWith(exerciseSuggestions: enriched);
+  }
+
+  /// Buduje karty ćwiczeń dla odpowiedzi LOKALNEJ (offline).
+  ///
+  /// Gdy backend jest niedostępny, a pytanie dotyczy ćwiczeń, i tak potrafimy
+  /// zaproponować sensowną listę z własnej bazy — zgodną ze sprzętem,
+  /// ograniczeniami i dzisiejszą regeneracją.
+  TrainerAiStructuredReply? localExerciseSuggestions(
+    String question, {
+    DateTime? now,
+    int limit = 6,
+  }) {
+    final q = normalizeSearchText(question);
+    final asksForExercises = [
+      'jakie cwiczenia',
+      'jakie ćwiczenia',
+      'co moge zrobic',
+      'co mogę zrobić',
+      'cwiczenia na',
+      'ćwiczenia na',
+      'poka cwicz',
+      'zaproponuj cwicz',
+      'zaproponuj ćwicz',
+    ].any(q.contains);
+    if (!asksForExercises) return null;
+
+    final reference = now ?? DateTime.now();
+    final recovery = muscleRecoveryMap(reference);
+    final owned = settings.equipmentProfile.resolveOwned();
+    final limits = settings.limitationProfile;
+    // Partia z pytania („na klatkę", „na plecy") zawęża listę; brak partii =
+    // proponujemy przekrojowo.
+    final group = MuscleGroup.fromText(question);
+    final candidates = <Exercise>[
+      for (final exercise in ExerciseRepo.combined(customExercises))
+        if (isExerciseAvailable(exercise, owned) &&
+            !exerciseViolatesLimitation(exercise, limits) &&
+            (group == MuscleGroup.other ||
+                primaryMuscleGroupOf(exercise) == group))
+          exercise,
+    ];
+    if (candidates.isEmpty) return null;
+
+    candidates.sort((a, b) {
+      final left = exerciseRecoveryVerdict(a, recovery).percent ?? 100;
+      final right = exerciseRecoveryVerdict(b, recovery).percent ?? 100;
+      return right.compareTo(left);
+    });
+
+    final suggestions = <AiExerciseSuggestion>[];
+    for (final exercise in candidates.take(limit)) {
+      final verdict = exerciseRecoveryVerdict(exercise, recovery);
+      suggestions.add(AiExerciseSuggestion(
+        name: exercise.name,
+        exerciseId: exercise.id,
+        description: exercise.description,
+        primaryMuscles: exercise.muscles.take(1).toList(),
+        secondaryMuscles: exercise.supportingMuscles,
+        equipment: exercise.equipment,
+        difficulty: exercise.level,
+        entryType: exercise.entryType.label,
+        reasonRecommended: 'Pasuje do Twojego sprzętu '
+            '(${settings.equipmentProfile.ownedSummary}).',
+        recoveryCompatibility: verdict.percent == null
+            ? AiRecoveryCompatibility.unknown
+            : verdict.percent! >= 75
+                ? AiRecoveryCompatibility.good
+                : verdict.percent! >= 55
+                    ? AiRecoveryCompatibility.moderate
+                    : AiRecoveryCompatibility.poor,
+        recoveryNote: verdict.label,
+        alreadyInDatabase: true,
+        suggestedSets: exercise.defaultSets,
+        suggestedReps: exercise.defaultReps,
+        suggestedDurationSec: exercise.defaultDurationSec,
+      ));
+    }
+    if (suggestions.isEmpty) return null;
+    return TrainerAiStructuredReply(
+      message: group == MuscleGroup.other
+          ? 'Propozycje z Twojej bazy ćwiczeń:'
+          : 'Ćwiczenia na ${group.label.toLowerCase()} z Twojej bazy:',
+      exerciseSuggestions: suggestions,
+      reasoningSummary: 'Dobrane lokalnie z bazy aplikacji — sprzęt, '
+          'ograniczenia i dzisiejsza regeneracja.',
+    );
+  }
+
   Future<void> generateLocalPlan() async {
     plans
       ..clear()
@@ -7688,6 +8659,15 @@ class AppStore extends ChangeNotifier {
     await savePlans();
     notifyListeners();
   }
+}
+
+/// Bezpieczny fragment identyfikatora z nazwy ćwiczenia (bez diakrytyków).
+String _slugifyExerciseName(String name) {
+  final normalized = normalizeSearchText(name)
+      .replaceAll(RegExp(r'[^a-z0-9]+'), '_')
+      .replaceAll(RegExp(r'^_+|_+$'), '');
+  if (normalized.isEmpty) return 'cwiczenie';
+  return normalized.length > 28 ? normalized.substring(0, 28) : normalized;
 }
 
 bool sameDay(DateTime a, DateTime b) =>
@@ -8201,6 +9181,8 @@ class AiChatMessage {
     required this.content,
     required this.timestamp,
     this.attachments = const <AiChatAttachment>[],
+    this.structured,
+    this.messageId = '',
   });
 
   final String role; // 'user' | 'assistant' | 'error'
@@ -8211,13 +9193,27 @@ class AiChatMessage {
   /// ładunek (base64/treść pliku) idzie tylko do backendu.
   final List<AiChatAttachment> attachments;
 
+  /// Dane strukturalne odpowiedzi (karty ćwiczeń, propozycja zestawu,
+  /// ostrzeżenia). `null` = zwykła wiadomość tekstowa — dokładnie tak, jak
+  /// działał czat przed tym etapem.
+  final TrainerAiStructuredReply? structured;
+
+  /// Stabilny identyfikator wiadomości — zapisujemy go przy ćwiczeniach
+  /// i zestawach utworzonych z tej odpowiedzi (ślad pochodzenia).
+  final String messageId;
+
+  bool get hasExerciseCards =>
+      (structured?.exerciseSuggestions.isNotEmpty ?? false);
+
   Map<String, dynamic> toJson() => {
         'role': role,
         'content': content,
         'timestamp': timestamp.toIso8601String(),
+        if (messageId.isNotEmpty) 'messageId': messageId,
         if (attachments.isNotEmpty)
           'attachments':
               attachments.map((item) => item.toHistoryJson()).toList(),
+        if (structured != null) 'structured': structured!.toJson(),
       };
 
   factory AiChatMessage.fromJson(Map<String, dynamic> json) => AiChatMessage(
@@ -8225,12 +9221,18 @@ class AiChatMessage {
         content: json['content']?.toString() ?? '',
         timestamp: DateTime.tryParse(json['timestamp']?.toString() ?? '') ??
             DateTime.now(),
+        messageId: json['messageId']?.toString() ?? '',
         attachments: (json['attachments'] as List?)
                 ?.whereType<Map>()
                 .map((item) => AiChatAttachment.fromHistoryJson(
                     Map<String, dynamic>.from(item)))
                 .toList() ??
             const <AiChatAttachment>[],
+        structured: json['structured'] is Map
+            ? TrainerAiStructuredReply.fromJson(
+                Map<String, dynamic>.from(json['structured'] as Map),
+              )
+            : null,
       );
 }
 
@@ -23129,12 +24131,67 @@ class _TodayBlockRow extends StatelessWidget {
                         style: theme.textTheme.labelSmall
                             ?.copyWith(color: scheme.onSurfaceVariant),
                       ),
+                    if (!done) _TodayBlockSubstitutionRow(block: block),
                   ],
                 ),
               ),
               if (!done)
                 Icon(Icons.chevron_right_rounded, color: scheme.primary),
             ],
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+/// Pasek podmiany zestawu pod blokiem dnia.
+///
+/// Pokazuje się TYLKO wtedy, gdy użytkownik ma własny zestaw pasujący do
+/// dzisiejszego obszaru (brzuch za brzuch) albo gdy podmiana już działa.
+class _TodayBlockSubstitutionRow extends StatelessWidget {
+  const _TodayBlockSubstitutionRow({required this.block});
+
+  final TodayTrainingBlock block;
+
+  @override
+  Widget build(BuildContext context) {
+    final store = AppScope.of(context);
+    final theme = Theme.of(context);
+    final scheme = theme.colorScheme;
+    final substituted = store.substitutedPlanForArea(block.area);
+    final candidates = store.substitutionCandidatesForArea(block.area);
+    if (substituted == null && candidates.isEmpty) {
+      return const SizedBox.shrink();
+    }
+
+    return Padding(
+      padding: const EdgeInsets.only(top: 6),
+      child: Align(
+        alignment: Alignment.centerLeft,
+        child: TextButton.icon(
+          key: Key('substitute_block_${block.area.name}'),
+          onPressed: () => showPlanSubstitutionSheet(context, block.area),
+          style: TextButton.styleFrom(
+            padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 2),
+            minimumSize: const Size(0, 30),
+            visualDensity: VisualDensity.compact,
+            tapTargetSize: MaterialTapTargetSize.shrinkWrap,
+          ),
+          icon: Icon(Icons.swap_horiz_rounded,
+              size: 15,
+              color: substituted != null ? scheme.primary : scheme.onSurfaceVariant),
+          label: Text(
+            substituted != null
+                ? 'Mój zestaw: ${substituted.name}'
+                : 'Zamień na mój zestaw (${candidates.length})',
+            maxLines: 1,
+            overflow: TextOverflow.ellipsis,
+            style: theme.textTheme.labelSmall?.copyWith(
+              fontWeight: FontWeight.w700,
+              color:
+                  substituted != null ? scheme.primary : scheme.onSurfaceVariant,
+            ),
           ),
         ),
       ),
@@ -23674,6 +24731,8 @@ class PlanPage extends StatelessWidget {
           const TrainingPlannerHeroCard(),
           const _ActiveProgramBanner(),
           Gap(4),
+          const CreateOwnPlanCard(),
+          Gap(18),
           SectionHeader(
             title: 'Programy 30-dniowe',
             actionLabel: 'Wszystkie',
@@ -32228,6 +33287,15 @@ class _WorkoutProgramPageState extends State<WorkoutProgramPage> {
       tooltip: 'Opcje programu',
       onSelected: (value) async {
         switch (value) {
+          case 'analyzeAi':
+            await openPlanAiAnalysis(context, plan.id);
+            break;
+          case 'versions':
+            await showPlanVersionsSheet(context, plan.id);
+            break;
+          case 'favorite':
+            await store.setPlanFavorite(plan.id, !plan.origin.isFavorite);
+            break;
           case 'edit':
             await showWorkoutPlanEditor(context, plan: plan);
             break;
@@ -32253,12 +33321,39 @@ class _WorkoutProgramPageState extends State<WorkoutProgramPage> {
       },
       itemBuilder: (context) => [
         const PopupMenuItem(
+          value: 'analyzeAi',
+          child: ListTile(
+              contentPadding: EdgeInsets.zero,
+              leading: Icon(Icons.auto_awesome_rounded),
+              title: Text('Przeanalizuj zestaw przez AI')),
+        ),
+        const PopupMenuItem(
           value: 'edit',
           child: ListTile(
               contentPadding: EdgeInsets.zero,
               leading: Icon(Icons.edit_outlined),
               title: Text('Edytuj program')),
         ),
+        PopupMenuItem(
+          value: 'favorite',
+          child: ListTile(
+            contentPadding: EdgeInsets.zero,
+            leading: Icon(plan.origin.isFavorite
+                ? Icons.star_rounded
+                : Icons.star_border_rounded),
+            title: Text(plan.origin.isFavorite
+                ? 'Usuń z ulubionych'
+                : 'Dodaj do ulubionych'),
+          ),
+        ),
+        if (plan.versions.isNotEmpty)
+          const PopupMenuItem(
+            value: 'versions',
+            child: ListTile(
+                contentPadding: EdgeInsets.zero,
+                leading: Icon(Icons.history_rounded),
+                title: Text('Historia wersji')),
+          ),
         const PopupMenuItem(
           value: 'level',
           child: ListTile(
