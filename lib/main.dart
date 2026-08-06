@@ -2862,7 +2862,11 @@ class AppStore extends ChangeNotifier {
     required DateTime now,
   }) {
     final catalogId = programIdForArea(area);
-    final plan = catalogId == null ? null : planForArea(area);
+    // Podmiana użytkownika ma pierwszeństwo także w KAFELKU dnia — inaczej
+    // rozkład szedł już za własnym zestawem, a „Dzisiejszy trening" nadal
+    // opisywał zestaw bazowy.
+    final substituted = substitutedPlanForArea(area);
+    final plan = substituted ?? (catalogId == null ? null : planForArea(area));
     final trainedArea = _areaTrainedToday(area, now);
 
     if (plan == null || plan.days.isEmpty) {
@@ -23948,6 +23952,19 @@ class _TrainingPlannerHeroCardState extends State<TrainingPlannerHeroCard> {
 /// Otwiera zestaw danego bloku dnia (startuje program, jeśli trzeba).
 Future<void> openTrainingBlock(
     BuildContext context, TodayTrainingBlock block) async {
+  final store = AppScope.read(context);
+  // Blok podstawiony własnym zestawem prowadzi PROSTO do jego dnia —
+  // startowanie programu katalogowego cofałoby podmianę.
+  final substituted = store.substitutedPlanForArea(block.area);
+  if (substituted != null && substituted.days.isNotEmpty) {
+    final index =
+        substituted.currentDayIndex.clamp(0, substituted.days.length - 1);
+    await Navigator.of(context).push(MaterialPageRoute<void>(
+      builder: (_) =>
+          WorkoutDayDetailsPage(planId: substituted.id, dayIndex: index),
+    ));
+    return;
+  }
   final programId = block.catalogProgramId;
   if (programId == null) {
     openWorkoutProgramCatalog(context);

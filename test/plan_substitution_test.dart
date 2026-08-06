@@ -1,6 +1,7 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:licznik_treningu/features/trainer/application/plan_substitution.dart';
+import 'package:licznik_treningu/features/trainer/application/training_schedule.dart';
 import 'package:licznik_treningu/features/trainer/application/weekly_training_planner.dart';
 import 'package:licznik_treningu/features/trainer/domain/trainer_models.dart';
 import 'package:licznik_treningu/main.dart';
@@ -257,6 +258,34 @@ void main() {
       }
       expect(store.scheduledPlanForArea(TrainingFocusArea.legs)?.id,
           'full-body');
+    });
+
+    test('kafelek dzisiejszego treningu pokazuje podstawiony zestaw',
+        () async {
+      final store = await _freshStore();
+      await store.addWorkoutPlan(_corePlan());
+      // Rozkład na dziś ustawiamy na dzień brzucha.
+      final today = DateTime.now();
+      await store.updateSettings(store.settings.copyWith(
+        trainingSchedule: store.trainingScheduleConfig.copyWith(
+          enabled: true,
+          weekdayPlans: {
+            ...store.trainingScheduleConfig.weekdayPlans,
+            today.weekday:
+                const TrainingDayPlan(primary: TrainingFocusArea.core),
+          },
+        ),
+      ));
+      await store.setPlanForArea(TrainingFocusArea.core, 'my-core');
+
+      final blocks = store.todayTrainingBlocks(today);
+      final coreBlock =
+          blocks.where((b) => b.area == TrainingFocusArea.core).toList();
+      expect(coreBlock, hasLength(1));
+      expect(coreBlock.single.planId, 'my-core',
+          reason: 'kafelek dnia musi iść za podmianą, nie za zestawem bazowym');
+      expect(coreBlock.single.planName, 'Mój brzuch');
+      expect(coreBlock.single.exerciseCount, 3);
     });
 
     test('przywrócenie bazowego czyści podmianę', () async {
