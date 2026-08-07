@@ -254,13 +254,24 @@ class OwnPlanTile extends StatelessWidget {
         ? 'Brak ćwiczeń'
         : muscles.take(3).map((g) => g.label).join(' · ');
 
+    // Okładka: własna okładka planu, a gdy jej nie ma — ta nadana kafelkowi.
+    final cover = store.coverForTile('plan_${plan.id}',
+        planCover: plan.media?.effectivePath);
+    final radius = BorderRadius.circular(uiCornerRadius(context, 20));
+    final showAsBackground = cover.isNotEmpty && tileBackgroundMode(context);
+
     return Material(
       color: Colors.transparent,
       child: InkWell(
         key: Key('own_plan_tile_${plan.id}'),
-        borderRadius: BorderRadius.circular(uiCornerRadius(context, 20)),
+        borderRadius: radius,
         onTap: () => openWorkoutProgram(context, plan.id),
-        child: Ink(
+        onLongPress: () => showTileCoverSheet(context,
+            tileKey: 'plan_${plan.id}', title: plan.name),
+        child: TileCoverShell(
+          coverPath: cover,
+          radius: radius,
+          accent: accent,
           decoration: BoxDecoration(
             gradient: LinearGradient(
               colors: [
@@ -270,35 +281,36 @@ class OwnPlanTile extends StatelessWidget {
               begin: Alignment.topLeft,
               end: Alignment.bottomRight,
             ),
-            borderRadius: BorderRadius.circular(uiCornerRadius(context, 20)),
+            borderRadius: radius,
             border: Border.all(color: accent.withValues(alpha: 0.30)),
           ),
-          child: Padding(
-            padding: EdgeInsets.all(compact ? 12 : 14),
-            child: Column(
+          padding: EdgeInsets.all(compact ? 12 : 14),
+          child: Column(
               crossAxisAlignment: CrossAxisAlignment.start,
               children: [
                 Row(
                   crossAxisAlignment: CrossAxisAlignment.start,
                   children: [
-                    Container(
-                      width: compact ? 34 : 40,
-                      height: compact ? 34 : 40,
-                      decoration: BoxDecoration(
-                        color: accent.withValues(alpha: 0.20),
-                        borderRadius: BorderRadius.circular(12),
+                    if (!showAsBackground) ...[
+                      Container(
+                        width: compact ? 34 : 40,
+                        height: compact ? 34 : 40,
+                        decoration: BoxDecoration(
+                          color: accent.withValues(alpha: 0.20),
+                          borderRadius: BorderRadius.circular(12),
+                        ),
+                        child: Icon(
+                          plan.origin.aiGenerated
+                              ? Icons.smart_toy_rounded
+                              : plan.origin.aiAssisted
+                                  ? Icons.auto_fix_high_rounded
+                                  : Icons.edit_note_rounded,
+                          size: compact ? 18 : 21,
+                          color: accent,
+                        ),
                       ),
-                      child: Icon(
-                        plan.origin.aiGenerated
-                            ? Icons.smart_toy_rounded
-                            : plan.origin.aiAssisted
-                                ? Icons.auto_fix_high_rounded
-                                : Icons.edit_note_rounded,
-                        size: compact ? 18 : 21,
-                        color: accent,
-                      ),
-                    ),
-                    const SizedBox(width: 12),
+                      const SizedBox(width: 12),
+                    ],
                     Expanded(
                       child: Column(
                         crossAxisAlignment: CrossAxisAlignment.start,
@@ -389,7 +401,6 @@ class OwnPlanTile extends StatelessWidget {
                 ],
               ],
             ),
-          ),
         ),
       ),
     );
@@ -425,6 +436,11 @@ class _MyPlansPageState extends State<MyPlansPage> {
     }).toList();
 
     filtered.sort((a, b) {
+      // Rdzenne (programy wbudowane) ZAWSZE przed własnymi — niezależnie od
+      // wybranego sortowania. Dopiero wewnątrz grup działa kryterium poniżej.
+      final coreFirst = (b.origin.isSystemProgram ? 1 : 0)
+          .compareTo(a.origin.isSystemProgram ? 1 : 0);
+      if (coreFirst != 0) return coreFirst;
       switch (_sort) {
         case PlanSort.recent:
           final left = a.origin.lastUsedAt ?? a.origin.updatedAt;

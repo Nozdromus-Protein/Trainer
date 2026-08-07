@@ -56,6 +56,7 @@ part 'features/trainer/presentation/my_plans_page.dart';
 part 'features/trainer/presentation/ai_exercise_cards.dart';
 part 'features/trainer/presentation/plan_ai_analysis_page.dart';
 part 'features/trainer/presentation/plan_substitution_sheet.dart';
+part 'features/trainer/presentation/tile_cover.dart';
 part 'features/trainer/presentation/profile_setup_wizard.dart';
 part 'features/trainer/presentation/user_profile.dart';
 
@@ -565,6 +566,11 @@ TrainerThemeStyle themeStyleById(String id) {
 }
 
 /// Normalizuje zapisany układ kafelków do znanych wartości.
+/// Tryb prezentacji okładki na kafelku zestawu.
+/// `icon` (domyślny) = miniatura obok tytułu, `background` = zdjęcie jako tło.
+String normalizeTileVisual(String value) =>
+    value == 'background' ? 'background' : 'icon';
+
 String normalizeTileLayout(String value) {
   switch (value) {
     case 'grid':
@@ -1440,6 +1446,11 @@ class AppStore extends ChangeNotifier {
   /// Bump wersji wymusza jednorazową przebudowę zapisanych programów.
   static const _plansHeavyDaysMigrationKey = 'plans_heavy_days_migration_v1';
 
+  /// Własne okładki zestawów RDZENNYCH (katalog, rozgrzewki, rozciąganie,
+  /// cardio): klucz zestawu → ścieżka obrazu. Trzymane osobno od planów,
+  /// bo zestaw bazowy da się ozdobić ZANIM zostanie rozpoczęty.
+  static const _tileCoversKey = 'tile_cover_overrides_v1';
+
   /// Podmiany zaplanowanych zestawów na własne: klucz obszaru rozkładu
   /// ([TrainingFocusArea.name]) → identyfikator zestawu użytkownika.
   static const _planSubstitutionsKey = 'plan_area_substitutions_v1';
@@ -1448,6 +1459,9 @@ class AppStore extends ChangeNotifier {
   /// Starsze zapisy nie mają pola `origin` — nadajemy im tryb na podstawie
   /// REALNEGO źródła (katalog programów vs zestaw własny), nie losowo.
   static const _plansOriginMigrationKey = 'plans_origin_migration_v1';
+
+  /// Okładki nadane przez użytkownika zestawom rdzennym (klucz → ścieżka).
+  final Map<String, String> tileCoverOverrides = {};
 
   /// Własne zestawy podstawione pod obszary rozkładu (brzuch za brzuch).
   /// Klucz: [TrainingFocusArea.name], wartość: id zestawu użytkownika.
@@ -1838,6 +1852,22 @@ class AppStore extends ChangeNotifier {
       await savePlans();
     }
     await prefs.setBool(_plansOriginMigrationKey, true);
+
+    // Własne okładki zestawów rdzennych.
+    final rawCovers = prefs.getString(_tileCoversKey);
+    if (rawCovers != null && rawCovers.isNotEmpty) {
+      try {
+        final decoded = jsonDecode(rawCovers);
+        if (decoded is Map) {
+          decoded.forEach((key, value) {
+            final path = value?.toString() ?? '';
+            if (path.isNotEmpty) tileCoverOverrides[key.toString()] = path;
+          });
+        }
+      } catch (error) {
+        debugPrint('[Trainer] Nie udało się wczytać: okładki zestawów. $error');
+      }
+    }
 
     // Podmiany zestawów pod obszary rozkładu. Wpisy wskazujące na usunięty
     // zestaw sprzątamy od razu — inaczej dzień treningowy trafiałby w pustkę.
@@ -2715,6 +2745,36 @@ class AppStore extends ChangeNotifier {
   }
 
   // ── Podmiana zaplanowanego zestawu na własny ──────────────────────────────
+
+  // ── Okładki kafelków ──────────────────────────────────────────────────────
+
+  /// Okładka kafelka zestawu rdzennego (albo pusty tekst, gdy jej nie ma).
+  ///
+  /// [planCover] to okładka zapisana w rozpoczętym planie — ma pierwszeństwo,
+  /// bo dotyczy konkretnej instancji programu. Własna okładka użytkownika
+  /// działa również dla programów jeszcze nierozpoczętych.
+  String coverForTile(String tileKey, {String? planCover}) {
+    final fromPlan = planCover?.trim() ?? '';
+    if (fromPlan.isNotEmpty) return fromPlan;
+    return tileCoverOverrides[tileKey]?.trim() ?? '';
+  }
+
+  /// Ustawia (albo usuwa, gdy [path] puste) własną okładkę zestawu rdzennego.
+  Future<void> setTileCover(String tileKey, String path) async {
+    final cleaned = path.trim();
+    if (cleaned.isEmpty) {
+      tileCoverOverrides.remove(tileKey);
+    } else {
+      tileCoverOverrides[tileKey] = cleaned;
+    }
+    final prefs = await SharedPreferences.getInstance();
+    if (tileCoverOverrides.isEmpty) {
+      await prefs.remove(_tileCoversKey);
+    } else {
+      await prefs.setString(_tileCoversKey, jsonEncode(tileCoverOverrides));
+    }
+    notifyListeners();
+  }
 
   /// Zestaw użytkownika podstawiony pod dany obszar rozkładu, o ile nadal
   /// istnieje i nie jest w archiwum. `null` = brak podmiany.
@@ -9409,6 +9469,11 @@ class AppSettings {
   /// Układ kafelków programów: 'list' | 'grid' | 'compact'.
   final String tileLayout;
 
+  /// Jak kafelek zestawu prezentuje okładkę: `icon` = mała ikona/miniatura
+  /// obok tytułu (domyślnie, jak dotąd), `background` = zdjęcie jako TŁO
+  /// całego kafelka. Brak okładki zawsze spada z powrotem do ikony.
+  final String tileVisual;
+
   /// Styl dolnego menu: 'floating' | 'classic' | 'minimal'.
   final String navBarStyle;
 
@@ -9556,6 +9621,7 @@ class AppSettings {
     this.cornerStyle = 'soft',
     this.cardStyle = 'flat',
     this.tileLayout = 'list',
+    this.tileVisual = 'icon',
     this.navBarStyle = 'floating',
     this.useGradients = true,
     this.cardOpacity = 1.0,
@@ -9635,6 +9701,7 @@ class AppSettings {
     String? cornerStyle,
     String? cardStyle,
     String? tileLayout,
+    String? tileVisual,
     String? navBarStyle,
     bool? useGradients,
     double? cardOpacity,
@@ -9694,6 +9761,7 @@ class AppSettings {
       cornerStyle: cornerStyle ?? this.cornerStyle,
       cardStyle: cardStyle ?? this.cardStyle,
       tileLayout: tileLayout ?? this.tileLayout,
+      tileVisual: tileVisual ?? this.tileVisual,
       navBarStyle: navBarStyle ?? this.navBarStyle,
       useGradients: useGradients ?? this.useGradients,
       cardOpacity: cardOpacity ?? this.cardOpacity,
@@ -9757,6 +9825,7 @@ class AppSettings {
         'cornerStyle': cornerStyle,
         'cardStyle': cardStyle,
         'tileLayout': tileLayout,
+        'tileVisual': tileVisual,
         'navBarStyle': navBarStyle,
         'useGradients': useGradients,
         'cardOpacity': cardOpacity,
@@ -9838,6 +9907,7 @@ class AppSettings {
         cornerStyle: json['cornerStyle']?.toString() ?? 'soft',
         cardStyle: json['cardStyle']?.toString() ?? 'flat',
         tileLayout: json['tileLayout']?.toString() ?? 'list',
+        tileVisual: json['tileVisual']?.toString() ?? 'icon',
         navBarStyle: json['navBarStyle']?.toString() ?? 'floating',
         useGradients: json['useGradients'] as bool? ?? true,
         cardOpacity:
@@ -24784,8 +24854,6 @@ class PlanPage extends StatelessWidget {
           const TrainingPlannerHeroCard(),
           const _ActiveProgramBanner(),
           Gap(4),
-          const CreateOwnPlanCard(),
-          Gap(18),
           SectionHeader(
             title: 'Programy 30-dniowe',
             actionLabel: 'Wszystkie',
@@ -24832,6 +24900,11 @@ class PlanPage extends StatelessWidget {
           ),
           Gap(12),
           _CardioTilesSection(layout: layout),
+          Gap(26),
+          // Zestawy WŁASNE zawsze pod rdzennymi — kolejność ekranu ma być
+          // przewidywalna: najpierw to, co daje aplikacja, potem to, co dodał
+          // użytkownik.
+          const CreateOwnPlanCard(),
         ],
       ),
     );
@@ -25022,6 +25095,13 @@ class _ProgramTile extends StatelessWidget {
     await openWorkoutProgram(context, started.id);
   }
 
+  /// Zestaw RDZENNY też da się ozdobić — nawet zanim zostanie rozpoczęty.
+  void _editCover(BuildContext context) => showTileCoverSheet(
+        context,
+        tileKey: 'program_${meta.id}',
+        title: meta.title,
+      );
+
   @override
   Widget build(BuildContext context) {
     final theme = Theme.of(context);
@@ -25037,6 +25117,12 @@ class _ProgramTile extends StatelessWidget {
         ? plan!.level
         : normalizeTrainingLevel(store.settings.level);
     final radius = BorderRadius.circular(uiCornerRadius(context, 24));
+    // Okładka: najpierw ta zapisana w rozpoczętym programie, potem własna
+    // użytkownika (działa też dla programów jeszcze nierozpoczętych).
+    final cover = store.coverForTile('program_${meta.id}',
+        planCover: plan?.media?.effectivePath);
+    // Tryb „Tło": zdjęcie wypełnia kafelek, więc miniatura obok tytułu znika.
+    final showAsBackground = cover.isNotEmpty && tileBackgroundMode(context);
     // Dopasowanie programu do profilu treningowego (poziom/tryb/sprzęt/ograniczenia).
     final recommendation = recommendProgram(meta, programUserProfileFor(store));
 
@@ -25045,16 +25131,22 @@ class _ProgramTile extends StatelessWidget {
         color: Colors.transparent,
         child: InkWell(
           onTap: () => _open(context),
+          onLongPress: () => _editCover(context),
           borderRadius: radius,
-          child: Container(
+          child: TileCoverShell(
+            coverPath: cover,
+            radius: radius,
+            accent: accent,
             padding: uiInsets(context,
                 const EdgeInsets.symmetric(horizontal: 12, vertical: 10)),
             decoration: _tileDecoration(theme, accent, radius, useGradients),
             child: Row(
               children: [
-                _tileVisual(plan, accent, uiSize(context, 38, min: 30),
-                    uiSize(context, 20, min: 16)),
-                SizedBox(width: uiGap(context, 12)),
+                if (!showAsBackground) ...[
+                  _tileVisual(plan, accent, uiSize(context, 38, min: 30),
+                      uiSize(context, 20, min: 16), coverPath: cover),
+                  SizedBox(width: uiGap(context, 12)),
+                ],
                 Expanded(
                   child: Column(
                     crossAxisAlignment: CrossAxisAlignment.start,
@@ -25099,8 +25191,12 @@ class _ProgramTile extends StatelessWidget {
       color: Colors.transparent,
       child: InkWell(
         onTap: () => _open(context),
+        onLongPress: () => _editCover(context),
         borderRadius: radius,
-        child: Container(
+        child: TileCoverShell(
+          coverPath: cover,
+          radius: radius,
+          accent: accent,
           padding: uiInsets(context, EdgeInsets.all(isGrid ? 14 : 16)),
           decoration: _tileDecoration(theme, accent, radius, useGradients),
           child: Column(
@@ -25108,12 +25204,15 @@ class _ProgramTile extends StatelessWidget {
             children: [
               Row(
                 children: [
-                  _tileVisual(
-                      plan,
-                      accent,
-                      uiSize(context, isGrid ? 42 : 52, min: 34),
-                      uiSize(context, isGrid ? 22 : 27, min: 18)),
-                  const SizedBox(width: 8),
+                  if (!showAsBackground) ...[
+                    _tileVisual(
+                        plan,
+                        accent,
+                        uiSize(context, isGrid ? 42 : 52, min: 34),
+                        uiSize(context, isGrid ? 22 : 27, min: 18),
+                        coverPath: cover),
+                    const SizedBox(width: 8),
+                  ],
                   Expanded(
                     child: Align(
                       alignment: Alignment.centerRight,
@@ -25268,8 +25367,8 @@ class _ProgramTile extends StatelessWidget {
   /// inaczej dotychczasowa ikona na gradiencie. Okładka nie zmienia układu —
   /// wypełnia ten sam kwadrat co ikona.
   Widget _tileVisual(
-      WorkoutPlan? plan, Color accent, double size, double iconSize) {
-    final coverPath = plan?.media?.effectivePath ?? '';
+      WorkoutPlan? plan, Color accent, double size, double iconSize,
+      {String coverPath = ''}) {
     if (coverPath.isEmpty) return _tileIcon(accent, size, iconSize);
     return ClipRRect(
       borderRadius: BorderRadius.circular(size * 0.32),
@@ -25425,13 +25524,22 @@ class _CardioTile extends StatelessWidget {
       border: Border.all(color: accent.withValues(alpha: isDark ? 0.35 : 0.28)),
     );
 
+    // Cardio też należy do zestawów rdzennych — okładka pod długim naciśnięciem.
+    final coverKey = 'cardio_${meta.id}';
+    final cover = store.coverForTile(coverKey);
+
     if (compact) {
       return Material(
         color: Colors.transparent,
         child: InkWell(
           onTap: () => startCardioWorkout(context, meta),
+          onLongPress: () => showTileCoverSheet(context,
+              tileKey: coverKey, title: meta.title),
           borderRadius: radius,
-          child: Container(
+          child: TileCoverShell(
+            coverPath: cover,
+            radius: radius,
+            accent: accent,
             padding: uiInsets(context,
                 const EdgeInsets.symmetric(horizontal: 12, vertical: 10)),
             decoration: decoration,
@@ -25467,8 +25575,13 @@ class _CardioTile extends StatelessWidget {
       color: Colors.transparent,
       child: InkWell(
         onTap: () => startCardioWorkout(context, meta),
+        onLongPress: () => showTileCoverSheet(context,
+            tileKey: coverKey, title: meta.title),
         borderRadius: radius,
-        child: Container(
+        child: TileCoverShell(
+          coverPath: cover,
+          radius: radius,
+          accent: accent,
           padding: const EdgeInsets.all(14),
           decoration: decoration,
           child: Column(
@@ -25667,6 +25780,9 @@ class _WarmupTile extends StatelessWidget {
     final isDark = theme.brightness == Brightness.dark;
     final fresh = store.hasFreshWarmup(meta.id);
     final radius = BorderRadius.circular(uiCornerRadius(context, 22));
+    // Rozgrzewki i rozciąganie to też zestawy RDZENNE — mają własne okładki.
+    final coverKey = '${stretch ? 'stretch' : 'warmup'}_${meta.id}';
+    final cover = store.coverForTile(coverKey);
 
     final decoration = BoxDecoration(
       gradient: useGradients
@@ -25737,8 +25853,13 @@ class _WarmupTile extends StatelessWidget {
       color: Colors.transparent,
       child: InkWell(
         onTap: () => startWarmupWorkout(context, meta),
+        onLongPress: () => showTileCoverSheet(context,
+            tileKey: coverKey, title: meta.title),
         borderRadius: radius,
-        child: Container(
+        child: TileCoverShell(
+          coverPath: cover,
+          radius: radius,
+          accent: accent,
           padding: const EdgeInsets.all(14),
           decoration: decoration,
           child: Column(
@@ -44206,6 +44327,26 @@ class AppearanceCard extends StatelessWidget {
                 'compact': 'Kompaktowe'
               },
               onChanged: (v) => _save(settings.copyWith(tileLayout: v)),
+            ),
+            _sectionLabel(context, Icons.image_outlined, 'Kafelki zestawów'),
+            _segmented(
+              context,
+              value: normalizeTileVisual(settings.tileVisual),
+              options: const {
+                'icon': 'Ikony',
+                'background': 'Tło',
+              },
+              onChanged: (v) => _save(settings.copyWith(tileVisual: v)),
+            ),
+            Padding(
+              padding: const EdgeInsets.fromLTRB(4, 2, 4, 6),
+              child: Text(
+                'W trybie „Tło" okładka wypełnia cały kafelek, a ikona znika. '
+                'Kafelki bez okładki zawsze pokazują ikonę. Okładkę nadasz '
+                'długim naciśnięciem kafelka — także zestawom wbudowanym.',
+                style: Theme.of(context).textTheme.labelSmall?.copyWith(
+                    color: Theme.of(context).colorScheme.onSurfaceVariant),
+              ),
             ),
             _sectionLabel(context, Icons.call_to_action_outlined, 'Dolne menu'),
             _segmented(
