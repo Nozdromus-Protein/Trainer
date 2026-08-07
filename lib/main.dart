@@ -57,6 +57,7 @@ part 'features/trainer/presentation/ai_exercise_cards.dart';
 part 'features/trainer/presentation/plan_ai_analysis_page.dart';
 part 'features/trainer/presentation/plan_substitution_sheet.dart';
 part 'features/trainer/presentation/tile_cover.dart';
+part 'features/trainer/presentation/tile_icons.dart';
 part 'features/trainer/presentation/profile_setup_wizard.dart';
 part 'features/trainer/presentation/user_profile.dart';
 
@@ -1451,6 +1452,9 @@ class AppStore extends ChangeNotifier {
   /// bo zestaw bazowy da się ozdobić ZANIM zostanie rozpoczęty.
   static const _tileCoversKey = 'tile_cover_overrides_v1';
 
+  /// Ikony wektorowe wybrane przez użytkownika dla kafelków zestawów.
+  static const _tileIconsKey = 'tile_icon_overrides_v1';
+
   /// Podmiany zaplanowanych zestawów na własne: klucz obszaru rozkładu
   /// ([TrainingFocusArea.name]) → identyfikator zestawu użytkownika.
   static const _planSubstitutionsKey = 'plan_area_substitutions_v1';
@@ -1462,6 +1466,9 @@ class AppStore extends ChangeNotifier {
 
   /// Okładki nadane przez użytkownika zestawom rdzennym (klucz → ścieżka).
   final Map<String, String> tileCoverOverrides = {};
+
+  /// Ikony wektorowe wybrane dla kafelków (klucz kafelka → [TileIcon.key]).
+  final Map<String, String> tileIconOverrides = {};
 
   /// Własne zestawy podstawione pod obszary rozkładu (brzuch za brzuch).
   /// Klucz: [TrainingFocusArea.name], wartość: id zestawu użytkownika.
@@ -1866,6 +1873,22 @@ class AppStore extends ChangeNotifier {
         }
       } catch (error) {
         debugPrint('[Trainer] Nie udało się wczytać: okładki zestawów. $error');
+      }
+    }
+
+    // Wybrane ikony kafelków.
+    final rawIcons = prefs.getString(_tileIconsKey);
+    if (rawIcons != null && rawIcons.isNotEmpty) {
+      try {
+        final decoded = jsonDecode(rawIcons);
+        if (decoded is Map) {
+          decoded.forEach((key, value) {
+            final iconKey = value?.toString() ?? '';
+            if (iconKey.isNotEmpty) tileIconOverrides[key.toString()] = iconKey;
+          });
+        }
+      } catch (error) {
+        debugPrint('[Trainer] Nie udało się wczytać: ikony kafelków. $error');
       }
     }
 
@@ -2757,6 +2780,70 @@ class AppStore extends ChangeNotifier {
     final fromPlan = planCover?.trim() ?? '';
     if (fromPlan.isNotEmpty) return fromPlan;
     return tileCoverOverrides[tileKey]?.trim() ?? '';
+  }
+
+  /// Ikona wybrana dla kafelka albo `null`, gdy użytkownik jej nie zmieniał
+  /// (wtedy kafelek zostaje przy swojej domyślnej ikonie).
+  TileIcon? iconForTile(String tileKey) {
+    final key = tileIconOverrides[tileKey];
+    if (key == null || key.isEmpty) return null;
+    return TileIcon.fromKey(key);
+  }
+
+  /// Ustawia (albo usuwa, gdy [iconKey] puste) ikonę kafelka.
+  Future<void> setTileIcon(String tileKey, String iconKey) async {
+    final cleaned = iconKey.trim();
+    if (cleaned.isEmpty) {
+      tileIconOverrides.remove(tileKey);
+    } else {
+      tileIconOverrides[tileKey] = cleaned;
+    }
+    final prefs = await SharedPreferences.getInstance();
+    if (tileIconOverrides.isEmpty) {
+      await prefs.remove(_tileIconsKey);
+    } else {
+      await prefs.setString(_tileIconsKey, jsonEncode(tileIconOverrides));
+    }
+    notifyListeners();
+  }
+
+  /// Generuje tło kafelka przez AI (ta sama ścieżka co okładki programów).
+  ///
+  /// Zwraca ścieżkę zapisanego pliku. Rzuca wyjątkiem z czytelnym komunikatem,
+  /// gdy brakuje klucza API albo generator zwróci pustkę — UI go pokazuje.
+  Future<String> generateTileCoverWithAi({
+    required String tileKey,
+    required String title,
+    List<String> mainMuscles = const [],
+    List<String> equipment = const [],
+  }) async {
+    final apiKey = settings.openAiApiKey.trim();
+    if (apiKey.isEmpty) {
+      throw Exception(
+          'Brak klucza API OpenAI. Dodaj go w Więcej → Integracje.');
+    }
+    final prompt = buildProgramCoverPrompt(
+      programName: title,
+      physiqueLabel: bodyGoalProfile?.desiredPhysique.label ?? '',
+      strategyLabel: bodyGoalProfile?.bodyCompositionStrategy.label ?? '',
+      trainingFocusLabel: bodyGoalProfile?.trainingFocus.label ?? '',
+      difficultyLabel: normalizeTrainingLevel(settings.level),
+      mainMuscles: mainMuscles,
+      equipment: equipment,
+    );
+    final bytes =
+        await OpenAiImageService(apiKey).generateImageFromPrompt(prompt);
+    if (bytes.isEmpty) {
+      throw Exception('Generator zwrócił pusty obraz — spróbuj ponownie.');
+    }
+    final documents = await getApplicationDocumentsDirectory();
+    final dir = Directory('${documents.path}/tile_covers');
+    if (!await dir.exists()) await dir.create(recursive: true);
+    final safeKey = tileKey.replaceAll(RegExp(r'[^A-Za-z0-9_]'), '_');
+    final file = File('${dir.path}/${safeKey}_${idNow()}.png');
+    await file.writeAsBytes(bytes, flush: true);
+    await setTileCover(tileKey, file.path);
+    return file.path;
   }
 
   /// Ustawia (albo usuwa, gdy [path] puste) własną okładkę zestawu rdzennego.
@@ -25100,6 +25187,12 @@ class _ProgramTile extends StatelessWidget {
         context,
         tileKey: 'program_${meta.id}',
         title: meta.title,
+        accent: Color(meta.accentColor),
+        group: meta.mainMuscles.isEmpty
+            ? null
+            : MuscleGroup.fromText(meta.mainMuscles.first),
+        mainMuscles: meta.mainMuscles,
+        equipment: meta.equipment,
       );
 
   @override
@@ -25123,6 +25216,9 @@ class _ProgramTile extends StatelessWidget {
         planCover: plan?.media?.effectivePath);
     // Tryb „Tło": zdjęcie wypełnia kafelek, więc miniatura obok tytułu znika.
     final showAsBackground = cover.isNotEmpty && tileBackgroundMode(context);
+    // Ikona wybrana przez użytkownika wygrywa z domyślną ikoną programu.
+    final chosenIcon = resolvedTileIcon(context,
+        tileKey: 'program_${meta.id}', fallback: iconForProgramKey(meta.iconKey));
     // Dopasowanie programu do profilu treningowego (poziom/tryb/sprzęt/ograniczenia).
     final recommendation = recommendProgram(meta, programUserProfileFor(store));
 
@@ -25144,7 +25240,8 @@ class _ProgramTile extends StatelessWidget {
               children: [
                 if (!showAsBackground) ...[
                   _tileVisual(plan, accent, uiSize(context, 38, min: 30),
-                      uiSize(context, 20, min: 16), coverPath: cover),
+                      uiSize(context, 20, min: 16),
+                      coverPath: cover, icon: chosenIcon),
                   SizedBox(width: uiGap(context, 12)),
                 ],
                 Expanded(
@@ -25210,7 +25307,8 @@ class _ProgramTile extends StatelessWidget {
                         accent,
                         uiSize(context, isGrid ? 42 : 52, min: 34),
                         uiSize(context, isGrid ? 22 : 27, min: 18),
-                        coverPath: cover),
+                        coverPath: cover,
+                        icon: chosenIcon),
                     const SizedBox(width: 8),
                   ],
                   Expanded(
@@ -25343,7 +25441,8 @@ class _ProgramTile extends StatelessWidget {
     );
   }
 
-  Widget _tileIcon(Color accent, double size, double iconSize) {
+  Widget _tileIcon(Color accent, double size, double iconSize,
+      {IconData? icon}) {
     return Container(
       width: size,
       height: size,
@@ -25358,7 +25457,7 @@ class _ProgramTile extends StatelessWidget {
         ),
         borderRadius: BorderRadius.circular(size * 0.32),
       ),
-      child: Icon(iconForProgramKey(meta.iconKey),
+      child: Icon(icon ?? iconForProgramKey(meta.iconKey),
           color: Colors.white, size: iconSize),
     );
   }
@@ -25368,8 +25467,8 @@ class _ProgramTile extends StatelessWidget {
   /// wypełnia ten sam kwadrat co ikona.
   Widget _tileVisual(
       WorkoutPlan? plan, Color accent, double size, double iconSize,
-      {String coverPath = ''}) {
-    if (coverPath.isEmpty) return _tileIcon(accent, size, iconSize);
+      {String coverPath = '', IconData? icon}) {
+    if (coverPath.isEmpty) return _tileIcon(accent, size, iconSize, icon: icon);
     return ClipRRect(
       borderRadius: BorderRadius.circular(size * 0.32),
       child: SizedBox(
@@ -25378,7 +25477,7 @@ class _ProgramTile extends StatelessWidget {
         child: buildExerciseMediaImage(
           coverPath,
           fit: BoxFit.cover,
-          fallback: _tileIcon(accent, size, iconSize),
+          fallback: _tileIcon(accent, size, iconSize, icon: icon),
         ),
       ),
     );
@@ -25527,6 +25626,8 @@ class _CardioTile extends StatelessWidget {
     // Cardio też należy do zestawów rdzennych — okładka pod długim naciśnięciem.
     final coverKey = 'cardio_${meta.id}';
     final cover = store.coverForTile(coverKey);
+    final tileIcon = resolvedTileIcon(context,
+        tileKey: coverKey, fallback: iconForCardioKey(meta.iconKey));
 
     if (compact) {
       return Material(
@@ -25534,7 +25635,10 @@ class _CardioTile extends StatelessWidget {
         child: InkWell(
           onTap: () => startCardioWorkout(context, meta),
           onLongPress: () => showTileCoverSheet(context,
-              tileKey: coverKey, title: meta.title),
+              tileKey: coverKey,
+              title: meta.title,
+              accent: accent,
+              group: MuscleGroup.cardio),
           borderRadius: radius,
           child: TileCoverShell(
             coverPath: cover,
@@ -25545,7 +25649,7 @@ class _CardioTile extends StatelessWidget {
             decoration: decoration,
             child: Row(
               children: [
-                Icon(iconForCardioKey(meta.iconKey), color: accent, size: 24),
+                Icon(tileIcon, color: accent, size: 24),
                 const SizedBox(width: 12),
                 Expanded(
                   child: Column(
@@ -25576,7 +25680,10 @@ class _CardioTile extends StatelessWidget {
       child: InkWell(
         onTap: () => startCardioWorkout(context, meta),
         onLongPress: () => showTileCoverSheet(context,
-            tileKey: coverKey, title: meta.title),
+            tileKey: coverKey,
+            title: meta.title,
+            accent: accent,
+            group: MuscleGroup.cardio),
         borderRadius: radius,
         child: TileCoverShell(
           coverPath: cover,
@@ -25603,7 +25710,7 @@ class _CardioTile extends StatelessWidget {
                       ),
                       borderRadius: BorderRadius.circular(13),
                     ),
-                    child: Icon(iconForCardioKey(meta.iconKey),
+                    child: Icon(tileIcon,
                         color: Colors.white, size: 22),
                   ),
                   const SizedBox(width: 8),
@@ -25783,6 +25890,8 @@ class _WarmupTile extends StatelessWidget {
     // Rozgrzewki i rozciąganie to też zestawy RDZENNE — mają własne okładki.
     final coverKey = '${stretch ? 'stretch' : 'warmup'}_${meta.id}';
     final cover = store.coverForTile(coverKey);
+    final tileIcon = resolvedTileIcon(context,
+        tileKey: coverKey, fallback: iconForProgramKey(meta.iconKey));
 
     final decoration = BoxDecoration(
       gradient: useGradients
@@ -25814,7 +25923,7 @@ class _WarmupTile extends StatelessWidget {
             decoration: decoration,
             child: Row(
               children: [
-                Icon(iconForProgramKey(meta.iconKey), color: accent, size: 24),
+                Icon(tileIcon, color: accent, size: 24),
                 const SizedBox(width: 12),
                 Expanded(
                   child: Column(
@@ -25854,7 +25963,13 @@ class _WarmupTile extends StatelessWidget {
       child: InkWell(
         onTap: () => startWarmupWorkout(context, meta),
         onLongPress: () => showTileCoverSheet(context,
-            tileKey: coverKey, title: meta.title),
+            tileKey: coverKey,
+            title: meta.title,
+            accent: accent,
+            // Rozgrzewka nie niesie listy partii — podpowiadamy ją z id
+            // zestawu („warmup_chest" → klatka), a gdy się nie da, arkusz
+            // pokazuje po prostu wszystkie grupy ikon.
+            group: MuscleGroup.fromText(meta.id)),
         borderRadius: radius,
         child: TileCoverShell(
           coverPath: cover,
@@ -25881,7 +25996,7 @@ class _WarmupTile extends StatelessWidget {
                       ),
                       borderRadius: BorderRadius.circular(13),
                     ),
-                    child: Icon(iconForProgramKey(meta.iconKey),
+                    child: Icon(tileIcon,
                         color: Colors.white, size: 22),
                   ),
                   const SizedBox(width: 8),

@@ -151,6 +151,47 @@ void main() {
     });
   });
 
+  group('Ikony wektorowe', () {
+    test('katalog ma ikony ogólne i przypisane do partii', () {
+      expect(kTileIconCatalog, isNotEmpty);
+      expect(kTileIconCatalog.any((i) => i.group == null), isTrue);
+      for (final group in [
+        MuscleGroup.chest,
+        MuscleGroup.back,
+        MuscleGroup.core,
+        MuscleGroup.cardio,
+      ]) {
+        expect(kTileIconCatalog.any((i) => i.group == group), isTrue,
+            reason: 'brak ikony dla ${group.label}');
+      }
+      // Klucze muszą być unikalne — trafiają do zapisu.
+      final keys = kTileIconCatalog.map((i) => i.key).toList();
+      expect(keys.toSet().length, keys.length);
+    });
+
+    test('wybór ikony zapisuje się i przeżywa restart', () async {
+      final store = await _freshStore();
+      expect(store.iconForTile('program_core'), isNull);
+
+      await store.setTileIcon('program_core', 'core_grid');
+      expect(store.iconForTile('program_core')?.key, 'core_grid');
+
+      final restored = AppStore();
+      await restored.load();
+      expect(restored.iconForTile('program_core')?.key, 'core_grid');
+
+      // Pusty klucz czyści wybór.
+      await restored.setTileIcon('program_core', '');
+      expect(restored.iconForTile('program_core'), isNull);
+    });
+
+    test('nieznany klucz ikony nie wywraca odczytu', () async {
+      final store = await _freshStore();
+      await store.setTileIcon('program_core', 'juz_nie_istnieje');
+      expect(store.iconForTile('program_core'), isNull);
+    });
+  });
+
   group('Renderowanie kafelków w obu trybach', () {
     testWidgets('tryb tła i tryb ikon rysują się bez wyjątków',
         (tester) async {

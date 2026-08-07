@@ -259,6 +259,17 @@ class OwnPlanTile extends StatelessWidget {
         planCover: plan.media?.effectivePath);
     final radius = BorderRadius.circular(uiCornerRadius(context, 20));
     final showAsBackground = cover.isNotEmpty && tileBackgroundMode(context);
+    // Ikona: wybrana przez użytkownika, inaczej ta wynikająca ze sposobu
+    // utworzenia zestawu (robot / różdżka / notes).
+    final tileIcon = resolvedTileIcon(
+      context,
+      tileKey: 'plan_${plan.id}',
+      fallback: plan.origin.aiGenerated
+          ? Icons.smart_toy_rounded
+          : plan.origin.aiAssisted
+              ? Icons.auto_fix_high_rounded
+              : Icons.edit_note_rounded,
+    );
 
     return Material(
       color: Colors.transparent,
@@ -266,8 +277,15 @@ class OwnPlanTile extends StatelessWidget {
         key: Key('own_plan_tile_${plan.id}'),
         borderRadius: radius,
         onTap: () => openWorkoutProgram(context, plan.id),
-        onLongPress: () => showTileCoverSheet(context,
-            tileKey: 'plan_${plan.id}', title: plan.name),
+        onLongPress: () => showTileCoverSheet(
+          context,
+          tileKey: 'plan_${plan.id}',
+          title: plan.name,
+          accent: accent,
+          // Partia, którą zestaw realnie trenuje — jej ikony idą na górę.
+          group: muscles.isEmpty ? null : muscles.first,
+          mainMuscles: muscles.map((g) => g.label).toList(),
+        ),
         child: TileCoverShell(
           coverPath: cover,
           radius: radius,
@@ -300,11 +318,7 @@ class OwnPlanTile extends StatelessWidget {
                           borderRadius: BorderRadius.circular(12),
                         ),
                         child: Icon(
-                          plan.origin.aiGenerated
-                              ? Icons.smart_toy_rounded
-                              : plan.origin.aiAssisted
-                                  ? Icons.auto_fix_high_rounded
-                                  : Icons.edit_note_rounded,
+                          tileIcon,
                           size: compact ? 18 : 21,
                           color: accent,
                         ),
