@@ -81,6 +81,31 @@ EdgeInsets uiInsets(BuildContext context, EdgeInsets base) {
   );
 }
 
+/// Padding zawartości ARKUSZA / MODALA uwzględniający systemowy pasek
+/// nawigacji i klawiaturę (spec: punkt 18).
+///
+/// PROBLEM, KTÓRY TO ROZWIĄZUJE: `showModalBottomSheet(useSafeArea: true)`
+/// zabezpiecza tylko GÓRĘ (Flutter owija arkusz w `SafeArea(bottom: false)`),
+/// więc dolny pasek nawigacji / obszar gestów potrafił nachodzić na ostatni
+/// wiersz albo przyciski arkusza. Sztywny `padding: 30` tego nie rozwiązuje —
+/// wysokość paska zależy od urządzenia i trybu nawigacji.
+///
+/// Ta funkcja dokłada do dolnego paddingu REALNY inset systemowy oraz wysokość
+/// klawiatury, jeśli jest podniesiona.
+EdgeInsets sheetContentInsets(BuildContext context, EdgeInsets base) {
+  final media = MediaQuery.of(context);
+  // `viewPadding` niesie obszar systemowy także wtedy, gdy klawiatura go
+  // chwilowo przykrywa (`padding` zeruje się w takiej sytuacji).
+  final systemBottom = media.viewPadding.bottom;
+  final keyboard = media.viewInsets.bottom;
+  final scaled = uiInsets(context, base);
+  return scaled.copyWith(bottom: scaled.bottom + systemBottom + keyboard);
+}
+
+/// Dolny odstęp równy systemowemu paskowi nawigacji (do list i stopek).
+double systemBottomInset(BuildContext context) =>
+    MediaQuery.of(context).viewPadding.bottom;
+
 /// Rozmiar elementu dekoracyjnego (ikona, awatar, pasek) wg gęstości.
 /// [min] chroni przed zniknięciem elementu w trybie kompaktowym.
 double uiSize(BuildContext context, double base, {double min = 12}) {

@@ -116,14 +116,23 @@ void main() {
       await tester.pumpAndSettle();
 
       expect(find.text('Rekomendacja Trainera'), findsOneWidget);
-      expect(find.text('Wartość bazowa'), findsOneWidget);
-      expect(find.text('Rekomendacja'), findsOneWidget);
-      expect(find.text('Powód'), findsOneWidget);
-      expect(find.text('2 × 45 s · przerwa 60 s'), findsOneWidget); // baza
+      // GŁÓWNA rekomendacja na wierzchu (spec 19): jedna liczba, duża.
+      expect(find.byKey(const Key('recommendation_headline')), findsOneWidget);
+      expect(find.text('2 × 50 s'), findsOneWidget);
+      // Powód widoczny od razu (sekcja „Dlaczego?" startuje rozwinięta).
+      expect(find.text('Dlaczego?'), findsOneWidget);
       expect(
         find.text('Poprzedni czas utrzymany stabilnie — dokładamy 5 s.'),
         findsOneWidget,
       );
+
+      // Szczegóły są ZWINIĘTE — użytkownik nie jest zalewany danymi.
+      expect(find.text('Wartość bazowa'), findsNothing);
+      await tester.tap(find.byKey(const Key('recommendation_details_toggle')));
+      await tester.pumpAndSettle();
+      expect(find.text('Wartość bazowa'), findsOneWidget);
+      expect(find.text('Rekomendacja'), findsOneWidget);
+      expect(find.text('2 × 45 s · przerwa 60 s'), findsOneWidget); // baza
       expect(find.text('Oparto na Twojej historii tego ćwiczenia.'),
           findsOneWidget);
       expect(tester.takeException(), isNull);
@@ -152,6 +161,8 @@ void main() {
       ));
       await tester.pump();
       await tester.tap(find.text('2 × 50 s · przerwa 60 s'));
+      await tester.pumpAndSettle();
+      await tester.tap(find.byKey(const Key('recommendation_details_toggle')));
       await tester.pumpAndSettle();
 
       expect(find.textContaining('Za mało wykonań'), findsOneWidget);

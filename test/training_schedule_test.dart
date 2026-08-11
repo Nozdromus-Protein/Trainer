@@ -143,7 +143,10 @@ void main() {
       expect(legsLater.single.date.isAfter(legsDay), isTrue);
     });
 
-    test('zmęczony dodatek dnia odpada, ale nie przestawia rozkładu', () {
+    test('zmęczony dodatek dnia ZOSTAJE, ale dostaje ostrzeżenie', () {
+      // ZMIANA ZASADY (spec 12): dodatek o niskiej gotowości nie może znikać
+      // z rozkładu — wtedy użytkownik nie ma czego kliknąć. Zostaje w dniu
+      // z ostrzeżeniem i rekomendacją.
       final base = buildSchedule(config, monday, 7);
       final extra = base.first.secondaryArea!;
 
@@ -154,8 +157,21 @@ void main() {
 
       expect(resolved.first.area, base.first.area,
           reason: 'partia główna zostaje na swoim dniu');
-      expect(resolved.first.secondaryArea, isNull);
-      expect(resolved.first.note.toLowerCase(), contains('pomijamy'));
+      expect(resolved.first.secondaryArea, extra,
+          reason: 'dodatek dnia nie może zostać skasowany przez regenerację');
+      expect(resolved.first.hasSecondaryWarning, isTrue);
+      expect(resolved.first.secondaryReadinessPercent, 20);
+      expect(resolved.first.secondaryWarning.toLowerCase(),
+          contains('gotowość'));
+      expect(resolved.first.secondaryWarning.toLowerCase(),
+          contains('możesz kontynuować'));
+    });
+
+    test('gotowy dodatek dnia nie dostaje żadnego ostrzeżenia', () {
+      final base = buildSchedule(config, monday, 7);
+      final resolved = resolveScheduleWithRecovery(base, (area, date) => 95);
+      expect(resolved.first.hasSecondaryWarning, isFalse);
+      expect(resolved.first.secondaryReadinessPercent, 95);
     });
 
     test('gdy wszystko jest gotowe, rozkład zostaje nietknięty', () {

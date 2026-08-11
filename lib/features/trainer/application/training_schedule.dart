@@ -460,6 +460,8 @@ class ScheduledDay {
     this.loadTier = DayLoadTier.full,
     this.intensityScale = 1.0,
     this.readinessPercent = 100,
+    this.secondaryReadinessPercent = 100,
+    this.secondaryWarning = '',
   });
 
   final DateTime date;
@@ -489,6 +491,18 @@ class ScheduledDay {
 
   /// Gotowość (regeneracja %) bloku głównego w tym dniu.
   final double readinessPercent;
+
+  /// Gotowość DODATKU dnia (tor drugorzędny). 100 = brak zastrzeżeń.
+  final double secondaryReadinessPercent;
+
+  /// Ostrzeżenie dotyczące dodatku dnia. Puste = brak uwag.
+  ///
+  /// Dodatek NIGDY nie jest usuwany z rozkładu z powodu regeneracji — wcześniej
+  /// znikał, przez co po pierwszym zestawie dnia nie dało się kliknąć drugiego.
+  /// Teraz zostaje z ostrzeżeniem, a decyzja należy do użytkownika (spec 12/34).
+  final String secondaryWarning;
+
+  bool get hasSecondaryWarning => secondaryWarning.isNotEmpty;
 
   bool get moved => movedFrom != null;
 
@@ -532,6 +546,8 @@ class ScheduledDay {
     DayLoadTier? loadTier,
     double? intensityScale,
     double? readinessPercent,
+    double? secondaryReadinessPercent,
+    String? secondaryWarning,
   }) =>
       ScheduledDay(
         date: date,
@@ -545,6 +561,9 @@ class ScheduledDay {
         loadTier: loadTier ?? this.loadTier,
         intensityScale: intensityScale ?? this.intensityScale,
         readinessPercent: readinessPercent ?? this.readinessPercent,
+        secondaryReadinessPercent:
+            secondaryReadinessPercent ?? this.secondaryReadinessPercent,
+        secondaryWarning: secondaryWarning ?? this.secondaryWarning,
       );
 
   /// Postać przekazywana planerowi tygodnia (czyste dane, bez cyklu importów).
@@ -687,10 +706,17 @@ List<ScheduledDay> resolveScheduleWithRecovery(
     }
   }
 
-  // Dodatek dnia odpada, gdy jego WŁASNE partie są jeszcze zmęczone. Partie
-  // wspólne z blokiem głównym TEGO SAMEGO dnia są wyłączone z oceny — są dziś
-  // trenowane razem (barki po klatce, ramiona po plecach), więc ich zmęczenie
-  // nie może kasować dodatku. To ono zamykało dzień po pierwszym zestawie.
+  // DODATEK DNIA — OSTRZEGAMY, NIE KASUJEMY (spec: punkt 12).
+  //
+  // Wcześniej dodatek o niskiej gotowości był po prostu usuwany z dnia
+  // (`clearSecondary`). Skutek zgłoszony przez użytkownika: po zrobieniu Push
+  // zestaw „Barki" znikał / był skreślony i nie dało się go kliknąć, mimo że
+  // był w planie dnia. Regeneracja ma INFORMOWAĆ i REKOMENDOWAĆ, a nie odbierać
+  // możliwość wykonania zaplanowanego treningu.
+  //
+  // Teraz dodatek zostaje zawsze, a niska gotowość zapisuje się jako
+  // [ScheduledDay.secondaryWarning] — UI pokazuje przy nim czerwony trójkąt
+  // z wyjaśnieniem i rekomendacją.
   for (var i = 0; i < result.length; i++) {
     final day = result[i];
     final extra = day.secondaryArea;
@@ -699,11 +725,17 @@ List<ScheduledDay> resolveScheduleWithRecovery(
     final extraReadiness = readinessIgnoring == null
         ? readiness(extra, day.date)
         : readinessIgnoring(extra, day.date, sharedWithMain);
-    if (extraReadiness >= minReadiness) continue;
-    final note = day.note.isEmpty
-        ? '${extra.label} pomijamy — jeszcze się regeneruje.'
-        : '${day.note} ${extra.label} pomijamy — jeszcze się regeneruje.';
-    result[i] = day.copyWith(clearSecondary: true, note: note);
+    if (extraReadiness >= minReadiness) {
+      result[i] = day.copyWith(secondaryReadinessPercent: extraReadiness);
+      continue;
+    }
+    result[i] = day.copyWith(
+      secondaryReadinessPercent: extraReadiness,
+      secondaryWarning:
+          '${extra.label}: szacowana gotowość ${extraReadiness.round()}%. '
+          'Możesz kontynuować trening — Trainer rekomenduje mniejszą '
+          'intensywność albo objętość.',
+    );
   }
   return result;
 }

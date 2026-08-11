@@ -73,6 +73,14 @@ class SessionPrescription {
     this.isCalibrating = false,
     this.manualDurationSec = 0,
     this.generatedAtIso = '',
+    this.decisionKey = '',
+    this.reasonBullets = const [],
+    this.confidence = 0,
+    this.targetRir = 0,
+    this.previousSummary = '',
+    this.deltaSummary = '',
+    this.limitingMuscleLabel = '',
+    this.limitingReadinessPercent = 0,
   });
 
   /// Bazowy plan programu — NIE jest trwale nadpisywany przez rekomendację.
@@ -99,7 +107,44 @@ class SessionPrescription {
   /// Kiedy recepta powstała (ISO8601) — snapshot sesji.
   final String generatedAtIso;
 
+  // ===== Wytłumaczalność rekomendacji (spec: punkty 16–19) =====
+
+  /// Decyzja silnika: `PROGRESS` | `MAINTAIN` | `REDUCE` | `DELOAD` |
+  /// `RECOVERY_SESSION`. Puste = starszy zapis bez decyzji.
+  final String decisionKey;
+
+  /// Powody rekomendacji w formacie `+opis` / `-opis` (spec 17).
+  /// Trzymane jako proste stringi, żeby zapis sesji pozostał kompatybilny.
+  final List<String> reasonBullets;
+
+  /// Pewność rekomendacji 0–1 (0 = starszy zapis bez oceny).
+  final double confidence;
+
+  /// Docelowy zapas powtórzeń do upadku (0 = nie wyznaczono).
+  final int targetRir;
+
+  /// Skrót poprzedniego wykonania („90 kg × 10 · RPE 8,5").
+  final String previousSummary;
+
+  /// Co się zmieniło względem ostatniego treningu („+2,5 kg").
+  final String deltaSummary;
+
+  /// Partia, która najbardziej ograniczyła rekomendację (nazwa dla UI).
+  final String limitingMuscleLabel;
+
+  /// Gotowość tej partii (0 = brak danych).
+  final double limitingReadinessPercent;
+
   bool get manuallyOverridden => manualDurationSec > 0;
+
+  /// Czy recepta niesie pełne wyjaśnienie (nowy format).
+  bool get hasExplanation => reasonBullets.isNotEmpty || decisionKey.isNotEmpty;
+
+  List<String> get positiveReasons =>
+      [for (final r in reasonBullets) if (r.startsWith('+')) r.substring(1).trim()];
+
+  List<String> get negativeReasons =>
+      [for (final r in reasonBullets) if (r.startsWith('-')) r.substring(1).trim()];
 
   // ===== Które wartości rekomendacja zmieniła względem planu bazowego =====
 
@@ -133,6 +178,14 @@ class SessionPrescription {
     bool? isCalibrating,
     int? manualDurationSec,
     String? generatedAtIso,
+    String? decisionKey,
+    List<String>? reasonBullets,
+    double? confidence,
+    int? targetRir,
+    String? previousSummary,
+    String? deltaSummary,
+    String? limitingMuscleLabel,
+    double? limitingReadinessPercent,
   }) =>
       SessionPrescription(
         base: base ?? this.base,
@@ -143,6 +196,15 @@ class SessionPrescription {
         isCalibrating: isCalibrating ?? this.isCalibrating,
         manualDurationSec: manualDurationSec ?? this.manualDurationSec,
         generatedAtIso: generatedAtIso ?? this.generatedAtIso,
+        decisionKey: decisionKey ?? this.decisionKey,
+        reasonBullets: reasonBullets ?? this.reasonBullets,
+        confidence: confidence ?? this.confidence,
+        targetRir: targetRir ?? this.targetRir,
+        previousSummary: previousSummary ?? this.previousSummary,
+        deltaSummary: deltaSummary ?? this.deltaSummary,
+        limitingMuscleLabel: limitingMuscleLabel ?? this.limitingMuscleLabel,
+        limitingReadinessPercent:
+            limitingReadinessPercent ?? this.limitingReadinessPercent,
       );
 
   Map<String, dynamic> toJson() => {
@@ -154,6 +216,16 @@ class SessionPrescription {
         'isCalibrating': isCalibrating,
         if (manualDurationSec > 0) 'manualDurationSec': manualDurationSec,
         if (generatedAtIso.isNotEmpty) 'generatedAtIso': generatedAtIso,
+        if (decisionKey.isNotEmpty) 'decisionKey': decisionKey,
+        if (reasonBullets.isNotEmpty) 'reasonBullets': reasonBullets,
+        if (confidence > 0) 'confidence': confidence,
+        if (targetRir > 0) 'targetRir': targetRir,
+        if (previousSummary.isNotEmpty) 'previousSummary': previousSummary,
+        if (deltaSummary.isNotEmpty) 'deltaSummary': deltaSummary,
+        if (limitingMuscleLabel.isNotEmpty)
+          'limitingMuscleLabel': limitingMuscleLabel,
+        if (limitingReadinessPercent > 0)
+          'limitingReadinessPercent': limitingReadinessPercent,
       };
 
   factory SessionPrescription.fromJson(Map<String, dynamic> json) =>
@@ -168,5 +240,17 @@ class SessionPrescription {
         isCalibrating: json['isCalibrating'] as bool? ?? false,
         manualDurationSec: (json['manualDurationSec'] as num?)?.toInt() ?? 0,
         generatedAtIso: json['generatedAtIso']?.toString() ?? '',
+        decisionKey: json['decisionKey']?.toString() ?? '',
+        reasonBullets: [
+          for (final value in (json['reasonBullets'] as List? ?? const []))
+            value.toString(),
+        ],
+        confidence: (json['confidence'] as num?)?.toDouble() ?? 0,
+        targetRir: (json['targetRir'] as num?)?.toInt() ?? 0,
+        previousSummary: json['previousSummary']?.toString() ?? '',
+        deltaSummary: json['deltaSummary']?.toString() ?? '',
+        limitingMuscleLabel: json['limitingMuscleLabel']?.toString() ?? '',
+        limitingReadinessPercent:
+            (json['limitingReadinessPercent'] as num?)?.toDouble() ?? 0,
       );
 }

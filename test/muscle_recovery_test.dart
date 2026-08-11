@@ -173,12 +173,18 @@ void main() {
       expect(map, isEmpty);
     });
 
+    // Progi gotowości wg spec 20: 90+ bardzo dobra, 75–89 dobra,
+    // 55–74 umiarkowana, 35–54 niska, <35 bardzo niska. Te same granice
+    // nakłada `recoveryColor`, więc kolor i opis zawsze się zgadzają.
     test('recoveryStatusForPercent buckets', () {
       expect(recoveryStatusForPercent(null), RecoveryStatus.unknown);
       expect(recoveryStatusForPercent(10), RecoveryStatus.freshFatigue);
-      expect(recoveryStatusForPercent(30), RecoveryStatus.heavyFatigue);
-      expect(recoveryStatusForPercent(50), RecoveryStatus.recovering);
-      expect(recoveryStatusForPercent(70), RecoveryStatus.almostRecovered);
+      expect(recoveryStatusForPercent(34), RecoveryStatus.freshFatigue);
+      expect(recoveryStatusForPercent(35), RecoveryStatus.heavyFatigue);
+      expect(recoveryStatusForPercent(50), RecoveryStatus.heavyFatigue);
+      expect(recoveryStatusForPercent(60), RecoveryStatus.recovering);
+      expect(recoveryStatusForPercent(74), RecoveryStatus.recovering);
+      expect(recoveryStatusForPercent(80), RecoveryStatus.almostRecovered);
       expect(recoveryStatusForPercent(95), RecoveryStatus.recovered);
     });
   });

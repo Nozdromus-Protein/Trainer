@@ -9,7 +9,7 @@ import 'package:file_picker/file_picker.dart';
 import 'package:flutter/foundation.dart' show kDebugMode, kIsWeb;
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart'
-    show rootBundle, Clipboard, ClipboardData;
+    show rootBundle, Clipboard, ClipboardData, HapticFeedback;
 import 'package:http/http.dart' as http;
 import 'package:image_picker/image_picker.dart';
 import 'package:path_provider/path_provider.dart';
@@ -25,6 +25,8 @@ import 'features/trainer/application/plan_ai_advisor.dart';
 import 'features/trainer/application/plan_blueprint.dart';
 import 'features/trainer/application/plan_quality_analyzer.dart';
 import 'features/trainer/application/plan_substitution.dart';
+import 'features/trainer/application/recommendation_engine.dart';
+import 'features/trainer/application/recovery_personalization.dart';
 import 'features/trainer/application/session_pace.dart';
 import 'features/trainer/application/training_coach.dart';
 import 'features/trainer/application/training_schedule.dart';
@@ -1459,6 +1461,15 @@ class AppStore extends ChangeNotifier {
   /// ([TrainingFocusArea.name]) → identyfikator zestawu użytkownika.
   static const _planSubstitutionsKey = 'plan_area_substitutions_v1';
 
+  /// Indywidualna kalibracja modelu regeneracji (spec: punkt 6).
+  static const _recoveryCalibrationKey = RecoveryCalibrationProfile.storageKey;
+
+  /// Migawki stanu partii zapisywane po treningu (spec: punkt 25).
+  static const _recoverySnapshotsKey = 'trainer_recovery_snapshots_v1';
+
+  /// Ile migawek regeneracji trzymamy lokalnie (event-based, nie co sekundę).
+  static const int kMaxRecoverySnapshots = 600;
+
   /// Migracja metadanych pochodzenia zestawów ([PlanOrigin]).
   /// Starsze zapisy nie mają pola `origin` — nadajemy im tryb na podstawie
   /// REALNEGO źródła (katalog programów vs zestaw własny), nie losowo.
@@ -1473,6 +1484,14 @@ class AppStore extends ChangeNotifier {
   /// Własne zestawy podstawione pod obszary rozkładu (brzuch za brzuch).
   /// Klucz: [TrainingFocusArea.name], wartość: id zestawu użytkownika.
   final Map<String, String> planAreaSubstitutions = {};
+
+  /// Indywidualna kalibracja stałych czasowych regeneracji (spec 6).
+  /// Pusta = model bazowy z literatury bez korekt.
+  RecoveryCalibrationProfile recoveryCalibration =
+      RecoveryCalibrationProfile.empty;
+
+  /// Migawki stanu partii (spec 25) — zapisywane ZDARZENIOWO po treningu.
+  final List<RecoverySnapshot> recoverySnapshots = [];
 
   /// Ukończone programy rozgrzewkowe: id rozgrzewki → moment ukończenia.
   /// Bramka ciężkiego dnia honoruje wpis tylko przez [kWarmupFreshness].
@@ -1908,6 +1927,37 @@ class AppStore extends ChangeNotifier {
         }
       } catch (error) {
         debugPrint('[Zestawy] Nieczytelne podmiany zestawów: $error');
+      }
+    }
+
+    // Kalibracja regeneracji + migawki stanu partii. Brak / uszkodzony zapis
+    // oznacza po prostu model bazowy — nie wolno mu wywalić startu aplikacji.
+    final rawCalibration = prefs.getString(_recoveryCalibrationKey);
+    if (rawCalibration != null && rawCalibration.isNotEmpty) {
+      try {
+        final decoded = jsonDecode(rawCalibration);
+        if (decoded is Map) {
+          recoveryCalibration = RecoveryCalibrationProfile.fromJson(
+              Map<String, dynamic>.from(decoded));
+        }
+      } catch (error) {
+        debugPrint('[Regeneracja] Nieczytelna kalibracja: $error');
+      }
+    }
+    final rawSnapshots = prefs.getString(_recoverySnapshotsKey);
+    if (rawSnapshots != null && rawSnapshots.isNotEmpty) {
+      try {
+        final decoded = jsonDecode(rawSnapshots);
+        if (decoded is List) {
+          for (final item in decoded) {
+            if (item is! Map) continue;
+            final snapshot = RecoverySnapshot.fromJson(
+                Map<String, dynamic>.from(item));
+            if (snapshot != null) recoverySnapshots.add(snapshot);
+          }
+        }
+      } catch (error) {
+        debugPrint('[Regeneracja] Nieczytelne migawki: $error');
       }
     }
 
@@ -2607,10 +2657,17 @@ class AppStore extends ChangeNotifier {
     // uruchamiać całego kalkulatora dla pustej listy.
     final computed = earlier.isEmpty
         ? const <BodyMuscle, MuscleRecoveryState>{}
-        : RecoveryCalculator(profile: settings.toRecoveryProfile()).compute(
+        : RecoveryCalculator(
+            profile: settings.toRecoveryProfile(),
+            environment: recoveryEnvironment(reference),
+            calibration: recoveryCalibration,
+          ).compute(
             logs: earlier,
             resolveExercise: (id) => ExerciseRepo.byId(id, customExercises),
             activities: activityEntries,
+            // Oswojenie z ćwiczeniem liczymy z PEŁNEJ historii — okrojona lista
+            // dnia fałszywie wyglądałaby jak „pierwszy raz w życiu".
+            historyForFamiliarity: logs,
             now: reference,
           );
     _recoveryBeforeTodayCache = computed;
@@ -2620,16 +2677,61 @@ class AppStore extends ChangeNotifier {
 
   /// Czy WSZYSTKIE zestawy tego dnia rozkładu zostały wykonane (tor
   /// pierwszorzędny i drugorzędny). Zasila kalendarz i „Dzisiejszy trening".
-  bool isScheduleDayDone(ScheduledDay day) {
-    if (day.isRest || day.area == null) return false;
-    if (logsForDay(day.date).isEmpty) return false;
-    for (final area in day.areas) {
-      // Obszary bez partii definiujących (mobilność) nie mają jak się „odhaczyć"
-      // — nie blokują uznania dnia za wykonany.
-      if (area.signatureMuscles.isEmpty) continue;
-      if (!_areaTrainedToday(area, day.date)) return false;
+  bool isScheduleDayDone(ScheduledDay day) =>
+      scheduleDayStatus(day) == ScheduleDayStatus.completed;
+
+  /// Postęp dnia rozkładu: ile zaplanowanych zestawów jest wykonanych.
+  ///
+  /// Liczy się KAŻDY tor dnia, który da się „odhaczyć" (ma partie definiujące).
+  /// Dzień z jednym zestawem domyka się po jednym, dzień z trzema — po trzech;
+  /// nic nie jest zaszyte pod „dokładnie dwa zestawy" (spec 13).
+  ({int done, int required, bool anyLogs}) scheduleDayProgress(
+      ScheduledDay day) {
+    if (day.isRest || day.area == null) {
+      return (done: 0, required: 0, anyLogs: false);
     }
-    return true;
+    final anyLogs = logsForDay(day.date).isNotEmpty;
+    var done = 0;
+    var required = 0;
+    for (final area in day.areas) {
+      // Obszary bez partii definiujących (mobilność, cardio) nie mają jak się
+      // „odhaczyć" — nie wliczamy ich do wymaganych.
+      if (area.signatureMuscles.isEmpty) continue;
+      required++;
+      if (_areaTrainedToday(area, day.date)) done++;
+    }
+    return (done: done, required: required, anyLogs: anyLogs);
+  }
+
+  /// Status dowolnej DATY — także spoza okna rozstrzygniętego rozkładu.
+  ///
+  /// Dla dat w oknie używa dnia rozstrzygniętego (z przestawieniami Planera),
+  /// a poza nim czyta plan tygodnia wprost. Wersja „tania": nie uruchamia
+  /// pełnego rozwiązywania rozkładu, bo kalendarz miesiąca woła ją ~30 razy.
+  ScheduleDayStatus scheduleDayStatusForDate(DateTime date) {
+    final resolved = resolvedDayFor(date);
+    if (resolved != null) return scheduleDayStatus(resolved);
+    final plan = trainingScheduleConfig.planForWeekday(date.weekday);
+    if (plan.isRest) {
+      return logsForDay(date).isEmpty
+          ? ScheduleDayStatus.notStarted
+          : ScheduleDayStatus.completed;
+    }
+    return scheduleDayStatus(ScheduledDay(
+      date: DateTime(date.year, date.month, date.day),
+      area: plan.primary,
+      secondaryArea: plan.secondary,
+    ));
+  }
+
+  /// Status dnia rozkładu (spec 13): NIEROZPOCZĘTY / CZĘŚCIOWY / WYKONANY.
+  ScheduleDayStatus scheduleDayStatus(ScheduledDay day) {
+    final progress = scheduleDayProgress(day);
+    return scheduleStatusFor(
+      done: progress.done,
+      required: progress.required,
+      anyLogs: progress.anyLogs,
+    );
   }
 
   /// Dzień rozkładu przypadający na DZIŚ (obszar, deload, ewentualne
@@ -3039,6 +3141,76 @@ class AppStore extends ChangeNotifier {
     return result;
   }
 
+  /// Ostrzeżenie o gotowości dla obszaru dnia — INFORMACYJNE, nigdy blokujące.
+  ///
+  /// Zwraca listę zmęczonych partii DEFINIUJĄCYCH obszar oraz najniższą
+  /// gotowość. Dzięki temu drugi zestaw dnia („Barki" po „Push") pokazuje
+  /// czerwony trójkąt zamiast znikać z planu (spec 12).
+  ({
+    double readiness,
+    String warning,
+    List<({String label, double percent})> muscles
+  }) _readinessWarningForArea(TrainingFocusArea area, DateTime now) {
+    final recovery = muscleRecoveryMap(now);
+    final fatigued = <({String label, double percent})>[];
+    var worst = 100.0;
+    // Bierzemy partie DEFINIUJĄCE obszar oraz te, które realnie w nim pracują —
+    // po dniu pchania to właśnie przedni akton barku bywa najbardziej zmęczony.
+    final muscles = <BodyMuscle>{...area.signatureMuscles, ...area.muscles};
+    for (final muscle in muscles) {
+      final state = recovery[muscle];
+      if (state == null || !state.hasData) continue;
+      final percent = state.readinessFor(TrainingStimulusKind.hypertrophy);
+      if (percent < worst) worst = percent;
+      if (percent < 60) {
+        fatigued.add((label: muscle.label, percent: percent));
+      }
+    }
+    fatigued.sort((a, b) => a.percent.compareTo(b.percent));
+    if (fatigued.isEmpty) {
+      return (readiness: worst, warning: '', muscles: const []);
+    }
+    final first = fatigued.first;
+    return (
+      readiness: worst,
+      warning: '${first.label} otrzymał już duży bodziec. Szacowana gotowość: '
+          '${first.percent.round()}%. Możesz kontynuować trening, ale Trainer '
+          'rekomenduje zmniejszenie intensywności lub objętości.',
+      muscles: fatigued,
+    );
+  }
+
+  /// Ile serii zapisano dziś w ramach tego obszaru/planu (postęp częściowy).
+  int _completedSetCountToday(
+    TrainingFocusArea area,
+    WorkoutPlan? plan,
+    DateTime now,
+  ) {
+    var sets = 0;
+    for (final log in logsForDay(now)) {
+      final belongsToPlan = plan != null &&
+          (log.planId == plan.id ||
+              (log.planId.isEmpty &&
+                  plan.name.isNotEmpty &&
+                  log.sessionName.startsWith(plan.name)));
+      var matchesArea = false;
+      if (!belongsToPlan) {
+        final def = ExerciseRepo.byId(log.exerciseId, customExercises);
+        for (final impact in def.effectiveMuscleImpacts) {
+          if (impact.role == MuscleRole.primary &&
+              area.signatureMuscles.contains(impact.muscleGroup)) {
+            matchesArea = true;
+            break;
+          }
+        }
+      }
+      if (!belongsToPlan && !matchesArea) continue;
+      final logged = log.workoutSets.where((s) => s.isCompleted).length;
+      sets += logged > 0 ? logged : (log.sets > 0 ? log.sets : 1);
+    }
+    return sets;
+  }
+
   TodayTrainingBlock _blockFor(
     TrainingFocusArea area, {
     required int order,
@@ -3051,6 +3223,8 @@ class AppStore extends ChangeNotifier {
     final substituted = substitutedPlanForArea(area);
     final plan = substituted ?? (catalogId == null ? null : planForArea(area));
     final trainedArea = _areaTrainedToday(area, now);
+    final warning = _readinessWarningForArea(area, now);
+    final completedSets = _completedSetCountToday(area, plan, now);
 
     if (plan == null || plan.days.isEmpty) {
       return TodayTrainingBlock(
@@ -3058,6 +3232,10 @@ class AppStore extends ChangeNotifier {
         area: area,
         catalogProgramId: catalogId,
         isDone: trainedArea,
+        completedSetCount: completedSets,
+        readinessPercent: warning.readiness,
+        readinessWarning: trainedArea ? '' : warning.warning,
+        fatiguedMuscles: trainedArea ? const [] : warning.muscles,
       );
     }
 
@@ -3089,6 +3267,35 @@ class AppStore extends ChangeNotifier {
       isDone: plan.isProgramCompleted ||
           _planTrainedToday(plan, now) ||
           trainedArea,
+      completedSetCount: completedSets,
+      readinessPercent: warning.readiness,
+      readinessWarning: trainedArea ? '' : warning.warning,
+      fatiguedMuscles: trainedArea ? const [] : warning.muscles,
+    );
+  }
+
+  /// Rekomendacja KOLEJNOŚCI zestawów w dniu (spec: punkt 28).
+  ///
+  /// Gdy blok pierwszorzędny mocno obciąża partie, które DEFINIUJĄ blok
+  /// drugorzędny (klasycznie: Push → przedni akton barków), Trainer mówi to
+  /// wprost i proponuje odwrócenie kolejności, jeśli priorytetem jest dodatek.
+  /// To WYŁĄCZNIE rekomendacja — kolejność zmienia użytkownik, nie aplikacja.
+  TrainingOrderAdvice? todayOrderAdvice([DateTime? now]) {
+    final blocks = todayTrainingBlocks(now);
+    if (blocks.length < 2) return null;
+    final first = blocks[0];
+    final second = blocks[1];
+    if (first.isDone || second.isDone) return null;
+    final loaded = first.area.muscles.toSet();
+    final shared = <BodyMuscle>[
+      for (final muscle in second.area.signatureMuscles)
+        if (loaded.contains(muscle)) muscle,
+    ];
+    if (shared.isEmpty) return null;
+    return TrainingOrderAdvice(
+      firstArea: first.area,
+      secondArea: second.area,
+      sharedMuscles: shared,
     );
   }
 
@@ -6483,27 +6690,104 @@ class AppStore extends ChangeNotifier {
         }
       }
     }
+    // Rekomendacja wzbogacona o GOTOWOŚĆ i WYTŁUMACZALNOŚĆ (spec 16/17).
+    // Silnik może parametry obniżyć i powiedzieć dlaczego — nigdy nie blokuje
+    // wykonania zestawu.
+    final enriched = const RecommendationEngine().build(
+      exercise: def,
+      coachRecommendation: SetRecommendation(
+        sets: rec.sets,
+        reps: rec.reps,
+        weightKg: recommendedWeight,
+        durationSec: rec.durationSec,
+        restSeconds: rec.restSeconds,
+        reasons: rec.reasons,
+        isCalibrating: rec.isCalibrating,
+        calibrationNote: rec.calibrationNote,
+      ),
+      base: base,
+      ctx: coachContext(),
+      history: history,
+      context: recommendationContext(),
+      deloadSignals: deloadSignalsNow(),
+    );
     final recommended = Prescription(
-      sets: rec.sets < 1 ? 1 : rec.sets,
-      reps: rec.reps,
-      weightKg: recommendedWeight,
-      durationSec: rec.durationSec,
-      restSeconds: rec.restSeconds,
+      sets: enriched.prescription.sets < 1 ? 1 : enriched.prescription.sets,
+      reps: enriched.prescription.reps,
+      weightKg: enriched.prescription.weightKg,
+      durationSec: enriched.prescription.durationSec,
+      restSeconds: enriched.prescription.restSeconds,
     );
     return SessionPrescription(
       base: base,
       recommended: recommended,
-      reason: cautiousNote.isEmpty
-          ? rec.reasons.join(' ')
-          : '${rec.reasons.join(' ')} $cautiousNote — '
-              '${cautious!.reasons.isEmpty ? 'dokładamy ostrożnie.' : cautious.reasons.first}',
+      reason: [
+        cautiousNote.isEmpty
+            ? rec.reasons.join(' ')
+            : '${rec.reasons.join(' ')} $cautiousNote — '
+                '${cautious!.reasons.isEmpty ? 'dokładamy ostrożnie.' : cautious.reasons.first}',
+        if (enriched.volumeAdvice.isNotEmpty) enriched.volumeAdvice,
+      ].where((part) => part.trim().isNotEmpty).join(' '),
       dataSource: rec.isCalibrating
           ? 'calibration'
           : (history.isNotEmpty ? 'history' : 'base'),
       hasEnoughHistory: history.isNotEmpty && !rec.isCalibrating,
       isCalibrating: rec.isCalibrating,
       generatedAtIso: DateTime.now().toIso8601String(),
+      decisionKey: enriched.decision.key,
+      reasonBullets: [
+        for (final reason in enriched.reasons.take(6))
+          '${reason.positive ? '+' : '-'}${reason.label}',
+      ],
+      confidence: enriched.confidence,
+      targetRir: enriched.targetRir,
+      previousSummary: enriched.previousSummary,
+      deltaSummary: enriched.deltaSummary,
+      limitingMuscleLabel: enriched.limitingMuscle?.label ?? '',
+      limitingReadinessPercent:
+          enriched.limitingMuscle == null ? 0 : enriched.limitingReadiness,
     );
+  }
+
+  /// Kontekst regeneracyjny dla silnika rekomendacji (gotowość + otoczenie).
+  RecommendationContext recommendationContext([DateTime? now]) {
+    final reference = now ?? DateTime.now();
+    final computation = recoveryComputation(reference);
+    final deload = deloadStatusOn(reference);
+    return RecommendationContext(
+      readinessByMuscle: muscleRecoveryMap(reference),
+      environment: recoveryEnvironment(reference),
+      systemicFatigue: computation.systemicFatigue,
+      acuteChronicRatio: computation.acuteChronic.ratio,
+      hasLoadBaseline: computation.acuteChronic.hasBaseline,
+      isDeloadWeek: deload.isActive && deload.isDeload,
+      cycleIntensity: deload.intensityFactor,
+    );
+  }
+
+  // Sygnały deloadu są liczone po całej historii — cache jak reszta modelu.
+  DeloadSignals? _deloadSignalsCache;
+  String _deloadSignalsKey = '';
+
+  /// Sygnały przemawiające za deloadem (spec 27) — zbieżność kilku, nie jeden
+  /// słaby dzień.
+  DeloadSignals deloadSignalsNow([DateTime? now]) {
+    final reference = now ?? DateTime.now();
+    final bucket = reference.millisecondsSinceEpoch ~/ 900000;
+    final key = '${logs.length}_${logs.isEmpty ? '' : logs.first.id}_$bucket';
+    final cached = _deloadSignalsCache;
+    if (cached != null && key == _deloadSignalsKey) return cached;
+    final computation = recoveryComputation(reference);
+    final signals = detectDeloadSignals(
+      recentLogs: logs,
+      readiness: muscleRecoveryMap(reference),
+      systemicFatigue: computation.systemicFatigue,
+      acuteChronicRatio: computation.acuteChronic.ratio,
+      now: reference,
+    );
+    _deloadSignalsCache = signals;
+    _deloadSignalsKey = key;
+    return signals;
   }
 
   /// Ciężar, jaki ta pozycja zestawu dostanie na starcie treningu.
@@ -7462,6 +7746,14 @@ class AppStore extends ChangeNotifier {
     workoutResumePromptPending = false;
     workoutResumeColdStart = false;
     await saveActiveWorkoutSession();
+    // Uczenie i historia gotowości: PO zapisaniu treningu, ale przed
+    // powiadomieniem UI — dzięki temu mapa regeneracji i podsumowanie widzą
+    // już zaktualizowaną kalibrację.
+    await _learnFromFinishedSession(
+      sessionLogs: completedLogs,
+      sessionStartedAt: session.startedAt,
+      endedAt: endedAt,
+    );
     notifyListeners();
     // Kopia w chmurze po zakończeniu treningu — wymuszona (bez throttla), ale
     // ODROCZONA. `buildFullExport` + `jsonEncode` całej historii to sekundy
@@ -7489,6 +7781,144 @@ class AppStore extends ChangeNotifier {
     }
     return summary;
   }
+
+  // ===== Uczenie modelu regeneracji po zakończonej sesji (spec 6 i 25) =====
+
+  /// Porównuje PROGNOZĘ gotowości sprzed sesji z REALNĄ wydajnością w sesji,
+  /// aktualizuje kalibrację użytkownika i zapisuje migawkę stanu partii.
+  ///
+  /// Wszystko jest odporne na braki danych: bez historii ćwiczenia nie ma
+  /// z czym porównywać, więc obserwacja po prostu nie powstaje.
+  Future<void> _learnFromFinishedSession({
+    required List<WorkoutLog> sessionLogs,
+    required DateTime sessionStartedAt,
+    required DateTime endedAt,
+  }) async {
+    if (sessionLogs.isEmpty) return;
+    try {
+      final sessionIds = <String>{
+        for (final log in sessionLogs) log.sessionId,
+      };
+      final history = [
+        for (final log in logs)
+          if (!sessionIds.contains(log.sessionId) &&
+              log.effectivePerformedAt.isBefore(sessionStartedAt))
+            log,
+      ];
+
+      // 1. Co model przewidywał NA START sesji (bez wpisów z tej sesji).
+      final predicted = <BodyMuscle, double>{};
+      if (history.isNotEmpty) {
+        final before = RecoveryCalculator(
+          profile: settings.toRecoveryProfile(),
+          environment: recoveryEnvironment(sessionStartedAt),
+          calibration: recoveryCalibration,
+        ).compute(
+          logs: history,
+          resolveExercise: (id) => ExerciseRepo.byId(id, customExercises),
+          activities: activityEntries,
+          historyForFamiliarity: history,
+          now: sessionStartedAt,
+        );
+        before.forEach((muscle, state) {
+          final percent = state.recoveryPercent;
+          if (percent != null) predicted[muscle] = percent;
+        });
+      }
+
+      // 2. Kalibracja: prognoza vs. realna wydajność.
+      if (predicted.isNotEmpty) {
+        const service = RecoveryPersonalizationService();
+        final observations = service.observationsFor(
+          sessionLogs: sessionLogs,
+          history: history,
+          predictedAtStart: predicted,
+          resolveExercise: (id) => ExerciseRepo.byId(id, customExercises),
+        );
+        if (observations.isNotEmpty) {
+          final updated =
+              service.apply(recoveryCalibration, observations, at: endedAt);
+          if (!identical(updated, recoveryCalibration)) {
+            recoveryCalibration = updated;
+            _recoveryCacheKey = '';
+            _recoveryBeforeTodayKey = '';
+            await _saveRecoveryCalibration();
+          }
+        }
+      }
+
+      // 3. Migawka stanu partii obciążonych w tej sesji (spec 25).
+      await _recordRecoverySnapshots(sessionLogs, endedAt);
+    } catch (error) {
+      // Uczenie jest DODATKIEM — jego awaria nie może zepsuć zapisu treningu.
+      debugPrint('[Regeneracja] Nie udało się zaktualizować modelu: $error');
+    }
+  }
+
+  /// Zapisuje migawkę gotowości partii obciążonych w sesji.
+  Future<void> _recordRecoverySnapshots(
+    List<WorkoutLog> sessionLogs,
+    DateTime at,
+  ) async {
+    final touched = <BodyMuscle>{};
+    for (final log in sessionLogs) {
+      final exercise = ExerciseRepo.byId(log.exerciseId, customExercises);
+      for (final impact in exercise.effectiveMuscleImpacts) {
+        if (impact.role == MuscleRole.stabilizer) continue;
+        touched.add(impact.muscleGroup);
+      }
+    }
+    if (touched.isEmpty) return;
+    _recoveryCacheKey = '';
+    final map = muscleRecoveryMap(at);
+    var added = false;
+    for (final muscle in touched) {
+      final readiness = map[muscle]?.readiness;
+      if (readiness == null) continue;
+      recoverySnapshots
+          .add(RecoverySnapshot.from(readiness, timestamp: at));
+      added = true;
+    }
+    if (!added) return;
+    if (recoverySnapshots.length > kMaxRecoverySnapshots) {
+      recoverySnapshots.removeRange(
+          0, recoverySnapshots.length - kMaxRecoverySnapshots);
+    }
+    await _saveRecoverySnapshots();
+  }
+
+  Future<void> _saveRecoveryCalibration() async {
+    final prefs = await SharedPreferences.getInstance();
+    if (recoveryCalibration.isEmpty) {
+      await prefs.remove(_recoveryCalibrationKey);
+      return;
+    }
+    await prefs.setString(
+        _recoveryCalibrationKey, jsonEncode(recoveryCalibration.toJson()));
+  }
+
+  Future<void> _saveRecoverySnapshots() async {
+    final prefs = await SharedPreferences.getInstance();
+    if (recoverySnapshots.isEmpty) {
+      await prefs.remove(_recoverySnapshotsKey);
+      return;
+    }
+    await prefs.setString(
+      _recoverySnapshotsKey,
+      jsonEncode([for (final s in recoverySnapshots) s.toJson()]),
+    );
+  }
+
+  /// Migawki gotowości JEDNEJ partii, od najnowszej (do wykresów i analiz).
+  List<RecoverySnapshot> recoverySnapshotsFor(BodyMuscle muscle,
+          {int limit = 30}) =>
+      [
+        for (final snapshot in recoverySnapshots.reversed)
+          if (snapshot.muscle == muscle) snapshot,
+      ].take(limit).toList();
+
+  /// Ile partii ma już ugruntowaną kalibrację indywidualną.
+  int get calibratedMuscleCount => recoveryCalibration.calibratedMuscleCount;
 
   /// Ile czekamy z kopią w chmurze po zakończeniu treningu. Na tyle długo, żeby
   /// podsumowanie zdążyło się otworzyć i zamknąć bez rywalizacji o wątek UI.
@@ -7565,9 +7995,58 @@ class AppStore extends ChangeNotifier {
   // żeby robić je w każdym buildzie / ticku timera. Odświeżany, gdy zmienią się
   // logi, profil użytkownika albo minie minuta.
   Map<BodyMuscle, MuscleRecoveryState>? _recoveryCache;
+  RecoveryComputation? _recoveryComputationCache;
   String _recoveryCacheKey = '';
 
-  /// Mapa regeneracji partii mięśniowych z historii treningów (Etap regeneracji).
+  /// Warunki regeneracji spoza treningu: sen z Health Connect, aktywność dnia,
+  /// odżywianie (gdy dostępne). Brak danych = neutralny modyfikator i NIŻSZA
+  /// pewność prognozy — nigdy błąd ani sztuczna kara (spec 9/10/31).
+  RecoveryEnvironment recoveryEnvironment([DateTime? now]) {
+    final reference = now ?? DateTime.now();
+    final today = DateTime(reference.year, reference.month, reference.day);
+    TrainerHealthConnectSnapshot? latest;
+    var sleepSum = 0;
+    var sleepCount = 0;
+    var steps = 0;
+    for (final snapshot in healthConnectSnapshots) {
+      final date =
+          DateTime(snapshot.date.year, snapshot.date.month, snapshot.date.day);
+      if (date.isAfter(today)) continue;
+      if (today.difference(date).inDays > 7) continue;
+      if (snapshot.sleepMinutes > 0) {
+        sleepSum += snapshot.sleepMinutes;
+        sleepCount++;
+      }
+      if (latest == null || date.isAfter(
+          DateTime(latest.date.year, latest.date.month, latest.date.day))) {
+        latest = snapshot;
+      }
+    }
+    if (latest != null) steps = latest.steps;
+    return RecoveryEnvironment(
+      // Sen „ostatniej nocy" bierzemy z najświeższej migawki, a średnią
+      // z całego tygodnia — krótka noc waży, ale nie decyduje sama.
+      sleepMinutes: latest?.sleepMinutes ?? 0,
+      sleepMinutesAverage: sleepCount == 0 ? 0 : (sleepSum / sleepCount).round(),
+      bodyWeightKg: settings.bodyWeightKg,
+      dailyStepCount: steps,
+    );
+  }
+
+  /// Pełny wynik silnika regeneracji (gotowość + zmęczenie ogólne + obciążenie).
+  RecoveryComputation recoveryComputation([DateTime? now]) {
+    muscleRecoveryMap(now);
+    return _recoveryComputationCache ??
+        const RecoveryComputation(
+          byMuscle: {},
+          systemicFatigue: 0,
+          acuteChronic: AcuteChronicLoad.unknown,
+          confidenceInputs: [],
+          missingInputs: [],
+        );
+  }
+
+  /// Mapa GOTOWOŚCI partii mięśniowych z historii treningów.
   /// Puste, gdy brak danych — UI pokazuje wtedy wszystkie mięśnie jako szare/unknown.
   Map<BodyMuscle, MuscleRecoveryState> muscleRecoveryMap([DateTime? now]) {
     final reference = now ?? DateTime.now();
@@ -7575,17 +8054,25 @@ class AppStore extends ChangeNotifier {
     final key = '${logs.length}_${logs.isEmpty ? '' : logs.first.id}_'
         '${customExercises.length}_$minuteBucket'
         '_${activityEntries.length}_${activityEntries.isEmpty ? '' : activityEntries.first.id}'
+        '_${healthConnectSnapshots.length}'
+        '_${recoveryCalibration.byMuscle.length}'
         '_${settings.bodyWeightKg}_${settings.age}_${settings.sex}_${settings.level}_${settings.trainingWeekdays.length}';
     final cached = _recoveryCache;
     if (cached != null && key == _recoveryCacheKey) return cached;
-    final computed =
-        RecoveryCalculator(profile: settings.toRecoveryProfile()).compute(
+    final calculator = RecoveryCalculator(
+      profile: settings.toRecoveryProfile(),
+      environment: recoveryEnvironment(reference),
+      calibration: recoveryCalibration,
+    );
+    final computation = calculator.computeDetailed(
       logs: logs,
       resolveExercise: (id) => ExerciseRepo.byId(id, customExercises),
       activities: activityEntries,
       now: reference,
     );
+    final computed = calculator.statesFrom(computation, now: reference);
     _recoveryCache = computed;
+    _recoveryComputationCache = computation;
     _recoveryCacheKey = key;
     return computed;
   }
@@ -15106,9 +15593,15 @@ class TrainingWeekCalendarCard extends StatelessWidget {
           index < schedule.length ? schedule[index] : null;
       final bool deload = planDay?.isDeload ?? store.isDeloadDate(day);
       final bool rest = planDay?.isRest ?? false;
-      // Dzień ODHACZONY: oba tory (pierwszo- i drugorzędny) wykonane.
-      // Karteczka przygasa i dostaje ptaszka — widać, co zostało zamknięte.
-      final bool dayDone = planDay != null && store.isScheduleDayDone(planDay);
+      // Status dnia (spec 13): NIEROZPOCZĘTY / CZĘŚCIOWY / WYKONANY.
+      // Wykonany dzień przygasa i dostaje ptaszka; dzień CZĘŚCIOWY (np. zrobiony
+      // Push, a Barki jeszcze przed nami) dostaje kółko z MINUSEM — wcześniej
+      // wyglądał dokładnie tak samo jak dzień, w którym nic się nie wydarzyło.
+      final ScheduleDayStatus dayStatus = planDay == null
+          ? ScheduleDayStatus.notStarted
+          : store.scheduleDayStatus(planDay);
+      final bool dayDone = dayStatus.isDone;
+      final bool dayPartial = dayStatus.isPartial;
       // Dzień deloadu przejmuje kolor bursztynowy (spójnie z kalendarzem).
       final Color chipAccent = deload ? kDeloadColor : accent;
       final Color chipText = isSelected
@@ -15198,6 +15691,25 @@ class TrainingWeekCalendarCard extends StatelessWidget {
                                     color: isSelected
                                         ? chipAccent
                                         : theme.colorScheme.surface,
+                                  ),
+                                )
+                              else if (dayPartial)
+                                // Kółko z MINUSEM = dzień częściowo wykonany.
+                                Container(
+                                  key: Key('calendar_day_partial_$index'),
+                                  padding: const EdgeInsets.all(1),
+                                  decoration: BoxDecoration(
+                                    color: theme.colorScheme.surface,
+                                    shape: BoxShape.circle,
+                                    border: Border.all(
+                                        color:
+                                            isSelected ? chipText : chipAccent,
+                                        width: 1.6),
+                                  ),
+                                  child: Icon(
+                                    Icons.remove_rounded,
+                                    size: 10,
+                                    color: isSelected ? chipText : chipAccent,
                                   ),
                                 ),
                             ],
@@ -15378,14 +15890,19 @@ class _TrainingCalendarDialogState extends State<_TrainingCalendarDialog> {
       final deload = widget.store.isDeloadDate(date);
       final projected = widget.store.projectedProgramDayForDate(date);
       final programDay = projected == null ? null : projected.index + 1;
+      // Status dnia (spec 13). Dzień CZĘŚCIOWO wykonany nie może wyglądać
+      // identycznie jak w pełni zamknięty — dostaje obwódkę i minus zamiast
+      // pełnego wypełnienia.
+      final status = widget.store.scheduleDayStatusForDate(date);
+      final partial = trained && status.isPartial;
       // Trening ma pierwszeństwo (dotknięcie → historia). Dzień deloadu bez
       // treningu koloruje się na bursztynowo i pokazuje opis odciążenia.
-      final fill = trained
+      final fill = trained && !partial
           ? accent
           : (deload
               ? kDeloadColor.withValues(alpha: 0.85)
               : Colors.transparent);
-      final onFill = trained || (deload && !trained);
+      final onFill = (trained && !partial) || (deload && !trained);
       return InkWell(
         // Każdy dzień jest klikalny — podgląd pokazuje fazę cyklu, intensywność
         // i zestaw, także dla dat w przeszłości i w przyszłości.
@@ -15401,18 +15918,25 @@ class _TrainingCalendarDialogState extends State<_TrainingCalendarDialog> {
           decoration: BoxDecoration(
             shape: BoxShape.circle,
             color: fill,
-            border: trained && deload
-                ? Border.all(color: kDeloadColor, width: 1.6)
-                : (isToday && !trained && !deload
-                    ? Border.all(
-                        color: accent.withValues(alpha: 0.7), width: 1.4)
-                    : null),
+            border: partial
+                ? Border.all(color: accent, width: 1.8)
+                : (trained && deload
+                    ? Border.all(color: kDeloadColor, width: 1.6)
+                    : (isToday && !trained && !deload
+                        ? Border.all(
+                            color: accent.withValues(alpha: 0.7), width: 1.4)
+                        : null)),
           ),
           alignment: Alignment.center,
           child: Column(
             mainAxisAlignment: MainAxisAlignment.center,
             mainAxisSize: MainAxisSize.min,
             children: [
+              if (partial)
+                Icon(Icons.remove_rounded,
+                    key: Key('calendar_partial_day_$day'),
+                    size: 9,
+                    color: accent),
               Text(
                 '$day',
                 style: theme.textTheme.bodySmall?.copyWith(
@@ -17349,6 +17873,70 @@ class PlannerDayChange {
   }
 }
 
+/// Rekomendacja kolejności zestawów w dniu (spec: punkt 28).
+class TrainingOrderAdvice {
+  const TrainingOrderAdvice({
+    required this.firstArea,
+    required this.secondArea,
+    required this.sharedMuscles,
+  });
+
+  /// Blok zaplanowany jako pierwszy.
+  final TrainingFocusArea firstArea;
+
+  /// Blok zaplanowany jako drugi.
+  final TrainingFocusArea secondArea;
+
+  /// Partie definiujące drugi blok, które pierwszy blok i tak mocno obciąży.
+  final List<BodyMuscle> sharedMuscles;
+
+  String get muscleList => sharedMuscles.map((m) => m.label).join(', ');
+
+  String get message =>
+      'Wykonanie „${firstArea.label}" jako pierwszego mocno obciąży: $muscleList. '
+      'Jeśli priorytetem jest dziś „${secondArea.label}", Trainer rekomenduje '
+      'zacząć od niego.';
+}
+
+/// Status wykonania dnia rozkładu (spec: punkt 13).
+///
+/// Dzień z dwoma zestawami, z którego zrobiono jeden, nie jest ani pusty, ani
+/// zamknięty — potrzebuje własnego stanu. Kalendarz rysuje go kółkiem
+/// z MINUSEM w środku.
+enum ScheduleDayStatus {
+  notStarted('Niewykonany'),
+  partiallyCompleted('Częściowo wykonany'),
+  completed('Wykonany');
+
+  const ScheduleDayStatus(this.label);
+
+  final String label;
+
+  bool get isDone => this == ScheduleDayStatus.completed;
+  bool get isPartial => this == ScheduleDayStatus.partiallyCompleted;
+  bool get hasAnyProgress => this != ScheduleDayStatus.notStarted;
+}
+
+/// Status dnia z samego POSTĘPU — czysta funkcja, niezależna od liczby torów.
+///
+/// Świadomie NIE zakłada „dokładnie dwóch zestawów" (spec 13): działa dla 1/2,
+/// 1/3, 2/3, 1/4, 3/4… Dzień jest WYKONANY dopiero wtedy, gdy wszystkie
+/// wymagane zestawy są zrobione.
+ScheduleDayStatus scheduleStatusFor({
+  required int done,
+  required int required,
+  bool anyLogs = false,
+}) {
+  if (required <= 0) {
+    // Dzień bez „odhaczalnych" zestawów (mobilność, cardio): sam fakt treningu
+    // wystarczy, żeby nie wyglądał na pusty.
+    return anyLogs ? ScheduleDayStatus.completed : ScheduleDayStatus.notStarted;
+  }
+  if (done >= required) return ScheduleDayStatus.completed;
+  if (done > 0 || anyLogs) return ScheduleDayStatus.partiallyCompleted;
+  return ScheduleDayStatus.notStarted;
+}
+
 class TodayTrainingBlock {
   const TodayTrainingBlock({
     required this.order,
@@ -17364,6 +17952,10 @@ class TodayTrainingBlock {
     this.setCount = 0,
     this.estimatedMinutes = 0,
     this.isDone = false,
+    this.completedSetCount = 0,
+    this.readinessPercent = 100,
+    this.readinessWarning = '',
+    this.fatiguedMuscles = const [],
   });
 
   /// 1 = pierwszorzędny (partia główna dnia), 2 = drugorzędny (dodatek).
@@ -17385,9 +17977,30 @@ class TodayTrainingBlock {
   final int estimatedMinutes;
   final bool isDone;
 
+  /// Ile serii z tego bloku zostało dziś już zapisanych (postęp częściowy).
+  final int completedSetCount;
+
+  /// Szacowana gotowość partii tego bloku (0–100).
+  final double readinessPercent;
+
+  /// Ostrzeżenie o gotowości. NIGDY nie blokuje wejścia w zestaw (spec 12) —
+  /// UI pokazuje przy nim czerwony trójkąt i rekomendację.
+  final String readinessWarning;
+
+  /// Partie, przez które zapaliło się ostrzeżenie (nazwa + gotowość).
+  final List<({String label, double percent})> fatiguedMuscles;
+
+  bool get hasReadinessWarning => readinessWarning.isNotEmpty;
+
+  /// Mocne ostrzeżenie — partia poniżej 40% gotowości.
+  bool get isSevereWarning => hasReadinessWarning && readinessPercent < 40;
+
   bool get isStarted => planId.isNotEmpty && dayIndex >= 0;
   bool get hasProgram => catalogProgramId != null;
   bool get isPrimary => order <= 1;
+
+  /// Blok ROZPOCZĘTY, ale jeszcze niedomknięty (spec 13).
+  bool get isPartiallyDone => !isDone && completedSetCount > 0;
 
   String get trackLabel => isPrimary ? 'Pierwszorzędny' : 'Drugorzędny';
 
@@ -23560,6 +24173,7 @@ class _TrainingPlannerHeroCardState extends State<TrainingPlannerHeroCard> {
   Future<void> _pickEquipment() async {
     final choice = await showModalBottomSheet<String>(
       context: context,
+      useSafeArea: true,
       showDragHandle: true,
       builder: (sheetContext) {
         final options = <(String, String, IconData)>[
@@ -23578,7 +24192,10 @@ class _TrainingPlannerHeroCardState extends State<TrainingPlannerHeroCard> {
           ('full_gym', 'Pełna siłownia', Icons.warehouse_rounded),
           ('outdoor', 'Trening na zewnątrz', Icons.park_rounded),
         ];
+        // `useSafeArea` chroni tylko górę arkusza — dół (pasek nawigacji /
+        // obszar gestów) trzeba obsłużyć tutaj (spec 18).
         return SafeArea(
+          top: false,
           child: Column(
             mainAxisSize: MainAxisSize.min,
             children: [
@@ -24049,7 +24666,8 @@ class _TrainingPlannerHeroCardState extends State<TrainingPlannerHeroCard> {
           maxChildSize: 0.9,
           builder: (_, controller) => ListView(
             controller: controller,
-            padding: uiInsets(context, const EdgeInsets.fromLTRB(16, 0, 16, 24)),
+            padding: sheetContentInsets(
+                sheetContext, const EdgeInsets.fromLTRB(16, 0, 16, 24)),
             children: [
               Text('Dlaczego Planer podjął tę decyzję?',
                   style: theme.textTheme.titleLarge
@@ -24238,6 +24856,7 @@ class _TodayBlocksSection extends StatelessWidget {
   Widget build(BuildContext context) {
     final theme = Theme.of(context);
     final scheme = theme.colorScheme;
+    final orderAdvice = AppScope.of(context).todayOrderAdvice();
     return Column(
       key: const Key('today_blocks_section'),
       crossAxisAlignment: CrossAxisAlignment.stretch,
@@ -24254,6 +24873,32 @@ class _TodayBlocksSection extends StatelessWidget {
           Padding(
             padding: const EdgeInsets.only(bottom: 8),
             child: _TodayBlockRow(block: block),
+          ),
+        // REKOMENDACJA kolejności (spec 28) — Trainer nie przestawia zestawów
+        // sam, tylko mówi, co z czego wynika.
+        if (orderAdvice != null)
+          Container(
+            key: const Key('today_order_advice'),
+            padding: const EdgeInsets.all(10),
+            decoration: BoxDecoration(
+              color: scheme.surfaceContainerHighest.withValues(alpha: 0.45),
+              borderRadius: BorderRadius.circular(12),
+              border:
+                  Border.all(color: scheme.outlineVariant.withValues(alpha: 0.6)),
+            ),
+            child: Row(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Icon(Icons.swap_vert_rounded,
+                    size: 17, color: scheme.onSurfaceVariant),
+                const SizedBox(width: 8),
+                Expanded(
+                  child: Text(orderAdvice.message,
+                      style:
+                          theme.textTheme.bodySmall?.copyWith(height: 1.35)),
+                ),
+              ],
+            ),
           ),
       ],
     );
@@ -24281,7 +24926,10 @@ class _TodayBlockRow extends StatelessWidget {
       child: InkWell(
         key: Key('today_block_${block.order}'),
         borderRadius: BorderRadius.circular(14),
-        onTap: done ? null : () => openTrainingBlock(context, block),
+        // ZAWSZE klikalne (spec 12/34). Regeneracja ostrzega, nie zabiera
+        // możliwości wejścia w zaplanowany zestaw; wykonany zestaw też da się
+        // otworzyć ponownie (np. żeby dorzucić serię).
+        onTap: () => openTrainingBlock(context, block),
         child: Padding(
           padding: const EdgeInsets.fromLTRB(12, 10, 10, 10),
           child: Row(
@@ -24298,21 +24946,38 @@ class _TodayBlockRow extends StatelessWidget {
                 ),
                 child: done
                     ? Icon(Icons.check_rounded, size: 15, color: accent)
-                    : Text('${block.order}',
-                        style: theme.textTheme.labelMedium?.copyWith(
-                            fontWeight: FontWeight.w900, color: accent)),
+                    : (block.isPartiallyDone
+                        ? Icon(Icons.remove_rounded, size: 15, color: accent)
+                        : Text('${block.order}',
+                            style: theme.textTheme.labelMedium?.copyWith(
+                                fontWeight: FontWeight.w900, color: accent))),
               ),
               const SizedBox(width: 10),
               Expanded(
                 child: Column(
                   crossAxisAlignment: CrossAxisAlignment.start,
                   children: [
-                    Text(
-                      '${block.trackLabel.toUpperCase()} · ${block.area.label}',
-                      style: theme.textTheme.labelSmall?.copyWith(
-                          fontWeight: FontWeight.w900,
-                          letterSpacing: 0.5,
-                          color: accent),
+                    Row(
+                      children: [
+                        Flexible(
+                          child: Text(
+                            '${block.trackLabel.toUpperCase()} · ${block.area.label}',
+                            maxLines: 1,
+                            overflow: TextOverflow.ellipsis,
+                            style: theme.textTheme.labelSmall?.copyWith(
+                                fontWeight: FontWeight.w900,
+                                letterSpacing: 0.5,
+                                color: accent),
+                          ),
+                        ),
+                        // 🔺 OSTRZEŻENIE, NIE BLOKADA (spec 12): zestaw zostaje
+                        // klikalny, a trójkąt otwiera wyjaśnienie z gotowością
+                        // i rekomendacją.
+                        if (!done && block.hasReadinessWarning) ...[
+                          const SizedBox(width: 6),
+                          _BlockReadinessWarningBadge(block: block),
+                        ],
+                      ],
                     ),
                     const SizedBox(height: 2),
                     Text(
@@ -24329,7 +24994,10 @@ class _TodayBlockRow extends StatelessWidget {
                     Text(
                       done
                           ? 'Wykonane dziś · ${block.contentLabel}'
-                          : block.contentLabel,
+                          : (block.isPartiallyDone
+                              ? 'Rozpoczęte dziś (${block.completedSetCount} '
+                                  '${TodayTrainingBlock._plural(block.completedSetCount, 'seria', 'serie', 'serii')}) · ${block.contentLabel}'
+                              : block.contentLabel),
                       style: theme.textTheme.bodySmall
                           ?.copyWith(color: scheme.onSurfaceVariant),
                     ),
@@ -24345,14 +25013,155 @@ class _TodayBlockRow extends StatelessWidget {
                   ],
                 ),
               ),
-              if (!done)
-                Icon(Icons.chevron_right_rounded, color: scheme.primary),
+              Icon(Icons.chevron_right_rounded,
+                  color: done ? scheme.onSurfaceVariant : scheme.primary),
             ],
           ),
         ),
       ),
     );
   }
+}
+
+/// Czerwony trójkąt z wykrzyknikiem przy zestawie o obniżonej gotowości.
+///
+/// Kliknięcie otwiera pełne wyjaśnienie: które partie dostały już bodziec,
+/// jaka jest szacowana gotowość i co Trainer rekomenduje. Zestaw pozostaje
+/// w pełni dostępny — to jest ostrzeżenie, nie zakaz (spec 12/34).
+class _BlockReadinessWarningBadge extends StatelessWidget {
+  const _BlockReadinessWarningBadge({required this.block});
+
+  final TodayTrainingBlock block;
+
+  @override
+  Widget build(BuildContext context) {
+    final theme = Theme.of(context);
+    final color =
+        block.isSevereWarning ? theme.colorScheme.error : const Color(0xFFE08600);
+    return InkWell(
+      key: Key('block_readiness_warning_${block.order}'),
+      borderRadius: BorderRadius.circular(20),
+      onTap: () => showBlockReadinessWarningSheet(context, block),
+      child: Padding(
+        padding: const EdgeInsets.symmetric(horizontal: 4, vertical: 2),
+        child: Row(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            Icon(Icons.warning_amber_rounded, size: 16, color: color),
+            const SizedBox(width: 3),
+            Text('${block.readinessPercent.round()}%',
+                style: theme.textTheme.labelSmall
+                    ?.copyWith(fontWeight: FontWeight.w900, color: color)),
+          ],
+        ),
+      ),
+    );
+  }
+}
+
+/// Wyjaśnienie ostrzeżenia o gotowości bloku dnia (spec 12).
+Future<void> showBlockReadinessWarningSheet(
+  BuildContext context,
+  TodayTrainingBlock block,
+) async {
+  await showModalBottomSheet<void>(
+    context: context,
+    isScrollControlled: true,
+    useSafeArea: true,
+    showDragHandle: true,
+    builder: (sheetContext) {
+      final theme = Theme.of(sheetContext);
+      final scheme = theme.colorScheme;
+      final color =
+          block.isSevereWarning ? scheme.error : const Color(0xFFE08600);
+      // PRZEWIJALNE: na niskim ekranie (albo przy dużej czcionce systemowej)
+      // treść ostrzeżenia nie mieści się w stałej kolumnie.
+      return SafeArea(
+        top: false,
+        child: SingleChildScrollView(
+          padding: sheetContentInsets(
+              sheetContext, const EdgeInsets.fromLTRB(20, 4, 20, 20)),
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Row(
+                children: [
+                  Icon(Icons.warning_amber_rounded, color: color),
+                  const SizedBox(width: 10),
+                  Expanded(
+                    child: Text('Uwaga',
+                        style: theme.textTheme.titleLarge
+                            ?.copyWith(fontWeight: FontWeight.w900)),
+                  ),
+                ],
+              ),
+              const SizedBox(height: 10),
+              Text(
+                block.readinessWarning,
+                style: theme.textTheme.bodyMedium?.copyWith(height: 1.4),
+              ),
+              if (block.fatiguedMuscles.isNotEmpty) ...[
+                const SizedBox(height: 14),
+                Text('Aktualna szacowana gotowość',
+                    style: theme.textTheme.labelLarge
+                        ?.copyWith(fontWeight: FontWeight.w900)),
+                const SizedBox(height: 6),
+                for (final muscle in block.fatiguedMuscles.take(5))
+                  Padding(
+                    padding: const EdgeInsets.symmetric(vertical: 3),
+                    child: Row(
+                      children: [
+                        Expanded(child: Text(muscle.label)),
+                        Text('${muscle.percent.round()}%',
+                            style: theme.textTheme.bodyMedium?.copyWith(
+                                fontWeight: FontWeight.w900,
+                                color: recoveryColor(muscle.percent,
+                                    dark: theme.brightness == Brightness.dark))),
+                      ],
+                    ),
+                  ),
+              ],
+              const SizedBox(height: 16),
+              Text(
+                'To jest rekomendacja, nie blokada — możesz wejść w ten zestaw '
+                'w każdej chwili.',
+                style: theme.textTheme.bodySmall
+                    ?.copyWith(color: scheme.onSurfaceVariant, height: 1.35),
+              ),
+              const SizedBox(height: 14),
+              Row(
+                children: [
+                  Expanded(
+                    child: OutlinedButton.icon(
+                      onPressed: () {
+                        Navigator.pop(sheetContext);
+                        openMuscleRecoveryPage(context);
+                      },
+                      icon: const Icon(Icons.self_improvement_rounded, size: 18),
+                      label: const Text('Regeneracja'),
+                    ),
+                  ),
+                  const SizedBox(width: 10),
+                  Expanded(
+                    child: FilledButton.icon(
+                      key: const Key('warning_start_anyway'),
+                      onPressed: () {
+                        Navigator.pop(sheetContext);
+                        openTrainingBlock(context, block);
+                      },
+                      icon: const Icon(Icons.play_arrow_rounded, size: 18),
+                      label: const Text('Trenuj mimo to'),
+                    ),
+                  ),
+                ],
+              ),
+            ],
+          ),
+        ),
+      );
+    },
+  );
 }
 
 /// Pasek podmiany zestawu pod blokiem dnia.
@@ -26984,22 +27793,75 @@ void showRecommendationExplainSheet(
     isScrollControlled: true,
     useSafeArea: true,
     showDragHandle: true,
-    builder: (sheetContext) {
-      final theme = Theme.of(sheetContext);
-      final entryType = exercise.entryType;
-      final scheme = theme.colorScheme;
-      String dataSourceText;
-      if (rx.isCalibrating) {
-        dataSourceText =
-            'Za mało wykonań — Trainer zbiera dane. Rekomendacja opiera się na planie bazowym i profilu.';
-      } else if (rx.hasEnoughHistory) {
-        dataSourceText = 'Oparto na Twojej historii tego ćwiczenia.';
-      } else {
-        dataSourceText =
-            'Brak wystarczającej lub poprawnej historii — użyto planu bazowego programu.';
+    builder: (sheetContext) => _RecommendationExplainSheet(
+      exercise: exercise,
+      prescription: rx,
+    ),
+  );
+}
+
+/// Arkusz „dlaczego taka rekomendacja" (spec: punkty 17 i 19).
+///
+/// HIERARCHIA: najpierw JEDNA główna rekomendacja (ciężar / serie × powtórzenia
+/// / RIR), pod nią subtelna różnica względem ostatniego treningu, potem
+/// zwijalne „Dlaczego?" z powodami, a dopiero na końcu szczegóły (plan bazowy,
+/// źródło danych, tryb progresji). Użytkownik nie jest zalewany danymi — widzi
+/// jedną liczbę i jeden powód, resztę rozwija sam.
+class _RecommendationExplainSheet extends StatefulWidget {
+  const _RecommendationExplainSheet({
+    required this.exercise,
+    required this.prescription,
+  });
+
+  final Exercise exercise;
+  final SessionPrescription prescription;
+
+  @override
+  State<_RecommendationExplainSheet> createState() =>
+      _RecommendationExplainSheetState();
+}
+
+class _RecommendationExplainSheetState
+    extends State<_RecommendationExplainSheet> {
+  bool _whyExpanded = true;
+  bool _detailsExpanded = false;
+
+  @override
+  Widget build(BuildContext context) {
+    final theme = Theme.of(context);
+    final scheme = theme.colorScheme;
+    final rx = widget.prescription;
+    final entryType = widget.exercise.entryType;
+    final eff = rx.effective;
+    final decision = RecommendationDecision.fromKey(rx.decisionKey);
+
+    String dataSourceText;
+    if (rx.isCalibrating) {
+      dataSourceText =
+          'Za mało wykonań — Trainer zbiera dane. Rekomendacja opiera się na planie bazowym i profilu.';
+    } else if (rx.hasEnoughHistory) {
+      dataSourceText = 'Oparto na Twojej historii tego ćwiczenia.';
+    } else {
+      dataSourceText =
+          'Brak wystarczającej lub poprawnej historii — użyto planu bazowego programu.';
+    }
+
+    // GŁÓWNA linia rekomendacji: to, co użytkownik ma dziś zrobić.
+    final headlineParts = <String>[];
+    if (entryType.showsDuration && !entryType.showsReps) {
+      headlineParts.add('${eff.sets} × ${rx.effectiveDurationSec} s');
+    } else {
+      if (entryType.showsWeight && eff.weightKg > 0) {
+        headlineParts.add('${_formatPlanWeight(eff.weightKg)} kg');
       }
-      return SingleChildScrollView(
-        padding: const EdgeInsets.fromLTRB(20, 4, 20, 24),
+      headlineParts.add('${eff.sets} × ${eff.reps}');
+    }
+
+    return SafeArea(
+      top: false,
+      child: SingleChildScrollView(
+        padding: sheetContentInsets(
+            context, const EdgeInsets.fromLTRB(20, 4, 20, 20)),
         child: Column(
           crossAxisAlignment: CrossAxisAlignment.start,
           mainAxisSize: MainAxisSize.min,
@@ -27013,61 +27875,275 @@ void showRecommendationExplainSheet(
                       style: theme.textTheme.titleLarge
                           ?.copyWith(fontWeight: FontWeight.w900)),
                 ),
+                if (rx.confidence > 0)
+                  _RecommendationConfidencePill(confidence: rx.confidence),
               ],
             ),
             const SizedBox(height: 2),
-            Text(exercise.name,
+            Text(widget.exercise.name,
                 style: theme.textTheme.bodyMedium
                     ?.copyWith(color: scheme.onSurfaceVariant)),
-            const SizedBox(height: 16),
-            _explainRow(
-                theme,
-                'Wartość bazowa',
-                _prescriptionSideText(rx.base, entryType),
-                scheme.onSurfaceVariant),
-            const SizedBox(height: 8),
-            _explainRow(
-                theme,
-                'Rekomendacja',
-                _prescriptionSideText(rx.recommended, entryType),
-                scheme.primary,
-                bold: true),
-            if (rx.manuallyOverridden) ...[
+            const SizedBox(height: 18),
+
+            // 1. GŁÓWNA REKOMENDACJA.
+            Text(
+              headlineParts.join('  ·  '),
+              key: const Key('recommendation_headline'),
+              style: theme.textTheme.displaySmall
+                  ?.copyWith(fontWeight: FontWeight.w900, height: 1.05),
+            ),
+            if (rx.targetRir > 0) ...[
+              const SizedBox(height: 4),
+              Text('RIR ${rx.targetRir} — tyle powtórzeń zostaw w zapasie',
+                  style: theme.textTheme.titleSmall?.copyWith(
+                      color: scheme.primary, fontWeight: FontWeight.w800)),
+            ],
+            if (eff.restSeconds > 0) ...[
+              const SizedBox(height: 2),
+              Text('Przerwa ${eff.restSeconds} s',
+                  style: theme.textTheme.bodyMedium
+                      ?.copyWith(color: scheme.onSurfaceVariant)),
+            ],
+
+            // 2. RÓŻNICA WZGLĘDEM OSTATNIEGO TRENINGU (subtelnie).
+            if (rx.deltaSummary.isNotEmpty) ...[
+              const SizedBox(height: 8),
+              Row(
+                children: [
+                  Icon(Icons.trending_up_rounded,
+                      size: 16, color: scheme.onSurfaceVariant),
+                  const SizedBox(width: 6),
+                  Flexible(
+                    child: Text(rx.deltaSummary,
+                        key: const Key('recommendation_delta'),
+                        style: theme.textTheme.bodySmall
+                            ?.copyWith(color: scheme.onSurfaceVariant)),
+                  ),
+                ],
+              ),
+            ],
+            if (rx.decisionKey.isNotEmpty) ...[
+              const SizedBox(height: 10),
+              _DecisionChip(decision: decision),
+            ],
+
+            // 3. DLACZEGO?
+            if (rx.reasonBullets.isNotEmpty || rx.reason.trim().isNotEmpty) ...[
+              const SizedBox(height: 16),
+              InkWell(
+                key: const Key('recommendation_why_toggle'),
+                borderRadius: BorderRadius.circular(10),
+                onTap: () => setState(() => _whyExpanded = !_whyExpanded),
+                child: Padding(
+                  padding: const EdgeInsets.symmetric(vertical: 4),
+                  child: Row(
+                    children: [
+                      Text('Dlaczego?',
+                          style: theme.textTheme.titleSmall
+                              ?.copyWith(fontWeight: FontWeight.w900)),
+                      const Spacer(),
+                      Icon(
+                          _whyExpanded
+                              ? Icons.expand_less_rounded
+                              : Icons.expand_more_rounded,
+                          color: scheme.onSurfaceVariant),
+                    ],
+                  ),
+                ),
+              ),
+              if (_whyExpanded) ...[
+                const SizedBox(height: 4),
+                if (rx.reasonBullets.isEmpty)
+                  Text(rx.reason.trim(),
+                      style: theme.textTheme.bodyMedium?.copyWith(height: 1.4))
+                else
+                  for (final bullet in rx.reasonBullets)
+                    _ReasonRow(bullet: bullet),
+              ],
+            ],
+
+            // 4. SZCZEGÓŁY (domyślnie zwinięte).
+            const SizedBox(height: 12),
+            InkWell(
+              key: const Key('recommendation_details_toggle'),
+              borderRadius: BorderRadius.circular(10),
+              onTap: () => setState(() => _detailsExpanded = !_detailsExpanded),
+              child: Padding(
+                padding: const EdgeInsets.symmetric(vertical: 4),
+                child: Row(
+                  children: [
+                    Text('Szczegóły analizy',
+                        style: theme.textTheme.titleSmall?.copyWith(
+                            fontWeight: FontWeight.w900,
+                            color: scheme.onSurfaceVariant)),
+                    const Spacer(),
+                    Icon(
+                        _detailsExpanded
+                            ? Icons.expand_less_rounded
+                            : Icons.expand_more_rounded,
+                        color: scheme.onSurfaceVariant),
+                  ],
+                ),
+              ),
+            ),
+            if (_detailsExpanded) ...[
+              const SizedBox(height: 8),
+              if (rx.previousSummary.isNotEmpty) ...[
+                _explainRow(theme, 'Poprzednio', rx.previousSummary,
+                    scheme.onSurfaceVariant),
+                const SizedBox(height: 8),
+              ],
+              _explainRow(theme, 'Wartość bazowa',
+                  _prescriptionSideText(rx.base, entryType),
+                  scheme.onSurfaceVariant),
               const SizedBox(height: 8),
               _explainRow(
                   theme,
-                  'Twoja zmiana',
-                  _prescriptionSideText(rx.effective, entryType,
-                      durationOverride: rx.effectiveDurationSec),
-                  scheme.tertiary,
+                  'Rekomendacja',
+                  _prescriptionSideText(rx.recommended, entryType),
+                  scheme.primary,
                   bold: true),
+              if (rx.manuallyOverridden) ...[
+                const SizedBox(height: 8),
+                _explainRow(
+                    theme,
+                    'Twoja zmiana',
+                    _prescriptionSideText(rx.effective, entryType,
+                        durationOverride: rx.effectiveDurationSec),
+                    scheme.tertiary,
+                    bold: true),
+              ],
+              if (rx.limitingMuscleLabel.isNotEmpty) ...[
+                const SizedBox(height: 8),
+                _explainRow(
+                    theme,
+                    'Gotowość partii',
+                    '${rx.limitingMuscleLabel} · ${rx.limitingReadinessPercent.round()}%',
+                    recoveryColor(rx.limitingReadinessPercent,
+                        dark: theme.brightness == Brightness.dark)),
+              ],
+              const SizedBox(height: 12),
+              Text(dataSourceText,
+                  style: theme.textTheme.bodySmall
+                      ?.copyWith(height: 1.4, color: scheme.onSurfaceVariant)),
+              const SizedBox(height: 6),
+              Text('Progresja tego ćwiczenia: ${entryType.progressionMode}.',
+                  style: theme.textTheme.bodySmall
+                      ?.copyWith(color: scheme.onSurfaceVariant)),
+              const SizedBox(height: 6),
+              Text(
+                'Wartości są SZACUNKIEM modelu, nie pomiarem — Trainer modeluje '
+                'stan mięśni, nie mierzy go.',
+                style: theme.textTheme.bodySmall?.copyWith(
+                    color: scheme.onSurfaceVariant,
+                    fontStyle: FontStyle.italic),
+              ),
             ],
-            if (rx.reason.trim().isNotEmpty) ...[
-              const SizedBox(height: 16),
-              Text('Powód',
-                  style: theme.textTheme.labelLarge
-                      ?.copyWith(fontWeight: FontWeight.w800)),
-              const SizedBox(height: 4),
-              Text(rx.reason.trim(),
-                  style: theme.textTheme.bodyMedium?.copyWith(height: 1.4)),
-            ],
-            const SizedBox(height: 16),
-            Text('Dane rekomendacji',
-                style: theme.textTheme.labelLarge
-                    ?.copyWith(fontWeight: FontWeight.w800)),
-            const SizedBox(height: 4),
-            Text(dataSourceText,
-                style: theme.textTheme.bodyMedium
-                    ?.copyWith(height: 1.4, color: scheme.onSurfaceVariant)),
-            const SizedBox(height: 8),
-            Text('Progresja tego ćwiczenia: ${entryType.progressionMode}.',
-                style: theme.textTheme.bodySmall
-                    ?.copyWith(color: scheme.onSurfaceVariant)),
           ],
         ),
-      );
-    },
-  );
+      ),
+    );
+  }
+}
+
+/// Pigułka pewności rekomendacji.
+class _RecommendationConfidencePill extends StatelessWidget {
+  const _RecommendationConfidencePill({required this.confidence});
+
+  final double confidence;
+
+  @override
+  Widget build(BuildContext context) {
+    final theme = Theme.of(context);
+    final low = confidence < 0.5;
+    final color = low ? const Color(0xFFE08600) : theme.colorScheme.primary;
+    final label =
+        confidence >= 0.75 ? 'wysoka' : (confidence >= 0.5 ? 'średnia' : 'niska');
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 9, vertical: 4),
+      decoration: BoxDecoration(
+        color: color.withValues(alpha: 0.14),
+        borderRadius: BorderRadius.circular(99),
+        border: Border.all(color: color.withValues(alpha: 0.4)),
+      ),
+      child: Text('Pewność: $label',
+          style: theme.textTheme.labelSmall
+              ?.copyWith(fontWeight: FontWeight.w900, color: color)),
+    );
+  }
+}
+
+/// Etykieta decyzji rekomendacji (PROGRESJA / UTRZYMANIE / …).
+class _DecisionChip extends StatelessWidget {
+  const _DecisionChip({required this.decision});
+
+  final RecommendationDecision decision;
+
+  @override
+  Widget build(BuildContext context) {
+    final theme = Theme.of(context);
+    final scheme = theme.colorScheme;
+    final color = decision.lowersLoad ? const Color(0xFFE08600) : scheme.primary;
+    return Container(
+      key: const Key('recommendation_decision_chip'),
+      padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
+      decoration: BoxDecoration(
+        color: color.withValues(alpha: 0.12),
+        borderRadius: BorderRadius.circular(12),
+        border: Border.all(color: color.withValues(alpha: 0.4)),
+      ),
+      child: Row(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          Icon(
+              decision == RecommendationDecision.progress
+                  ? Icons.arrow_upward_rounded
+                  : (decision.lowersLoad
+                      ? Icons.arrow_downward_rounded
+                      : Icons.remove_rounded),
+              size: 14,
+              color: color),
+          const SizedBox(width: 6),
+          Flexible(
+            child: Text(decision.description,
+                style: theme.textTheme.labelSmall?.copyWith(
+                    fontWeight: FontWeight.w800, color: color, height: 1.25)),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+/// Jeden powód rekomendacji („+ dobra progresja", „− krótki sen").
+class _ReasonRow extends StatelessWidget {
+  const _ReasonRow({required this.bullet});
+
+  final String bullet;
+
+  @override
+  Widget build(BuildContext context) {
+    final theme = Theme.of(context);
+    final positive = bullet.startsWith('+');
+    final text = bullet.length > 1 ? bullet.substring(1).trim() : bullet;
+    final color =
+        positive ? const Color(0xFF35D07F) : theme.colorScheme.onSurfaceVariant;
+    return Padding(
+      padding: const EdgeInsets.symmetric(vertical: 3),
+      child: Row(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Icon(positive ? Icons.add_rounded : Icons.remove_rounded,
+              size: 15, color: color),
+          const SizedBox(width: 8),
+          Expanded(
+            child: Text(text,
+                style: theme.textTheme.bodyMedium?.copyWith(height: 1.35)),
+          ),
+        ],
+      ),
+    );
+  }
 }
 
 Widget _explainRow(
@@ -27156,12 +28232,31 @@ class SessionPlanLine extends StatelessWidget {
       ],
     );
     if (rx == null) return content;
+    // HIERARCHIA (spec 19): główna rekomendacja, a POD NIĄ, subtelnie, różnica
+    // względem ostatniego treningu. Szczegóły dopiero po kliknięciu.
+    final subtitle = compact ? '' : rx.deltaSummary;
     return InkWell(
       borderRadius: BorderRadius.circular(10),
       onTap: () => showRecommendationExplainSheet(context, exercise, rx),
       child: Padding(
         padding: const EdgeInsets.symmetric(vertical: 2),
-        child: content,
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            content,
+            if (subtitle.isNotEmpty)
+              Padding(
+                padding: const EdgeInsets.only(top: 2),
+                child: Text(
+                  rx.targetRir > 0 ? '$subtitle · RIR ${rx.targetRir}' : subtitle,
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
+                  style: theme.textTheme.labelSmall
+                      ?.copyWith(color: scheme.onSurfaceVariant),
+                ),
+              ),
+          ],
+        ),
       ),
     );
   }
@@ -28047,6 +29142,31 @@ class _ActiveExerciseRecoveryBanner extends StatelessWidget {
   }
 }
 
+/// Komunikat progowy timera ćwiczenia czasowego — CZYSTA funkcja (spec 14).
+///
+/// Progi liczone są ZAWSZE względem [totalSeconds], czyli EFEKTYWNEGO czasu
+/// serii w tej sesji (rekomendacja albo ręczne nadpisanie), nigdy względem
+/// `Exercise.defaultDurationSec`. To była przyczyna błędu „połowa czasu" przy
+/// 15 s, gdy ćwiczenie trwało 50 s: baza mówiła 30 s, a timer 50 s.
+String timedCoachMessage({
+  required int totalSeconds,
+  required int secondsLeft,
+  required bool running,
+}) {
+  if (!running) return 'Przygotuj się';
+  if (totalSeconds <= 0) return '';
+  if (secondsLeft <= 0) return 'Koniec';
+  if (secondsLeft <= 5) return 'Ostatnie 5 sekund';
+  if (secondsLeft <= 10) return 'Ostatnie 10 sekund';
+  if (secondsLeft >= totalSeconds) return 'Start';
+  if (secondsLeft == (totalSeconds / 2).round()) return 'Połowa czasu';
+  return '';
+}
+
+/// Sekunda, w której padnie komunikat „Połowa czasu" dla danego czasu serii.
+int halfwayMarkSeconds(int totalSeconds) =>
+    totalSeconds <= 0 ? 0 : (totalSeconds / 2).round();
+
 class ActiveExercisePlayerPage extends StatefulWidget {
   const ActiveExercisePlayerPage({super.key});
 
@@ -28139,12 +29259,33 @@ class _ActiveExercisePlayerPageState extends State<ActiveExercisePlayerPage> {
 
     if (!resting && _workRunning && _workSecondsLeft > 0) {
       _workSecondsLeft--;
+      // Sygnał dotykowy na progach liczonych z EFEKTYWNEGO czasu serii —
+      // dokładnie tych samych, które pokazuje komunikat tekstowy.
+      final active = session.currentExercise;
+      if (active != null) {
+        final exercise =
+            ExerciseRepo.byId(active.exerciseId, store.customExercises);
+        _pulseOnThreshold(effectiveSetDuration(exercise, active));
+      }
       if (_workSecondsLeft <= 0) {
         _workRunning = false;
         _completeTimedSet(store);
       }
     }
     setState(() {});
+  }
+
+  /// Krótka wibracja na progach: połowa czasu, 10 s, 5 s i koniec.
+  void _pulseOnThreshold(int totalSeconds) {
+    if (_muted || totalSeconds <= 0) return;
+    final half = (totalSeconds / 2).round();
+    if (_workSecondsLeft == half && half > 10) {
+      HapticFeedback.selectionClick();
+    } else if (_workSecondsLeft == 10 || _workSecondsLeft == 5) {
+      HapticFeedback.selectionClick();
+    } else if (_workSecondsLeft == 0) {
+      HapticFeedback.mediumImpact();
+    }
   }
 
   /// Po zakończeniu odpoczynku: odliczanie 3–2–1, a potem automatycznie kolejna
@@ -28201,7 +29342,19 @@ class _ActiveExercisePlayerPageState extends State<ActiveExercisePlayerPage> {
     }
   }
 
+  /// Czy trwa odliczanie 3–2–1 (spec: punkt 15).
+  ///
+  /// W tym oknie NIE wolno zmieniać stanu treningu: podwójny start, drugi
+  /// timer, zapis serii, przejście do kolejnego ćwiczenia. Blokada obejmuje
+  /// zarówno warstwę akcji (wyłączone przyciski), jak i warstwę wejścia
+  /// (nakładka odliczania przechwytuje dotyk), więc nie da się wejść w wyścig
+  /// przez „spamowanie" ekranu.
+  bool get _countdownLocked => _countdown > 0;
+
   void _startCountdown({bool autoStartWork = true}) {
+    // Ponowne wywołanie w trakcie odliczania nie może go zrestartować ani
+    // uruchomić drugiego przepływu startu.
+    if (_countdown > 0) return;
     _countdown = 3;
     _autoStartWork = autoStartWork;
   }
@@ -28219,6 +29372,7 @@ class _ActiveExercisePlayerPageState extends State<ActiveExercisePlayerPage> {
   }
 
   Future<void> _completeTimedSet(AppStore store) async {
+    if (_countdownLocked) return;
     final session = store.activeWorkoutSession;
     final active = session?.currentExercise;
     if (session == null || active == null) return;
@@ -28246,6 +29400,7 @@ class _ActiveExercisePlayerPageState extends State<ActiveExercisePlayerPage> {
   /// Otwiera arkusz danych serii i po zamknięciu sprawdza, czy trening
   /// właśnie się skończył (ostatnia seria ostatniego ćwiczenia).
   Future<void> _openStrengthSheet(AppStore store) async {
+    if (_countdownLocked) return;
     await showActiveStrengthSheet(context);
     if (!mounted) return;
     await _maybeAutoFinish(store);
@@ -28307,6 +29462,7 @@ class _ActiveExercisePlayerPageState extends State<ActiveExercisePlayerPage> {
   }
 
   Future<void> _openMenu(AppStore store) async {
+    if (_countdownLocked) return;
     final value = await showModalBottomSheet<String>(
       context: context,
       showDragHandle: true,
@@ -28389,6 +29545,7 @@ class _ActiveExercisePlayerPageState extends State<ActiveExercisePlayerPage> {
   /// i ustawia je z powrotem na start (seria 1, timer od początku). Nie resetuje
   /// całego treningu ani kolejki następnych ćwiczeń.
   Future<void> _confirmRestartExercise(AppStore store) async {
+    if (_countdownLocked) return;
     final session = store.activeWorkoutSession;
     final active = session?.currentExercise;
     if (session == null || active == null) return;
@@ -28506,7 +29663,10 @@ class _ActiveExercisePlayerPageState extends State<ActiveExercisePlayerPage> {
   /// Duże, półprzezroczyste cyfry 3–2–1 na środku ekranu (odliczanie przed startem).
   Widget _buildCountdownOverlay(ThemeData theme) {
     return Positioned.fill(
-      child: IgnorePointer(
+      // AbsorbPointer (a nie IgnorePointer): odliczanie ma PRZECHWYTYWAĆ dotyk,
+      // żeby żadne kliknięcie pod spodem nie zdążyło zmienić stanu ćwiczenia
+      // przed startem serii (spec 15).
+      child: AbsorbPointer(
         child: Container(
           color: theme.colorScheme.surface.withValues(alpha: 0.35),
           alignment: Alignment.center,
@@ -28700,24 +29860,28 @@ class _ActiveExercisePlayerPageState extends State<ActiveExercisePlayerPage> {
     Widget primary;
     if (allSetsDone) {
       primary = FilledButton.icon(
-        onPressed: () => _advance(store, index, total),
+        onPressed:
+            _countdownLocked ? null : () => _advance(store, index, total),
         icon: Icon(isLast ? Icons.flag_rounded : Icons.arrow_forward_rounded),
         label: Text(isLast ? 'Zakończ trening' : 'Następne ćwiczenie'),
       );
     } else if (isTimed) {
       primary = FilledButton.icon(
-        onPressed: () => setState(() => _workRunning = !_workRunning),
+        // Podczas odliczania 3–2–1 nie da się wystartować drugi raz.
+        onPressed: _countdownLocked
+            ? null
+            : () => setState(() => _workRunning = !_workRunning),
         icon:
             Icon(_workRunning ? Icons.pause_rounded : Icons.play_arrow_rounded),
         label: Text(_workRunning
             ? 'Pauza'
-            : (_workSecondsLeft >= exercise.defaultDurationSec
+            : (_workSecondsLeft >= effectiveSetDuration(exercise, active)
                 ? 'Start'
                 : 'Wznów')),
       );
     } else {
       primary = FilledButton.icon(
-        onPressed: () => _openStrengthSheet(store),
+        onPressed: _countdownLocked ? null : () => _openStrengthSheet(store),
         icon: const Icon(Icons.add_rounded),
         label: const Text('Zapisz serię'),
       );
@@ -28729,7 +29893,9 @@ class _ActiveExercisePlayerPageState extends State<ActiveExercisePlayerPage> {
     Widget? repeatQuick;
     if (!allSetsDone && !isTimed && lastSet != null) {
       repeatQuick = OutlinedButton.icon(
-        onPressed: () async {
+        onPressed: _countdownLocked
+            ? null
+            : () async {
           final saved = await store.saveActiveWorkoutSet(
             weightKg: lastSet.weightKg,
             repetitions: lastSet.repetitions,
@@ -28833,7 +29999,9 @@ class _ActiveExercisePlayerPageState extends State<ActiveExercisePlayerPage> {
           const SizedBox(height: 6),
           Center(
             child: TextButton.icon(
-              onPressed: () => _editTimedDuration(store, exercise, active),
+              onPressed: _countdownLocked
+                  ? null
+                  : () => _editTimedDuration(store, exercise, active),
               icon: const Icon(Icons.timer_outlined, size: 18),
               label: Text('Zmień czas ($_workSecondsLeft s)'),
             ),
@@ -28849,10 +30017,12 @@ class _ActiveExercisePlayerPageState extends State<ActiveExercisePlayerPage> {
         Row(
           mainAxisAlignment: MainAxisAlignment.spaceEvenly,
           children: [
+            // Wszystkie kontrolki zmieniające stan treningu milkną na czas
+            // odliczania 3–2–1 (spec 15) — po „START" wracają.
             _RoundControl(
               icon: Icons.skip_previous_rounded,
               label: 'Poprzedni',
-              onPressed: index <= 0
+              onPressed: index <= 0 || _countdownLocked
                   ? null
                   : () => store.selectActiveWorkoutExercise(index - 1),
             ),
@@ -28862,13 +30032,15 @@ class _ActiveExercisePlayerPageState extends State<ActiveExercisePlayerPage> {
               _RoundControl(
                 icon: Icons.replay_rounded,
                 label: 'Powtórz',
-                onPressed: () => _confirmRestartExercise(store),
+                onPressed: _countdownLocked
+                    ? null
+                    : () => _confirmRestartExercise(store),
               )
             else
               _RoundControl(
                 icon: Icons.skip_next_rounded,
                 label: 'Pomiń',
-                onPressed: active.isSkipped
+                onPressed: active.isSkipped || _countdownLocked
                     ? null
                     : () async {
                         await store.moveToNextActiveExercise(skipCurrent: true);
@@ -28882,12 +30054,14 @@ class _ActiveExercisePlayerPageState extends State<ActiveExercisePlayerPage> {
               _RoundControl(
                 icon: Icons.fitness_center_rounded,
                 label: 'Dane',
-                onPressed: () => _openStrengthSheet(store),
+                onPressed:
+                    _countdownLocked ? null : () => _openStrengthSheet(store),
               ),
             _RoundControl(
               icon: isLast ? Icons.flag_rounded : Icons.arrow_forward_rounded,
               label: isLast ? 'Zakończ' : 'Następne',
-              onPressed: () => _advance(store, index, total),
+              onPressed:
+                  _countdownLocked ? null : () => _advance(store, index, total),
             ),
           ],
         ),
@@ -28896,6 +30070,7 @@ class _ActiveExercisePlayerPageState extends State<ActiveExercisePlayerPage> {
   }
 
   Future<void> _advance(AppStore store, int index, int total) async {
+    if (_countdownLocked) return;
     if (index >= total - 1) {
       // Trening normalnie ukończony → prosto do podsumowania, bez dialogu.
       if (store.isActiveWorkoutComplete) {
@@ -28916,7 +30091,8 @@ class _ActiveExercisePlayerPageState extends State<ActiveExercisePlayerPage> {
     Exercise exercise,
     ActiveWorkoutExercise active,
   ) async {
-    final current = active.effectiveDurationSec(exercise.defaultDurationSec);
+    if (_countdownLocked) return;
+    final current = effectiveSetDuration(exercise, active);
     final controller = TextEditingController(text: '$current');
     final result = await showDialog<int>(
       context: context,
@@ -28956,16 +30132,25 @@ class _ActiveExercisePlayerPageState extends State<ActiveExercisePlayerPage> {
     });
   }
 
+  /// JEDNO ŹRÓDŁO PRAWDY o czasie serii w tej sesji (spec: punkt 14).
+  ///
+  /// PROBLEM, KTÓRY TO ROZWIĄZUJE: ćwiczenie miało `defaultDurationSec = 30`,
+  /// a rekomendacja zmieniała czas na 50 s. Timer odliczał poprawnie z 50 s,
+  /// ale komunikat „połowa czasu" liczył się nadal z bazowych 30 s — pojawiał
+  /// się przy 15 s zamiast przy 25 s. Wszystkie elementy sesji (timer, postęp,
+  /// komunikaty, zapis, podsumowanie) muszą czytać TĘ SAMĄ wartość.
+  int effectiveSetDuration(Exercise exercise, ActiveWorkoutExercise active) =>
+      active.effectiveDurationSec(exercise.defaultDurationSec);
+
   String _coachMessage(Exercise exercise, ActiveWorkoutExercise active,
       bool isTimed, bool allSetsDone) {
     if (allSetsDone) return 'Gotowe';
     if (!isTimed) return '';
-    final total = exercise.defaultDurationSec;
-    if (!_workRunning) return 'Przygotuj się';
-    if (_workSecondsLeft <= 10) return 'Ostatnie 10 sekund';
-    if (_workSecondsLeft >= total) return 'Start';
-    if (_workSecondsLeft == (total / 2).round()) return 'Połowa czasu';
-    return '';
+    return timedCoachMessage(
+      totalSeconds: effectiveSetDuration(exercise, active),
+      secondsLeft: _workSecondsLeft,
+      running: _workRunning,
+    );
   }
 
   Widget _buildRestState(
@@ -29556,14 +30741,16 @@ const Color kRecoveryUnknownColor = Color(0xFF8A8F98);
 Color recoveryColor(double? recoveryPercent, {bool dark = false}) {
   if (recoveryPercent == null) return kRecoveryUnknownColor;
   final p = recoveryPercent;
+  // Progi zgodne z [recoveryStatusForPercent] — kolor i opis statusu MUSZĄ
+  // mówić to samo (spec 20).
   late final Color base;
-  if (p <= 20) {
+  if (p < 35) {
     base = const Color(0xFFFF3B30);
-  } else if (p <= 40) {
+  } else if (p < 55) {
     base = const Color(0xFFFF6B2C);
-  } else if (p <= 60) {
+  } else if (p < 75) {
     base = const Color(0xFFFFB020);
-  } else if (p <= 80) {
+  } else if (p < 90) {
     base = const Color(0xFFB7E75A);
   } else {
     base = const Color(0xFF35D07F);
@@ -29797,113 +30984,458 @@ String _formatRecoveryAgo(DateTime time, [DateTime? now]) {
   return '${diff.inDays} dni temu';
 }
 
-/// Bottom sheet ze szczegółami regeneracji partii mięśniowej. Etap regeneracji.
+/// Bottom sheet ze szczegółami GOTOWOŚCI partii mięśniowej (spec: punkt 20).
+///
+/// Na mapie pokazujemy jedną liczbę i kolor; tutaj — z czego ona wynika:
+/// składowe regeneracji, gotowość do różnych rodzajów treningu, najważniejsze
+/// powody, pewność prognozy i szacowany czas do wysokiej gotowości.
 Future<void> showMuscleRecoverySheet(
     BuildContext context, BodyMuscle muscle, MuscleRecoveryState? state) async {
   await showModalBottomSheet<void>(
     context: context,
+    isScrollControlled: true,
+    useSafeArea: true,
     showDragHandle: true,
-    builder: (sheetContext) {
-      final theme = Theme.of(sheetContext);
-      final dark = theme.brightness == Brightness.dark;
-      final s = state ?? MuscleRecoveryState.unknown(muscle);
-      final color = recoveryColor(s.recoveryPercent, dark: dark);
-      Widget row(String label, String value) => Padding(
-            padding: const EdgeInsets.symmetric(vertical: 4),
-            child: Row(
+    builder: (sheetContext) =>
+        _MuscleReadinessSheet(muscle: muscle, state: state),
+  );
+}
+
+class _MuscleReadinessSheet extends StatefulWidget {
+  const _MuscleReadinessSheet({required this.muscle, required this.state});
+
+  final BodyMuscle muscle;
+  final MuscleRecoveryState? state;
+
+  @override
+  State<_MuscleReadinessSheet> createState() => _MuscleReadinessSheetState();
+}
+
+class _MuscleReadinessSheetState extends State<_MuscleReadinessSheet> {
+  bool _detailsExpanded = false;
+
+  @override
+  Widget build(BuildContext context) {
+    final theme = Theme.of(context);
+    final scheme = theme.colorScheme;
+    final dark = theme.brightness == Brightness.dark;
+    final s = widget.state ?? MuscleRecoveryState.unknown(widget.muscle);
+    final detail = s.readiness;
+    final percent = s.recoveryPercent;
+    final color = recoveryColor(percent, dark: dark);
+
+    Widget row(String label, String value, {Color? valueColor}) => Padding(
+          padding: const EdgeInsets.symmetric(vertical: 4),
+          child: Row(
+            children: [
+              Expanded(
+                child: Text(label,
+                    style: theme.textTheme.bodyMedium
+                        ?.copyWith(color: scheme.onSurfaceVariant)),
+              ),
+              Text(value,
+                  style: theme.textTheme.bodyMedium?.copyWith(
+                      fontWeight: FontWeight.w800, color: valueColor)),
+            ],
+          ),
+        );
+
+    return SafeArea(
+      top: false,
+      child: SingleChildScrollView(
+        padding:
+            sheetContentInsets(context, const EdgeInsets.fromLTRB(20, 4, 20, 20)),
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          crossAxisAlignment: CrossAxisAlignment.stretch,
+          children: [
+            Row(
               children: [
-                Text(label,
-                    style: theme.textTheme.bodyMedium
-                        ?.copyWith(color: theme.colorScheme.onSurfaceVariant)),
-                const Spacer(),
-                Text(value,
-                    style: theme.textTheme.bodyMedium
-                        ?.copyWith(fontWeight: FontWeight.w800)),
+                Container(
+                    width: 16,
+                    height: 16,
+                    decoration:
+                        BoxDecoration(color: color, shape: BoxShape.circle)),
+                const SizedBox(width: 10),
+                Expanded(
+                    child: Text(widget.muscle.label,
+                        style: theme.textTheme.titleLarge
+                            ?.copyWith(fontWeight: FontWeight.w900))),
+                if (detail != null)
+                  _ReadinessConfidencePill(confidence: detail.confidence),
               ],
             ),
-          );
-      return SafeArea(
-        child: Padding(
-          padding: const EdgeInsets.fromLTRB(20, 4, 20, 20),
-          child: Column(
-            mainAxisSize: MainAxisSize.min,
-            crossAxisAlignment: CrossAxisAlignment.stretch,
-            children: [
-              Row(
-                children: [
-                  Container(
-                      width: 16,
-                      height: 16,
-                      decoration:
-                          BoxDecoration(color: color, shape: BoxShape.circle)),
-                  const SizedBox(width: 10),
-                  Expanded(
-                      child: Text(muscle.label,
-                          style: theme.textTheme.titleLarge
-                              ?.copyWith(fontWeight: FontWeight.w900))),
-                ],
-              ),
-              const SizedBox(height: 14),
-              row(
-                  'Regeneracja',
-                  s.recoveryPercent == null
-                      ? '—'
-                      : '${s.recoveryPercent!.round()}%'),
-              const SizedBox(height: 4),
-              ClipRRect(
-                borderRadius: BorderRadius.circular(8),
-                child: LinearProgressIndicator(
-                  value: (s.recoveryPercent ?? 0) / 100,
-                  minHeight: 8,
-                  backgroundColor: theme.colorScheme.surfaceContainerHighest,
-                  valueColor: AlwaysStoppedAnimation<Color>(color),
+            const SizedBox(height: 14),
+
+            // GOTOWOŚĆ OGÓLNA — jedna liczba na wierzchu.
+            Row(
+              crossAxisAlignment: CrossAxisAlignment.baseline,
+              textBaseline: TextBaseline.alphabetic,
+              children: [
+                Text(percent == null ? '—' : '${percent.round()}%',
+                    key: const Key('muscle_readiness_percent'),
+                    style: theme.textTheme.displaySmall?.copyWith(
+                        fontWeight: FontWeight.w900, height: 1, color: color)),
+                const SizedBox(width: 10),
+                Expanded(
+                  child: Text('gotowość ogólna',
+                      style: theme.textTheme.bodyMedium
+                          ?.copyWith(color: scheme.onSurfaceVariant)),
                 ),
+              ],
+            ),
+            const SizedBox(height: 8),
+            ClipRRect(
+              borderRadius: BorderRadius.circular(8),
+              child: LinearProgressIndicator(
+                value: (percent ?? 0) / 100,
+                minHeight: 8,
+                backgroundColor: scheme.surfaceContainerHighest,
+                valueColor: AlwaysStoppedAnimation<Color>(color),
               ),
-              const SizedBox(height: 8),
-              row('Status', s.statusLabel),
-              if (s.lastTrainedAt != null)
-                row('Ostatnio trenowane', _formatRecoveryAgo(s.lastTrainedAt!)),
-              if (s.hasData)
-                row(
-                    'Do pełnej regeneracji',
-                    s.estimatedHoursRemaining <= 0
-                        ? 'gotowe'
-                        : '~${s.estimatedHoursRemaining} h'),
-              if (s.lastExerciseNames.isNotEmpty) ...[
-                const SizedBox(height: 10),
-                Text('Obciążające ćwiczenia',
+            ),
+            const SizedBox(height: 10),
+            Text(detail?.headline ?? recoverySuggestionForMuscle(s),
+                style: theme.textTheme.bodyMedium?.copyWith(height: 1.35)),
+
+            // GOTOWOŚĆ WEDŁUG RODZAJU TRENINGU (spec 3).
+            if (detail != null) ...[
+              const SizedBox(height: 18),
+              Text('Gotowość do konkretnego treningu',
+                  style: theme.textTheme.titleSmall
+                      ?.copyWith(fontWeight: FontWeight.w900)),
+              const SizedBox(height: 6),
+              for (final kind in TrainingStimulusKind.values)
+                _StimulusReadinessRow(
+                  label: kind.label,
+                  percent: detail.readinessFor(kind),
+                ),
+              const SizedBox(height: 18),
+
+              // SKŁADOWE STANU.
+              Text('Z czego to wynika',
+                  style: theme.textTheme.titleSmall
+                      ?.copyWith(fontWeight: FontWeight.w900)),
+              const SizedBox(height: 6),
+              _ReadinessComponentBar(
+                  label: 'Zmęczenie lokalne', value: detail.localFatigue),
+              _ReadinessComponentBar(
+                  label: 'Regeneracja nerwowo-mięśniowa',
+                  value: detail.neuromuscular),
+              _ReadinessComponentBar(
+                  label: 'Regeneracja strukturalna', value: detail.structural),
+              _ReadinessComponentBar(
+                  label: 'Zasoby energetyczne', value: detail.energy),
+
+              if (detail.reasons.isNotEmpty) ...[
+                const SizedBox(height: 16),
+                Text('Najważniejsze powody',
                     style: theme.textTheme.titleSmall
                         ?.copyWith(fontWeight: FontWeight.w900)),
                 const SizedBox(height: 4),
-                Text(s.lastExerciseNames.join(' · '),
-                    style: theme.textTheme.bodyMedium
-                        ?.copyWith(color: theme.colorScheme.onSurfaceVariant)),
+                for (final reason in detail.reasons.take(4))
+                  _ReasonRow(
+                      bullet: '${reason.positive ? '+' : '-'}${reason.label}'),
               ],
-              const SizedBox(height: 14),
-              Container(
-                padding: const EdgeInsets.all(14),
-                decoration: BoxDecoration(
-                  color:
-                      theme.colorScheme.primaryContainer.withValues(alpha: 0.4),
-                  borderRadius: BorderRadius.circular(16),
-                ),
-                child: Row(
-                  children: [
-                    Icon(Icons.tips_and_updates_outlined,
-                        color: theme.colorScheme.primary),
-                    const SizedBox(width: 10),
-                    Expanded(
-                        child: Text(recoverySuggestionForMuscle(s),
-                            style: theme.textTheme.bodyMedium)),
-                  ],
+            ],
+
+            const SizedBox(height: 16),
+            if (s.lastTrainedAt != null)
+              row('Ostatni bodziec', _formatRecoveryAgo(s.lastTrainedAt!)),
+            if (s.intensityLabel.isNotEmpty)
+              row('Charakter bodźca', s.intensityLabel),
+            if (s.hasData)
+              // NAZWA JEST WAŻNA (spec 20/24): model nie wie, kiedy mięsień
+              // będzie „całkowicie zregenerowany" — szacuje, kiedy wróci do
+              // WYSOKIEJ gotowości.
+              row(
+                  'Szacowany czas do wysokiej gotowości',
+                  s.estimatedHoursRemaining <= 0
+                      ? 'osiągnięta'
+                      : '~${s.estimatedHoursRemaining} h'),
+            if (detail != null && detail.systemicFatigue > 0.3)
+              row('Zmęczenie ogólne organizmu',
+                  '${(detail.systemicFatigue * 100).round()}%'),
+
+            if (s.lastExerciseNames.isNotEmpty) ...[
+              const SizedBox(height: 10),
+              Text('Obciążające ćwiczenia',
+                  style: theme.textTheme.titleSmall
+                      ?.copyWith(fontWeight: FontWeight.w900)),
+              const SizedBox(height: 4),
+              Text(s.lastExerciseNames.join(' · '),
+                  style: theme.textTheme.bodyMedium
+                      ?.copyWith(color: scheme.onSurfaceVariant)),
+            ],
+
+            const SizedBox(height: 14),
+            Container(
+              padding: const EdgeInsets.all(14),
+              decoration: BoxDecoration(
+                color: scheme.primaryContainer.withValues(alpha: 0.4),
+                borderRadius: BorderRadius.circular(16),
+              ),
+              child: Row(
+                children: [
+                  Icon(Icons.tips_and_updates_outlined, color: scheme.primary),
+                  const SizedBox(width: 10),
+                  Expanded(
+                      child: Text(recoverySuggestionForMuscle(s),
+                          style: theme.textTheme.bodyMedium)),
+                ],
+              ),
+            ),
+            const SizedBox(height: 12),
+            Text(
+              'To są SZACUNKI modelu, nie pomiar. Trainer nie bada CK, glikogenu '
+              'ani syntezy białek — modeluje stan na podstawie treningów, czasu '
+              'i dostępnych danych o śnie oraz odżywianiu.',
+              style: theme.textTheme.bodySmall?.copyWith(
+                  color: scheme.onSurfaceVariant,
+                  height: 1.35,
+                  fontStyle: FontStyle.italic),
+            ),
+
+            // PANEL DEWELOPERSKI (spec 33) — wyłącznie w debug mode.
+            if (kDebugMode && detail != null) ...[
+              const SizedBox(height: 12),
+              InkWell(
+                key: const Key('recovery_debug_toggle'),
+                onTap: () =>
+                    setState(() => _detailsExpanded = !_detailsExpanded),
+                child: Padding(
+                  padding: const EdgeInsets.symmetric(vertical: 6),
+                  child: Row(
+                    children: [
+                      Icon(Icons.bug_report_outlined,
+                          size: 16, color: scheme.onSurfaceVariant),
+                      const SizedBox(width: 6),
+                      Text('Panel diagnostyczny (debug)',
+                          style: theme.textTheme.labelMedium?.copyWith(
+                              fontWeight: FontWeight.w800,
+                              color: scheme.onSurfaceVariant)),
+                      const Spacer(),
+                      Icon(
+                          _detailsExpanded
+                              ? Icons.expand_less_rounded
+                              : Icons.expand_more_rounded,
+                          size: 18,
+                          color: scheme.onSurfaceVariant),
+                    ],
+                  ),
                 ),
               ),
+              if (_detailsExpanded)
+                _RecoveryDebugPanel(muscle: widget.muscle, readiness: detail),
             ],
-          ),
+          ],
         ),
-      );
-    },
-  );
+      ),
+    );
+  }
+}
+
+/// Wiersz „gotowość do danego rodzaju treningu".
+class _StimulusReadinessRow extends StatelessWidget {
+  const _StimulusReadinessRow({required this.label, required this.percent});
+
+  final String label;
+  final double percent;
+
+  @override
+  Widget build(BuildContext context) {
+    final theme = Theme.of(context);
+    final color =
+        recoveryColor(percent, dark: theme.brightness == Brightness.dark);
+    return Padding(
+      padding: const EdgeInsets.symmetric(vertical: 3),
+      child: Row(
+        children: [
+          Expanded(
+            child: Text(label,
+                maxLines: 1,
+                overflow: TextOverflow.ellipsis,
+                style: theme.textTheme.bodyMedium),
+          ),
+          const SizedBox(width: 8),
+          SizedBox(
+            width: 74,
+            child: ClipRRect(
+              borderRadius: BorderRadius.circular(6),
+              child: LinearProgressIndicator(
+                value: (percent / 100).clamp(0.0, 1.0),
+                minHeight: 6,
+                backgroundColor: theme.colorScheme.surfaceContainerHighest,
+                valueColor: AlwaysStoppedAnimation<Color>(color),
+              ),
+            ),
+          ),
+          const SizedBox(width: 8),
+          SizedBox(
+            width: 40,
+            child: Text('${percent.round()}%',
+                textAlign: TextAlign.right,
+                style: theme.textTheme.bodySmall
+                    ?.copyWith(fontWeight: FontWeight.w900, color: color)),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+/// Pasek jednej składowej stanu mięśnia (0–1 → 0–100%).
+class _ReadinessComponentBar extends StatelessWidget {
+  const _ReadinessComponentBar({required this.label, required this.value});
+
+  final String label;
+  final double value;
+
+  @override
+  Widget build(BuildContext context) {
+    final theme = Theme.of(context);
+    final percent = (value * 100).clamp(0.0, 100.0);
+    final color =
+        recoveryColor(percent, dark: theme.brightness == Brightness.dark);
+    return Padding(
+      padding: const EdgeInsets.symmetric(vertical: 3),
+      child: Row(
+        children: [
+          Expanded(
+            child: Text(label,
+                maxLines: 1,
+                overflow: TextOverflow.ellipsis,
+                style: theme.textTheme.bodySmall
+                    ?.copyWith(color: theme.colorScheme.onSurfaceVariant)),
+          ),
+          const SizedBox(width: 8),
+          SizedBox(
+            width: 74,
+            child: ClipRRect(
+              borderRadius: BorderRadius.circular(6),
+              child: LinearProgressIndicator(
+                value: percent / 100,
+                minHeight: 5,
+                backgroundColor: theme.colorScheme.surfaceContainerHighest,
+                valueColor: AlwaysStoppedAnimation<Color>(color),
+              ),
+            ),
+          ),
+          const SizedBox(width: 8),
+          SizedBox(
+            width: 40,
+            child: Text('${percent.round()}%',
+                textAlign: TextAlign.right,
+                style: theme.textTheme.bodySmall
+                    ?.copyWith(fontWeight: FontWeight.w800)),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+/// Pigułka pewności prognozy gotowości.
+class _ReadinessConfidencePill extends StatelessWidget {
+  const _ReadinessConfidencePill({required this.confidence});
+
+  final double confidence;
+
+  @override
+  Widget build(BuildContext context) {
+    final theme = Theme.of(context);
+    final low = confidence < 0.5;
+    final color = low ? const Color(0xFFE08600) : theme.colorScheme.primary;
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 3),
+      decoration: BoxDecoration(
+        color: color.withValues(alpha: 0.14),
+        borderRadius: BorderRadius.circular(99),
+        border: Border.all(color: color.withValues(alpha: 0.4)),
+      ),
+      child: Text('Pewność ${(confidence * 100).round()}%',
+          style: theme.textTheme.labelSmall
+              ?.copyWith(fontWeight: FontWeight.w900, color: color)),
+    );
+  }
+}
+
+/// Panel diagnostyczny modelu regeneracji (spec: punkt 33).
+///
+/// Widoczny WYŁĄCZNIE w kompilacji debug — zwykły użytkownik go nie zobaczy.
+/// Pokazuje surowe wartości, na których pracuje silnik, żeby dało się dostrajać
+/// model bez zgadywania.
+class _RecoveryDebugPanel extends StatelessWidget {
+  const _RecoveryDebugPanel({required this.muscle, required this.readiness});
+
+  final BodyMuscle muscle;
+  final MuscleReadiness readiness;
+
+  @override
+  Widget build(BuildContext context) {
+    final theme = Theme.of(context);
+    final store = AppScope.of(context);
+    final profile = muscleRecoveryProfile(muscle);
+    final calibration = store.recoveryCalibration.forMuscle(muscle);
+    final computation = store.recoveryComputation();
+    final environment = store.recoveryEnvironment();
+    String f(double value) => value.toStringAsFixed(3);
+
+    final lines = <String>[
+      'muscle: ${muscle.key}',
+      'localFatigue: ${f(readiness.localFatigue)}',
+      'neuromuscular: ${f(readiness.neuromuscular)}',
+      'structural: ${f(readiness.structural)}',
+      'energy: ${f(readiness.energy)}',
+      'remodelling: ${f(readiness.remodelling)}',
+      'subjective: ${f(readiness.subjective)}',
+      'adaptation/familiarity: ${f(readiness.adaptation)}',
+      'systemicFatigue: ${f(readiness.systemicFatigue)}',
+      'accumulatedLoad: ${f(readiness.accumulatedLoad)}',
+      'totalStimulusUnits: ${f(readiness.totalStimulus)}',
+      'lastStimulusUnits: ${f(readiness.lastStimulusMagnitude)}',
+      'tau local/neural/struct/energy: '
+          '${profile.localTauHours}/${profile.neuralTauHours}/'
+          '${profile.structuralTauHours}/${profile.energyTauHours} h',
+      'sizeScale: ${f(profile.sizeScale)}',
+      'profileFactor: ${f(store.settings.toRecoveryProfile().recoveryFactor)}',
+      'calibration.tauScale: ${f(calibration.effectiveScale)} '
+          '(obs. ${calibration.observations})',
+      'sleepFactor: ${f(environment.sleepFactor)}',
+      'energyFactor: ${f(environment.energyFactor)}',
+      'proteinFactor: ${f(environment.proteinFactor)}',
+      'acute/chronic: ${f(computation.acuteChronic.ratio)} '
+          '(baseline: ${computation.acuteChronic.hasBaseline})',
+      'confidence: ${f(readiness.confidence)}',
+      'finalReadiness: ${f(readiness.readinessPercent)}',
+    ];
+
+    return Container(
+      key: const Key('recovery_debug_panel'),
+      padding: const EdgeInsets.all(12),
+      decoration: BoxDecoration(
+        color: theme.colorScheme.surfaceContainerHighest.withValues(alpha: 0.6),
+        borderRadius: BorderRadius.circular(12),
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          for (final line in lines)
+            Text(line,
+                style: theme.textTheme.bodySmall?.copyWith(
+                    fontFamily: 'monospace', fontSize: 11, height: 1.35)),
+          if (computation.confidenceInputs.isNotEmpty)
+            Text('inputs: ${computation.confidenceInputs.join(', ')}',
+                style: theme.textTheme.bodySmall?.copyWith(
+                    fontFamily: 'monospace', fontSize: 11, height: 1.35)),
+          if (computation.missingInputs.isNotEmpty)
+            Text('missing: ${computation.missingInputs.join(', ')}',
+                style: theme.textTheme.bodySmall?.copyWith(
+                    fontFamily: 'monospace', fontSize: 11, height: 1.35)),
+        ],
+      ),
+    );
+  }
 }
 
 /// Przełącznik widoku Przód / Tył modelu.
@@ -29928,6 +31460,83 @@ class _BodySideToggle extends StatelessWidget {
       ],
       selected: {side},
       onSelectionChanged: (selection) => onChanged(selection.first),
+    );
+  }
+}
+
+/// Karta sygnałów deloadu (spec: punkt 27).
+///
+/// Deload NIE wynika z jednego słabego dnia — karta pokazuje się dopiero wtedy,
+/// gdy zbiegnie się kilka niezależnych sygnałów (spadki wydajności, wysoki
+/// wysiłek, wiele partii o niskiej gotowości, skok obciążenia tygodnia,
+/// zmęczenie ogólne). To rekomendacja, nie automatyczne przełączenie cyklu.
+class DeloadSignalsCard extends StatelessWidget {
+  const DeloadSignalsCard({super.key});
+
+  @override
+  Widget build(BuildContext context) {
+    final store = AppScope.of(context);
+    final signals = store.deloadSignalsNow();
+    if (!signals.isCandidate && !signals.isWatch) {
+      return const SizedBox.shrink();
+    }
+    final theme = Theme.of(context);
+    final scheme = theme.colorScheme;
+    final strong = signals.isCandidate;
+    final color = strong ? kDeloadColor : scheme.onSurfaceVariant;
+    return Container(
+      key: const Key('deload_signals_card'),
+      margin: const EdgeInsets.only(bottom: 16),
+      padding: const EdgeInsets.all(14),
+      decoration: BoxDecoration(
+        color: color.withValues(alpha: 0.10),
+        borderRadius: BorderRadius.circular(16),
+        border: Border.all(color: color.withValues(alpha: 0.45)),
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Row(
+            children: [
+              Icon(Icons.self_improvement_rounded, size: 18, color: color),
+              const SizedBox(width: 8),
+              Expanded(
+                child: Text(
+                  strong
+                      ? 'Sygnały przemawiają za deloadem'
+                      : 'Warto obserwować obciążenie',
+                  style: theme.textTheme.titleSmall
+                      ?.copyWith(fontWeight: FontWeight.w900, color: color),
+                ),
+              ),
+            ],
+          ),
+          const SizedBox(height: 6),
+          for (final reason in signals.reasons.take(4))
+            Padding(
+              padding: const EdgeInsets.symmetric(vertical: 2),
+              child: Row(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  const Text('• '),
+                  Expanded(
+                      child: Text(reason,
+                          style: theme.textTheme.bodySmall
+                              ?.copyWith(height: 1.3))),
+                ],
+              ),
+            ),
+          const SizedBox(height: 6),
+          Text(
+            strong
+                ? 'Trainer rekomenduje tydzień odciążenia. Decyzję podejmujesz Ty — '
+                    'możesz też po prostu zejść z objętości w kolejnych treningach.'
+                : 'To jeszcze nie deload — jeden słaby dzień niczego nie przesądza.',
+            style: theme.textTheme.bodySmall
+                ?.copyWith(color: scheme.onSurfaceVariant, height: 1.3),
+          ),
+        ],
+      ),
     );
   }
 }
@@ -29959,10 +31568,11 @@ class RecoveryLegend extends StatelessWidget {
       runSpacing: 8,
       children: [
         chip(kRecoveryUnknownColor, 'Brak danych'),
-        chip(recoveryColor(10, dark: dark), 'Zmęczone'),
-        chip(recoveryColor(50, dark: dark), 'W toku'),
-        chip(recoveryColor(70, dark: dark), 'Prawie'),
-        chip(recoveryColor(95, dark: dark), 'Gotowe'),
+        chip(recoveryColor(20, dark: dark), 'Bardzo niska'),
+        chip(recoveryColor(45, dark: dark), 'Niska'),
+        chip(recoveryColor(65, dark: dark), 'Umiarkowana'),
+        chip(recoveryColor(80, dark: dark), 'Dobra'),
+        chip(recoveryColor(95, dark: dark), 'Bardzo dobra'),
       ],
     );
   }
@@ -30228,8 +31838,12 @@ class RecoveryWarningBanner extends StatelessWidget {
   }
 }
 
-/// Sprawdza regenerację przed startem zestawu i — jeśli któraś partia jest mocno
-/// zmęczona — prosi o potwierdzenie. Zwraca `true`, gdy można startować.
+/// Pokazuje INFORMACJĘ o obniżonej gotowości przed startem zestawu.
+///
+/// ZASADA PRODUKTOWA (spec 34): advisor, not jailer. To okno nigdy nie służy do
+/// zablokowania treningu — domyślną, wyróżnioną akcją jest „Trenuj", a Trainer
+/// jedynie mówi, czego się spodziewać i co rekomenduje. Zwraca `true`, gdy
+/// użytkownik chce startować.
 Future<bool> confirmRecoveryBeforeStart(
     BuildContext context, Iterable<Exercise> exercises) async {
   final store = AppScope.read(context);
@@ -30244,18 +31858,19 @@ Future<bool> confirmRecoveryBeforeStart(
   final proceed = await showDialog<bool>(
     context: context,
     builder: (dialogContext) => AlertDialog(
-      title: const Text('Partie jeszcze w regeneracji'),
+      title: const Text('Obniżona gotowość partii'),
       content: Text(
-        'Te partie nie są w pełni zregenerowane: $list.\n\n'
-        'Trening teraz może spowolnić regenerację i zwiększyć ryzyko przeciążenia. Chcesz mimo to trenować?',
+        'Szacowana gotowość: $list.\n\n'
+        'Możesz trenować — Trainer rekomenduje mniejszą objętość albo lżejszą '
+        'wersję zestawu. To szacunek modelu, nie pomiar.',
       ),
       actions: [
         TextButton(
             onPressed: () => Navigator.pop(dialogContext, false),
-            child: const Text('Anuluj')),
+            child: const Text('Jednak nie teraz')),
         FilledButton(
             onPressed: () => Navigator.pop(dialogContext, true),
-            child: const Text('Trenuj mimo to')),
+            child: const Text('Trenuj')),
       ],
     ),
   );
@@ -30353,6 +31968,7 @@ class _MuscleRecoveryPageState extends State<MuscleRecoveryPage> {
             const SizedBox(height: 12),
             const RecoveryLegend(),
             const SizedBox(height: 16),
+            const DeloadSignalsCard(),
             Container(
               padding: const EdgeInsets.all(14),
               decoration: BoxDecoration(

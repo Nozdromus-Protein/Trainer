@@ -1,5 +1,7 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
+import 'package:licznik_treningu/features/trainer/application/training_schedule.dart';
+import 'package:licznik_treningu/features/trainer/application/weekly_training_planner.dart';
 import 'package:licznik_treningu/features/trainer/domain/deload_cycle.dart';
 import 'package:licznik_treningu/features/trainer/domain/trainer_models.dart';
 import 'package:licznik_treningu/main.dart';
@@ -15,6 +17,15 @@ Future<AppStore> _store(DateTime deloadStart) async {
   // Trenujemy każdego dnia tygodnia — rzutowanie dnia programu zawsze wypada.
   await store.updateSettings(
       store.settings.copyWith(trainingWeekdays: [1, 2, 3, 4, 5, 6, 7]));
+  // Rozkład PINUJEMY na NOGI w każdym dniu tygodnia. Bez tego test zależał od
+  // dnia, w którym jest uruchamiany: w domyślnej rotacji Push/Pull/Legs data
+  // „dziś + 10" wypadała czasem na dzień CIĄGNIĘCIA, którego zestaw z tego
+  // testu (przysiad + pompka) w ogóle nie pokrywa — wtedy podgląd dnia nie miał
+  // czego pokazać i asercje leciały bez związku ze zmianą w kodzie.
+  for (var weekday = 1; weekday <= 7; weekday++) {
+    await store.setWeekdayPlan(
+        weekday, const TrainingDayPlan(primary: TrainingFocusArea.legs));
+  }
   await store.addWorkoutPlan(WorkoutPlan(
     id: 'preview-plan',
     name: 'Program testowy',

@@ -255,13 +255,18 @@ void main() {
             ? 88
             : readiness(area, d);
 
-    // Bez wyłączenia partii wspólnych dodatek wypadał z dnia…
+    // Dodatek dnia ZOSTAJE w obu wariantach (spec 12 — regeneracja ostrzega,
+    // nie kasuje zestawu). Różnica jest w OSTRZEŻENIU: bez wyłączenia partii
+    // wspólnych barki wyglądają na wykończone i dostają czerwony trójkąt…
     final naive = resolveScheduleWithRecovery(schedule, readiness);
-    expect(naive.single.secondaryArea, isNull);
+    expect(naive.single.secondaryArea, TrainingFocusArea.shoulders);
+    expect(naive.single.hasSecondaryWarning, isTrue);
 
-    // …a z nim zostaje.
+    // …a po wyłączeniu partii, które i tak obciąża dziś blok główny, dodatek
+    // idzie bez żadnej uwagi.
     final fixed = resolveScheduleWithRecovery(schedule, readiness,
         readinessIgnoring: readinessIgnoring);
     expect(fixed.single.secondaryArea, TrainingFocusArea.shoulders);
+    expect(fixed.single.hasSecondaryWarning, isFalse);
   });
 }
